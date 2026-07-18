@@ -1,0 +1,254 @@
+.stage {
+  position: relative;
+  flex: 0 0 auto;
+  contain: layout paint;
+  overflow: hidden;
+  transform-origin: center;
+  will-change: transform;
+  cursor: grab;
+}
+
+.stage.dragging {
+  cursor: grabbing;
+  transition: none !important;
+}
+
+.stage img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  transform: none !important;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.stage .original {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.stage .preview {
+  opacity: 1;
+  transition: none;
+}
+
+dialog#lightbox {
+  --dismiss-progress: 0;
+  height: 100dvh;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(40, 39, 35, calc(.26 * (1 - var(--dismiss-progress)))), transparent 62%),
+    rgba(7, 8, 8, calc(.38 * (1 - var(--dismiss-progress))));
+  -webkit-backdrop-filter: blur(20px) saturate(.72) brightness(.72);
+  backdrop-filter: blur(20px) saturate(.72) brightness(.72);
+  transition: background 220ms ease-out;
+}
+
+dialog#lightbox::backdrop {
+  background: rgba(5, 6, 6, calc(.16 * (1 - var(--dismiss-progress))));
+  transition: background 280ms ease-out;
+}
+
+dialog#lightbox.closing {
+  background: rgba(7, 8, 8, 0);
+  -webkit-backdrop-filter: blur(0) saturate(1) brightness(1);
+  backdrop-filter: blur(0) saturate(1) brightness(1);
+}
+
+dialog#lightbox.closing::backdrop {
+  background: rgba(5, 6, 6, 0);
+}
+
+#lightbox figure {
+  padding: .75vh .5vw;
+}
+
+#lightbox figure::before,
+#lightbox figure::after {
+  display: none;
+}
+
+#lightbox .stage {
+  border-radius: 3px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .38);
+}
+
+#lightbox .close,
+#lightbox .nav {
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(18, 19, 19, .58);
+  color: rgba(255, 255, 255, .86);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+  backdrop-filter: blur(14px);
+  transition: opacity 160ms ease, color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.22, .72, .2, 1);
+}
+
+#lightbox .nav {
+  width: 48px;
+  height: 92px;
+  border-radius: 999px;
+  font-size: 40px;
+  font-weight: 200;
+  line-height: 1;
+}
+
+#lightbox figcaption {
+  transition: opacity 140ms ease, transform 180ms cubic-bezier(.22, .72, .2, 1);
+}
+
+#lightbox.dismissing .close,
+#lightbox.dismissing .nav,
+#lightbox.dismissing figcaption {
+  opacity: calc(1 - var(--dismiss-progress) * 1.8);
+  pointer-events: none;
+}
+
+#lightbox.closing .close,
+#lightbox.closing .nav,
+#lightbox.closing figcaption {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#lightbox.closing .close { transform: translateY(-10px) scale(.9); }
+#lightbox.closing .prev { transform: translateX(-14px) scale(.92); }
+#lightbox.closing .next { transform: translateX(14px) scale(.92); }
+#lightbox.closing figcaption { transform: translate(-50%, 10px) scale(.96); }
+
+#lightbox .close:hover,
+#lightbox .nav:hover {
+  color: #fff;
+  border-color: rgba(199, 164, 108, .72);
+  background: rgba(31, 30, 27, .78);
+  transform: scale(1.06);
+}
+
+#lightbox .close {
+  top: 18px;
+  right: 20px;
+}
+
+#lightbox .prev { left: 18px; }
+#lightbox .next { right: 18px; }
+
+#lightbox figcaption {
+  --load-progress: 0;
+  bottom: 14px;
+  min-width: 180px;
+  max-width: min(70vw, 640px);
+  padding: 7px 50px 8px 16px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 999px;
+  background: rgba(15, 16, 16, .58);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .2);
+  backdrop-filter: blur(14px);
+}
+
+#lightbox .download {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-left: 1px solid rgba(255, 255, 255, .11);
+  border-radius: 0 999px 999px 0;
+  color: rgba(255, 255, 255, .62);
+  pointer-events: auto;
+  transform: translateY(-50%);
+  transition: color 150ms ease, background 150ms ease;
+}
+
+#lightbox .download:hover {
+  color: #ead09f;
+  background: rgba(199, 164, 108, .08);
+}
+
+#lightbox .download svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#lightbox figcaption::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  padding: 3px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: conic-gradient(from -90deg, #ead09f calc(var(--load-progress) * 1turn), rgba(199, 164, 108, .08) 0);
+  filter: drop-shadow(0 0 7px rgba(199, 164, 108, .48));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  transition: opacity 180ms ease;
+}
+
+#lightbox figcaption.loading::after { opacity: 1; }
+
+#lightbox figcaption.indeterminate::after {
+  background: conic-gradient(from var(--ring-angle), transparent 0 68%, rgba(199, 164, 108, .5) 77%, #f1d7a5 88%, transparent 100%);
+  animation: gallery-ring 1.05s linear infinite;
+}
+
+@property --ring-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: -30deg;
+}
+
+@keyframes gallery-ring {
+  from { --ring-angle: -30deg; }
+  to { --ring-angle: 330deg; }
+}
+
+#lightbox figcaption b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .02em;
+}
+
+#lightbox figcaption span {
+  margin-top: 1px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, .52);
+}
+
+
+header button,
+header .search {
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, color 150ms ease;
+}
+
+header .search:focus-within {
+  border-color: rgba(199, 164, 108, .6);
+  background: #191a19;
+  box-shadow: 0 0 0 3px rgba(199, 164, 108, .08);
+}
+
+@media (max-width: 650px) {
+  #lightbox figure { padding: 2vh 0; }
+  #lightbox .stage { border-radius: 0; }
+  #lightbox figcaption {
+    max-width: 78vw;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  #lightbox .close {
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+  }
+}

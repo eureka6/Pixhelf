@@ -1,0 +1,9 @@
+.git
+.agents
+.codex
+target
+data
+pictures
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

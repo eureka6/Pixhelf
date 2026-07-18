@@ -1,0 +1,5 @@
+/target
+/data
+/pictures
+*.sqlite-shm
+*.sqlite-wal
