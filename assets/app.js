@@ -35,16 +35,17 @@ p.set('offset',rows.length)}else if(cursor)p.set('cursor',cursor);
 if(query)p.set('q',query);
 if(folder)p.set('folder',folder);
 const batch=await fetch('/api/images?'+p).then(r=>r.json());
-const fragment=document.createDocumentFragment();
+const firstNewCard=rows.length,fragment=document.createDocumentFragment();
 for(const x of batch){const index=rows.push(x)-1,card=document.createElement('article');
 card.className='card';
 card.dataset.id=x.id;
 card.dataset.ratio=x.height/x.width;
+card.style.setProperty('--ratio',`${x.width}/${x.height}`);
 card.innerHTML=`<img loading="lazy" decoding="async" width="${x.width}" height="${x.height}" src="/thumb/${x.id}" alt="${escapeHtml(x.name)}"><div class="meta"><b>${escapeHtml(x.name)}</b><span>${x.width} × ${x.height} · ${human(x.bytes)}</span></div>`;
 card.querySelector('img').onload=e=>e.target.classList.add('ready');
 card.onclick=()=>open(index);
 fragment.append(card)}gallery.append(fragment);
-scheduleLayout();
+scheduleLayout(firstNewCard);
 cursor=batch.at(-1)?.id??cursor;
 done=batch.length<40;
 empty.hidden=rows.length>0;
@@ -63,12 +64,22 @@ try{await load()}catch{break}
 if(rows.length===before)break;
 await new Promise(resolve=>requestAnimationFrame(resolve))}})().finally(()=>{waterfallTask=null});
 return waterfallTask}
-let layoutFrame=0;
-function layout(){const s=getComputedStyle(gallery),row=parseFloat(s.gridAutoRows),gap=parseFloat(s.rowGap),cards=[...gallery.children],spans=cards.map(card=>Math.ceil((card.clientWidth*Number(card.dataset.ratio)+gap)/(row+gap)));
-cards.forEach((card,index)=>{card.style.gridRowEnd=`span ${spans[index]}`})}
-function scheduleLayout(){if(layoutFrame)return;
+let layoutFrame=0,layoutFrom=0,lastCardWidth=0;
+function layout(from=0){const cards=gallery.children;
+if(!cards.length)return;
+const s=getComputedStyle(gallery),row=parseFloat(s.gridAutoRows),gap=parseFloat(s.rowGap),width=cards[0].clientWidth;
+// Column width only changes at a breakpoint/resize. Appends therefore touch just
+// the new cards instead of forcing reads and writes across the entire gallery.
+if(Math.abs(width-lastCardWidth)>.5){from=0;
+lastCardWidth=width}
+for(let index=from;index<cards.length;index++){const card=cards[index],span=Math.ceil((width*Number(card.dataset.ratio)+gap)/(row+gap));
+card.style.gridRowEnd=`span ${span}`}}
+function scheduleLayout(from=0){layoutFrom=Math.min(layoutFrom,from);
+if(layoutFrame)return;
 layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;
-layout()})}
+const from=layoutFrom;
+layoutFrom=gallery.children.length;
+layout(from)})}
 function escapeHtml(s){const d=document.createElement('div');
 d.textContent=s;
 return d.innerHTML}
