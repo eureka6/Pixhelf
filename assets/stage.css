@@ -79,37 +79,41 @@ dialog#lightbox.closing::backdrop {
 
 #lightbox .close,
 #lightbox .nav {
-  border: 1px solid rgba(255, 255, 255, .14);
-  background: rgba(18, 19, 19, .58);
-  color: rgba(255, 255, 255, .86);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
-  backdrop-filter: blur(14px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, .58);
+  box-shadow: none;
+  text-shadow: 0 2px 8px rgba(0,0,0,.78);
+  backdrop-filter: none;
   transition: opacity 160ms ease, color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.22, .72, .2, 1);
 }
 
 #lightbox .nav {
-  width: 48px;
-  height: 92px;
-  border-radius: 999px;
-  font-size: 40px;
+  width: 42px;
+  height: 68px;
+  border-radius: 12px;
+  font-size: 38px;
   font-weight: 200;
   line-height: 1;
 }
 
-#lightbox figcaption {
+#lightbox .viewer-actions,
+#lightbox .details-panel {
   transition: opacity 140ms ease, transform 180ms cubic-bezier(.22, .72, .2, 1);
 }
 
 #lightbox.dismissing .close,
 #lightbox.dismissing .nav,
-#lightbox.dismissing figcaption {
+#lightbox.dismissing .viewer-actions,
+#lightbox.dismissing .details-panel {
   opacity: calc(1 - var(--dismiss-progress) * 1.8);
   pointer-events: none;
 }
 
 #lightbox.closing .close,
 #lightbox.closing .nav,
-#lightbox.closing figcaption {
+#lightbox.closing .viewer-actions,
+#lightbox.closing .details-panel {
   opacity: 0;
   pointer-events: none;
 }
@@ -117,59 +121,71 @@ dialog#lightbox.closing::backdrop {
 #lightbox.closing .close { transform: translateY(-10px) scale(.9); }
 #lightbox.closing .prev { transform: translateX(-14px) scale(.92); }
 #lightbox.closing .next { transform: translateX(14px) scale(.92); }
-#lightbox.closing figcaption { transform: translate(-50%, 10px) scale(.96); }
+#lightbox.closing .viewer-actions { transform: translateY(10px) scale(.94); }
 
 #lightbox .close:hover,
 #lightbox .nav:hover {
   color: #fff;
-  border-color: rgba(199, 164, 108, .72);
-  background: rgba(31, 30, 27, .78);
-  transform: scale(1.06);
+  border-color: rgba(255,255,255,.12);
+  background: rgba(12,13,14,.32);
+  backdrop-filter:blur(8px);
+  transform: scale(1.04);
 }
 
 #lightbox .close {
-  top: 18px;
-  right: 20px;
+  position:fixed;
+  top:18px;
+  right:20px;
 }
 
 #lightbox .prev { left: 18px; }
 #lightbox .next { right: 18px; }
 
-#lightbox figcaption {
-  --load-progress: 0;
-  bottom: 14px;
-  min-width: 180px;
-  max-width: min(70vw, 640px);
-  padding: 7px 50px 8px 16px;
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 999px;
-  background: rgba(15, 16, 16, .58);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .2);
-  backdrop-filter: blur(14px);
-}
-
-#lightbox .download {
-  position: absolute;
-  top: 50%;
-  right: 7px;
+#lightbox .viewer-actions{position:fixed;right:20px;bottom:18px;z-index:4}
+#lightbox .viewer-more {
+  position:relative;
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
-  border-left: 1px solid rgba(255, 255, 255, .11);
-  border-radius: 0 999px 999px 0;
-  color: rgba(255, 255, 255, .62);
+  width: 42px;
+  height: 42px;
+  padding:0;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:50%;
+  background:rgba(12,13,14,.22);
+  color:rgba(255,255,255,.62);
+  box-shadow:none;
+  text-shadow:0 2px 7px rgba(0,0,0,.7);
+  backdrop-filter:blur(6px);
   pointer-events: auto;
-  transform: translateY(-50%);
-  transition: color 150ms ease, background 150ms ease;
+  transition:color 150ms ease,border-color 150ms ease,background 150ms ease,transform 150ms ease;
 }
 
-#lightbox .download:hover {
-  color: #ead09f;
-  background: rgba(199, 164, 108, .08);
+#lightbox .viewer-more[aria-expanded="true"]{color:#fff;border-color:rgba(255,255,255,.18);background:rgba(12,13,14,.48)}
+#lightbox .viewer-more svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.55;stroke-linecap:round;stroke-linejoin:round}
+#lightbox .viewer-more::after{content:"";position:absolute;right:2px;bottom:2px;width:6px;height:6px;border:2px solid rgba(12,13,14,.9);border-radius:50%;background:#72d6c2;opacity:0;transform:scale(.5);transition:opacity 160ms ease,transform 180ms cubic-bezier(.22,.72,.2,1)}
+#lightbox .viewer-more.original-ready{color:rgba(255,255,255,.92)}
+#lightbox .viewer-more.original-ready::after{opacity:1;transform:scale(1)}
+#lightbox .viewer-action-menu{position:absolute;right:0;bottom:52px;width:172px;padding:6px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(15,16,16,.78);box-shadow:0 14px 42px rgba(0,0,0,.28);backdrop-filter:blur(16px);animation:actions-in 150ms cubic-bezier(.22,.72,.2,1)}
+#lightbox .viewer-action-menu[hidden]{display:none}
+#lightbox .viewer-action-menu .download,
+#lightbox .viewer-action-menu .info,
+#lightbox .viewer-action-menu .recommendations{display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:9px;width:100%;height:40px;padding:0 10px;border:0;border-radius:8px;background:transparent;color:rgba(255,255,255,.72);font-size:12px;text-align:left;text-decoration:none;transition:color 140ms ease,background 140ms ease}
+#lightbox .viewer-action-menu span{white-space:nowrap}
+#lightbox .viewer-action-menu small{color:rgba(255,255,255,.3);font-size:9px;font-weight:400;white-space:nowrap}
+#lightbox .viewer-action-menu .recommendations:disabled{opacity:.58;cursor:default}
+#lightbox .viewer-menu-divider{height:1px;margin:5px 8px;background:rgba(255,255,255,.08)}
+
+#lightbox .viewer-more:hover,
+#lightbox .download:hover,
+#lightbox .info:hover,
+#lightbox .info[aria-expanded="true"] {
+  color: #fff;
+  background:rgba(255,255,255,.08);
 }
 
-#lightbox .download svg {
+#lightbox .download svg,
+#lightbox .info svg,
+#lightbox .recommendations svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -178,55 +194,16 @@ dialog#lightbox.closing::backdrop {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+@keyframes actions-in{from{opacity:0;transform:translateY(6px) scale(.97)}to{opacity:1;transform:none}}
 
-#lightbox figcaption::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  padding: 3px;
-  border-radius: inherit;
-  pointer-events: none;
-  opacity: 0;
-  background: conic-gradient(from -90deg, #ead09f calc(var(--load-progress) * 1turn), rgba(199, 164, 108, .08) 0);
-  filter: drop-shadow(0 0 7px rgba(199, 164, 108, .48));
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  transition: opacity 180ms ease;
-}
-
-#lightbox figcaption.loading::after { opacity: 1; }
-
-#lightbox figcaption.indeterminate::after {
-  background: conic-gradient(from var(--ring-angle), transparent 0 68%, rgba(199, 164, 108, .5) 77%, #f1d7a5 88%, transparent 100%);
-  animation: gallery-ring 1.05s linear infinite;
-}
-
-@property --ring-angle {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: -30deg;
-}
-
-@keyframes gallery-ring {
-  from { --ring-angle: -30deg; }
-  to { --ring-angle: 330deg; }
-}
-
-#lightbox figcaption b {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: .02em;
-}
-
-#lightbox figcaption span {
-  margin-top: 1px;
-  font-size: 10px;
-  color: rgba(255, 255, 255, .52);
-}
+#lightbox .details-panel{position:fixed;right:18px;bottom:72px;z-index:3;width:320px;padding:17px 18px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(15,16,16,.84);color:rgba(255,255,255,.88);box-shadow:0 18px 56px rgba(0,0,0,.34);backdrop-filter:blur(18px);pointer-events:auto;animation:details-in 180ms cubic-bezier(.22,.72,.2,1)}
+#lightbox .details-panel[hidden]{display:none}
+#lightbox .details-heading{margin-bottom:9px;color:#fff;font-size:12px;font-weight:600;letter-spacing:.04em}
+#lightbox .details-panel dl{display:grid;gap:6px;margin:0}
+#lightbox .details-panel dl div{display:grid;grid-template-columns:72px minmax(0,1fr);gap:12px}
+#lightbox .details-panel dt{color:rgba(255,255,255,.42);font-size:11px}
+#lightbox .details-panel dd{margin:0;overflow:hidden;color:rgba(255,255,255,.76);font-size:11px;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+@keyframes details-in{from{opacity:0;transform:translateX(12px) scale(.98)}to{opacity:1;transform:none}}
 
 
 header button,
@@ -235,20 +212,24 @@ header .search {
 }
 
 header .search:focus-within {
-  border-color: rgba(199, 164, 108, .6);
-  background: #191a19;
-  box-shadow: 0 0 0 3px rgba(199, 164, 108, .08);
+  border-color: var(--muted);
+  background: var(--control);
+  box-shadow: 0 0 0 3px var(--soft);
 }
 
 @media (max-width: 650px) {
   #lightbox figure { padding: 2vh 0; }
   #lightbox .stage { border-radius: 0; }
-  #lightbox figcaption {
-    max-width: 78vw;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  #lightbox .details-panel {
+    left:12px;
+    right:12px;
+    bottom:calc(68px + env(safe-area-inset-bottom,0px));
+    width:auto;
+    border-radius:18px;
+    animation-name:details-up;
   }
-  #lightbox .close {
-    top: calc(12px + env(safe-area-inset-top, 0px));
-    right: calc(12px + env(safe-area-inset-right, 0px));
-  }
+  #lightbox .viewer-actions{right:calc(12px + env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px))}
+  #lightbox .close{top:calc(12px + env(safe-area-inset-top,0px));right:calc(12px + env(safe-area-inset-right,0px))}
 }
+
+@keyframes details-up{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}

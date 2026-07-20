@@ -1,6 +1,6 @@
 const gallery=document.querySelector('#gallery'),sentinel=document.querySelector('#sentinel'),empty=document.querySelector('#empty');
 
-const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),caption=dialog.querySelector('figcaption'),title=caption.querySelector('b'),detail=caption.querySelector('.detail'),download=caption.querySelector('.download');
+const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more');
 
 let rows=[],cursor=null,loading=false,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
 
@@ -16,6 +16,11 @@ const human=n=>{const u=['B','KB','MB','GB','TB'];
 let i=0;
 while(n>=1024&&i<u.length-1){n/=1024;
 i++}return `${n.toFixed(i?1:0)} ${u[i]}`};
+const formatOf=x=>{const raw=(x.mime||'').split('/').at(-1)?.split('+')[0].toUpperCase();
+return raw==='JPEG'?'JPG':raw||'IMAGE'};
+function setOriginalReady(ready){viewerMore.classList.toggle('original-ready',ready);
+viewerMore.title=ready?'更多操作 · 原图已加载':'更多操作';
+viewerMore.setAttribute('aria-label',viewerMore.title)}
 
 async function load(reset=false){if(loading||(!reset&&done))return;
 loading=true;
@@ -48,7 +53,9 @@ if(card)card.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'})
 function escapeHtml(s){const d=document.createElement('div');
 d.textContent=s;
 return d.innerHTML}
-const folderButton=document.querySelector('#folders'),folderMenu=document.querySelector('#folder-menu'),folderTree=document.querySelector('#folder-tree');
+const folderButton=document.querySelector('#folders'),folderMenu=document.querySelector('#folder-menu'),folderTree=document.querySelector('#folder-tree'),moreButton=document.querySelector('#more'),moreMenu=document.querySelector('#more-menu'),themeButton=document.querySelector('#theme'),themeLabel=themeButton.querySelector('.theme-label'),themeValue=themeButton.querySelector('.menu-value'),themeColor=document.querySelector('meta[name="theme-color"]');
+function closeMore(){moreMenu.hidden=true;
+moreButton.setAttribute('aria-expanded','false')}
 function chooseFolder(path){folder=path;
 folderButton.title=path||'选择文件夹';
 folderButton.setAttribute('aria-label',path?`当前路径：${path}`:'选择文件夹');
@@ -77,12 +84,30 @@ renderFolders(paths);
 return paths}catch{renderFolders([]);
 return []}}
 folderButton.onclick=e=>{e.stopPropagation();
+closeMore();
 folderMenu.hidden=!folderMenu.hidden;
 folderButton.setAttribute('aria-expanded',String(!folderMenu.hidden));
 if(!folderMenu.hidden)refreshFolders()};
 folderMenu.onclick=e=>e.stopPropagation();
+moreButton.onclick=e=>{e.stopPropagation();
+folderMenu.hidden=true;
+folderButton.setAttribute('aria-expanded','false');
+moreMenu.hidden=!moreMenu.hidden;
+moreButton.setAttribute('aria-expanded',String(!moreMenu.hidden))};
+moreMenu.onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{folderMenu.hidden=true;
-folderButton.setAttribute('aria-expanded','false')});
+folderButton.setAttribute('aria-expanded','false');
+closeMore()});
+function setTheme(theme){document.documentElement.dataset.theme=theme;
+localStorage.setItem('gallery-theme',theme);
+const light=theme==='light';
+themeLabel.textContent=light?'切换黑色主题':'切换白色主题';
+themeValue.textContent=light?'浅色':'深色';
+themeButton.setAttribute('aria-label',themeLabel.textContent);
+themeColor.content=light?'#f5f5f3':'#101114'}
+setTheme(document.documentElement.dataset.theme==='light'?'light':'dark');
+themeButton.onclick=()=>{setTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
+closeMore()};
 function sizeHero(x){const maxW=innerWidth<=650?innerWidth:innerWidth*.99,maxH=innerHeight*(innerWidth<=650?.96:.985),ratio=Math.min(maxW/x.width,maxH/x.height),w=Math.round(x.width*ratio),h=Math.round(x.height*ratio);
 hero.style.width=`${w}px`;
 hero.style.height=`${h}px`;
@@ -95,10 +120,22 @@ dismissProgress=0;
 dialog.classList.remove('dismissing');
 dialog.style.removeProperty('--dismiss-progress');
 apply(false)}
-function showProgress(value=null){caption.classList.add('loading');
-caption.classList.toggle('indeterminate',value===null);
-if(value!==null)caption.style.setProperty('--load-progress',Math.max(0,Math.min(1,value)))}
-function hideProgress(token){setTimeout(()=>{if(token===openToken)caption.classList.remove('loading','indeterminate')},180)}
+function updateDetails(x){for(const [key,value] of Object.entries({name:x.name,path:x.path,dimensions:`${x.width} × ${x.height}`,format:formatOf(x),size:human(x.bytes)})){const node=detailsPanel.querySelector(`[data-detail="${key}"]`);
+node.textContent=value;
+node.title=value}}
+function closeDetails(){detailsPanel.hidden=true;
+infoButton.setAttribute('aria-expanded','false')}
+function closeViewerMenu(){viewerMenu.hidden=true;
+viewerMore.setAttribute('aria-expanded','false')}
+infoButton.onclick=()=>{detailsPanel.hidden=!detailsPanel.hidden;
+infoButton.setAttribute('aria-expanded',String(!detailsPanel.hidden));
+closeViewerMenu()};
+viewerMore.onclick=()=>{viewerMenu.hidden=!viewerMenu.hidden;
+viewerMore.setAttribute('aria-expanded',String(!viewerMenu.hidden))};
+download.onclick=closeViewerMenu;
+detailsPanel.onpointerdown=e=>e.stopPropagation();
+detailsPanel.onwheel=e=>e.stopPropagation();
+dialog.querySelector('.viewer-actions').onpointerdown=e=>e.stopPropagation();
 function apply(animate=true){hero.style.transition=animate?'transform .24s cubic-bezier(.2,.75,.25,1)':'none';
 const visualScale=scale===1?1-dismissProgress*.055:scale;
 hero.style.transform=`translate3d(${tx}px,${ty}px,0) scale(${visualScale})`}
@@ -122,14 +159,16 @@ active=i;
 switching=false;
 const x=rows[i];
 resetView();
+closeDetails();
+closeViewerMenu();
+setOriginalReady(false);
+updateDetails(x);
 sizeHero(x);
 photo.removeAttribute('src');
 photo.style.opacity='0';
 preview.src=`/thumb/${x.id}`;
 preview.style.opacity='1';
 photo.alt=x.name;
-title.textContent=x.name;
-detail.textContent=`${x.width} × ${x.height} · ${human(x.bytes)}`;
 updateDownload(x);
 if(!dialog.open)dialog.showModal();
 const current=decoded(i,token);
@@ -156,8 +195,9 @@ function reveal(img,i,token){if(token!==openToken||!dialog.open||active!==i)retu
 if(!img){photo.removeAttribute('src');
 photo.style.opacity='0';
 preview.style.opacity='1';
-detail.textContent=`${rows[i].width} × ${rows[i].height} · ${human(rows[i].bytes)} · 缩略图预览`;
-return}detail.textContent=`${rows[i].width} × ${rows[i].height} · ${human(rows[i].bytes)} · 原图`;
+setOriginalReady(false);
+return}
+setOriginalReady(true);
 photo.src=img.src;
 requestAnimationFrame(()=>{if(token!==openToken||!dialog.open||active!==i)return;
 photo.style.opacity='1';
@@ -182,37 +222,24 @@ hero.style.visibility=''}else{animation=dialog.animate([{opacity:1},{opacity:0}]
 await animation.finished.catch(()=>{});
 animation.cancel()}dialog.close();
 dialog.classList.remove('closing');
+closeDetails();
+closeViewerMenu();
 photo.removeAttribute('src');
 preview.removeAttribute('src');
 resetView();
 closing=false}
 async function decoded(i,token){const id=rows[i].id;
 prefetched.add(id);
-showProgress(null);
 try{const response=await fetch(`/image/${id}`,{priority:'high'});
 if(!response.ok)throw new Error(`HTTP ${response.status}`);
-const total=Number(response.headers.get('content-length'))||0;
-if(total)showProgress(0);
-let blob;
-if(response.body){const reader=response.body.getReader(),chunks=[];
-let received=0;
-for(;
-;
-){const {done,value}=await reader.read();
-if(done)break;
-chunks.push(value);
-received+=value.byteLength;
-if(total&&token===openToken)showProgress(received/total)}blob=new Blob(chunks,{type:response.headers.get('content-type')||rows[i].mime})}else blob=await response.blob();
+const blob=await response.blob();
 if(token!==openToken)return null;
-showProgress(1);
 const url=URL.createObjectURL(blob),img=new Image;
 img.src=url;
 await img.decode();
 if(currentObjectUrl)URL.revokeObjectURL(currentObjectUrl);
 currentObjectUrl=url;
-hideProgress(token);
 return img}catch{prefetched.delete(id);
-if(token===openToken)hideProgress(token);
 return null}}
 async function upgrade(i,token){reveal(await decoded(i,token),i,token)}
 async function slide(dir){const next=active+dir;
@@ -226,6 +253,10 @@ active=next;
 syncGrid(next);
 const x=rows[next];
 resetView();
+closeDetails();
+closeViewerMenu();
+setOriginalReady(false);
+updateDetails(x);
 sizeHero(x);
 photo.style.transition='none';
 photo.style.opacity='0';
@@ -233,8 +264,6 @@ photo.removeAttribute('src');
 preview.src=readyThumb.src;
 preview.style.opacity='1';
 photo.alt=x.name;
-title.textContent=x.name;
-detail.textContent=`${x.width} × ${x.height} · ${human(x.bytes)}`;
 updateDownload(x);
 hero.style.transition='none';
 hero.style.transform=`translate3d(${-out}px,0,0) scale(1)`;
@@ -262,7 +291,10 @@ dialog.querySelector('.close').onclick=closeViewer;
 dialog.querySelector('.prev').onclick=()=>slide(-1);
 dialog.querySelector('.next').onclick=()=>slide(1);
 dialog.addEventListener('cancel',e=>{e.preventDefault();
-closeViewer()});
+if(!viewerMenu.hidden){closeViewerMenu();
+return}
+if(!detailsPanel.hidden){closeDetails();
+return}closeViewer()});
 
 dialog.onwheel=e=>{if(e.target.closest('button'))return;
 e.preventDefault();
@@ -271,12 +303,16 @@ setScaleAt(next,e.clientX,e.clientY);
 zoomStep=scale===1?0:1;
 apply()};
 
-dialog.onpointerdown=e=>{if(switching||e.target.closest('button,a'))return;
+dialog.onpointerdown=e=>{const dismissedMenu=!viewerMenu.hidden&&!e.target.closest('.viewer-actions');
+if(dismissedMenu)closeViewerMenu();
+const dismissedDetails=!detailsPanel.hidden&&!e.target.closest('.details-panel,.info');
+if(dismissedDetails)closeDetails();
+if(switching||e.target.closest('button,a'))return;
 clearTimeout(closeTimer);
 dialog.setPointerCapture(e.pointerId);
 pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
 hero.classList.add('dragging');
-gesture={x:e.clientX,y:e.clientY,tx,ty,scale,distance:0,time:performance.now(),axis:null};
+gesture={x:e.clientX,y:e.clientY,tx,ty,scale,distance:0,time:performance.now(),axis:null,dismissedOverlay:dismissedMenu||dismissedDetails};
 if(pointers.size===2){gesture.axis='pinch';
 const [a,b]=[...pointers.values()];
 gesture.distance=Math.hypot(a.x-b.x,a.y-b.y)}};
@@ -306,15 +342,24 @@ if(fast||far)return closeViewer();
 cancelDismiss();
 return}if(moved<12){tx=gesture.tx;
 ty=gesture.ty;
+if(gesture.dismissedOverlay){apply();
+return}
+if(scale>1){clearTimeout(closeTimer);
+lastTap=0;
+scale=1;
+tx=ty=0;
+zoomStep=0;
+apply();
+return}
 const now=Date.now();
 if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
 lastTap=0;
 zoom(e.clientX,e.clientY)}else{lastTap=now;
 apply();
-closeTimer=setTimeout(closeViewer,DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=110,swipeDistance=touch?36:60;
+closeTimer=setTimeout(closeViewer,DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=touch?190:260,zoomSwipeDistance=touch?90:140,swipeDistance=touch?36:60,horizontalIntent=Math.abs(dx)>Math.abs(dy)*1.2;
 if(scale===1&&(Math.abs(tx)>swipeDistance||flick))return slide(dx<0?1:-1);
-if(scale>1&&tx>maxX+zoomEdge&&dx>0)return slide(-1);
-if(scale>1&&tx<-(maxX+zoomEdge)&&dx<0)return slide(1);
+if(scale>1&&horizontalIntent&&dx>zoomSwipeDistance&&tx>maxX+zoomEdge)return slide(-1);
+if(scale>1&&horizontalIntent&&dx<-zoomSwipeDistance&&tx<-(maxX+zoomEdge))return slide(1);
 tx=Math.max(-maxX,Math.min(maxX,tx));
 clampVertical();
 apply()};
@@ -344,14 +389,19 @@ load(true)},250)};
 document.querySelector('#random').onclick=e=>{randomMode=!randomMode;
 if(randomMode)randomSeed=Math.floor(Math.random()*2147483646)+1;
 e.currentTarget.setAttribute('aria-pressed',String(randomMode));
-e.currentTarget.title=randomMode?'恢复默认顺序':'随机顺序';
+e.currentTarget.title=randomMode?'退出探索列队':'探索列队';
+e.currentTarget.querySelector('span').textContent=randomMode?'退出探索列队':'探索列队';
+closeMore();
 load(true)};
 
 document.querySelector('#scan').onclick=async e=>{e.currentTarget.disabled=true;
+e.currentTarget.querySelector('span').textContent='正在扫描…';
 await fetch('/api/scan',{method:'POST'});
 await refreshFolders();
 await load(true);
-e.currentTarget.disabled=false};
+e.currentTarget.disabled=false;
+e.currentTarget.querySelector('span').textContent='重新扫描';
+closeMore()};
 
 new ResizeObserver(()=>requestAnimationFrame(layout)).observe(gallery);
 addEventListener('resize',()=>{if(dialog.open&&rows[active]){resetView();
