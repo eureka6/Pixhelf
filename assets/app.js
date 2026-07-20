@@ -2,9 +2,9 @@ const gallery=document.querySelector('#gallery'),sentinel=document.querySelector
 
 const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more');
 
-let rows=[],cursor=null,loading=false,loadTask=null,waterfallTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
+let rows=[],cursor=null,loading=false,loadTask=null,waterfallTask=null,viewerQueueTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
 
-let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,currentObjectUrl=null,dismissProgress=0;
+let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,activeId=null,currentObjectUrl=null,dismissProgress=0;
 
 const pointers=new Map();
 
@@ -52,11 +52,17 @@ empty.hidden=rows.length>0;
 return batch})().finally(()=>{loading=false;
 loadTask=null});
 return loadTask}
-async function extendViewerQueue(index){if(done||index<rows.length-8)return;
-if(!done&&index>=rows.length-8)try{await load()}catch{}}
-async function ensureViewerRow(index){while(!rows[index]&&!done){const before=rows.length;
-try{await load()}catch{break}
-if(rows.length===before)break}
+const VIEWER_BUFFER=16,VIEWER_LOAD_RETRIES=2;
+function extendViewerQueue(index,urgent=false){if(closing||done||(!urgent&&rows.length-index>VIEWER_BUFFER))return Promise.resolve();
+if(viewerQueueTask)return viewerQueueTask.then(()=>urgent&&!rows[index]&&!done?extendViewerQueue(index,true):undefined);
+viewerQueueTask=(async()=>{let failures=0;
+while(!closing&&dialog.open&&!done&&(urgent?!rows[index]:rows.length-index<=VIEWER_BUFFER)){const before=rows.length;
+try{await load();
+failures=0}catch{if(++failures>=VIEWER_LOAD_RETRIES)break;
+await new Promise(resolve=>setTimeout(resolve,300))}
+if(rows.length===before&&failures===0)break}})().finally(()=>{viewerQueueTask=null});
+return viewerQueueTask}
+async function ensureViewerRow(index){if(!rows[index]&&!done)await extendViewerQueue(index,true);
 return Boolean(rows[index])}
 function fillWaterfall(){if(waterfallTask)return waterfallTask;
 waterfallTask=(async()=>{while(ready&&!done&&!dialog.open&&sentinel.getBoundingClientRect().top<=innerHeight+800){const before=rows.length;
@@ -188,6 +194,7 @@ const token=++openToken;
 active=i;
 switching=false;
 const x=rows[i];
+activeId=x.id;
 resetView();
 closeDetails();
 closeViewerMenu();
@@ -219,9 +226,10 @@ function preloadAround(center,direction=1){for(let distance=1;
 distance<=PREFETCH_RADIUS;
 distance++){preload(center+distance*direction);
 preload(center-distance*direction)}}
-function decodedThumb(i){return new Promise(resolve=>{const img=new Image;
+function decodedThumb(i){return new Promise(resolve=>{if(!rows[i]){resolve(null);
+return}const img=new Image;
 img.onload=async()=>{try{await img.decode()}catch{}resolve(img)};
-img.onerror=()=>resolve(img);
+img.onerror=()=>resolve(null);
 img.src=`/thumb/${rows[i].id}`})}
 function reveal(img,i,token){if(token!==openToken||!dialog.open||active!==i)return;
 if(!img){photo.removeAttribute('src');
@@ -235,27 +243,36 @@ requestAnimationFrame(()=>{if(token!==openToken||!dialog.open||active!==i)return
 photo.style.opacity='1';
 setTimeout(()=>{if(token===openToken&&dialog.open&&active===i)preview.style.opacity='0'},130)})}
 const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
-async function returnTarget(){const card=rows[active]?gallery.querySelector(`.card[data-id="${rows[active].id}"]`):null;
+async function settleViewerLayout(){if(viewerQueueTask)await viewerQueueTask.catch(()=>{});
+if(loadTask)await loadTask.catch(()=>{});
+layout();
+await nextFrame();
+layout();
+await nextFrame()}
+async function returnTarget(id){if(id==null)return null;
+await settleViewerLayout();
+const card=gallery.querySelector(`.card[data-id="${id}"]`);
 if(!card)return null;
 const image=card.querySelector('img');
 if(image){image.loading='eager';
 image.fetchPriority='high'}
-layout();
-await nextFrame();
 let target=card.getBoundingClientRect();
 if(target.top<16||target.bottom>innerHeight-16){card.scrollIntoView({block:'center',inline:'nearest',behavior:'auto'});
 await nextFrame();
 layout();
 await nextFrame();
 target=card.getBoundingClientRect()}
-if(image&&!image.complete)await Promise.race([image.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,120))]);
+if(image&&!image.complete)await Promise.race([image.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,500))]);
+if(image?.naturalWidth)image.classList.add('ready');
 return image?.getBoundingClientRect()||target}
 async function closeViewer(){if(closing||!dialog.open)return;
 closing=true;
+const returnId=activeId;
 openToken++;
-switching=false;
+if(switching){switching=false;
+apply(false)}
 clearTimeout(closeTimer);
-const target=await returnTarget(),from=hero.getBoundingClientRect();
+const target=await returnTarget(returnId),from=hero.getBoundingClientRect();
 dialog.classList.add('closing');
 let animation;
 if(target&&target.width&&target.height){const clone=document.createElement('img'),source=Number(getComputedStyle(photo).opacity)>.5?photo:preview,dx=target.left-from.left,dy=target.top-from.top,sx=target.width/from.width,sy=target.height/from.height;
@@ -275,6 +292,7 @@ closeDetails();
 closeViewerMenu();
 photo.removeAttribute('src');
 preview.removeAttribute('src');
+activeId=null;
 resetView();
 closing=false;
 fillWaterfall()}
@@ -296,15 +314,24 @@ async function slide(dir){if(switching)return;
 switching=true;
 const next=active+dir;
 if(dir>0&&!rows[next])await ensureViewerRow(next);
+if(closing||!dialog.open){switching=false;
+return}
 if(!rows[next]){switching=false;
 resetView();
 return}
-const token=++openToken,out=dir>0?-innerWidth:innerWidth,thumb=decodedThumb(next);
+const token=++openToken,out=dir>0?-innerWidth:innerWidth,thumbUrl=`/thumb/${rows[next].id}`;
+// Start the thumbnail request early, but never make navigation wait for it. Newly
+// paged cards are lazy-loaded behind the modal and their thumbnails may still
+// need to be generated by the server.
+decodedThumb(next).catch(()=>{});
 hero.style.transition='transform .16s ease-in';
 hero.style.transform=`translate3d(${out}px,0,0) scale(1)`;
-const [readyThumb]=await Promise.all([thumb,new Promise(r=>setTimeout(r,160))]);
+await new Promise(r=>setTimeout(r,160));
+if(closing||!dialog.open){switching=false;
+return}
 active=next;
 const x=rows[next];
+activeId=x.id;
 resetView();
 closeDetails();
 closeViewerMenu();
@@ -314,7 +341,7 @@ sizeHero(x);
 photo.style.transition='none';
 photo.style.opacity='0';
 photo.removeAttribute('src');
-preview.src=readyThumb.src;
+preview.src=thumbUrl;
 preview.style.opacity='1';
 photo.alt=x.name;
 updateDownload(x);
