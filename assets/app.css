@@ -39,7 +39,7 @@ button{appearance:none;-webkit-appearance:none;-webkit-tap-highlight-color:trans
 .menu-value{color:var(--muted);font-size:11px}
 .menu-divider{height:1px;margin:6px 8px;background:var(--hairline)}
 main{max-width:1800px;margin:auto;padding:10px clamp(8px,2vw,28px) 60px}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));grid-auto-rows:6px;gap:9px;align-items:start;overflow-anchor:none}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));grid-auto-rows:6px;gap:9px;align-items:start}
 .card{position:relative;display:block;background:var(--panel);overflow:hidden;cursor:zoom-in;border-radius:9px;box-shadow:0 4px 14px var(--soft);border:1px solid var(--hairline);transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease}
 .card img{display:block;width:100%;height:auto;opacity:0;transition:opacity .45s,transform .6s}
 .card img.ready{opacity:1}

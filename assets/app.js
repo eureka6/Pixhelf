@@ -2,7 +2,7 @@ const gallery=document.querySelector('#gallery'),sentinel=document.querySelector
 
 const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more');
 
-let rows=[],cursor=null,loading=false,loadTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
+let rows=[],cursor=null,loading=false,loadTask=null,waterfallTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
 
 let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,currentObjectUrl=null,dismissProgress=0;
 
@@ -35,6 +35,7 @@ p.set('offset',rows.length)}else if(cursor)p.set('cursor',cursor);
 if(query)p.set('q',query);
 if(folder)p.set('folder',folder);
 const batch=await fetch('/api/images?'+p).then(r=>r.json());
+const fragment=document.createDocumentFragment();
 for(const x of batch){const index=rows.push(x)-1,card=document.createElement('article');
 card.className='card';
 card.dataset.id=x.id;
@@ -42,7 +43,8 @@ card.dataset.ratio=x.height/x.width;
 card.innerHTML=`<img loading="lazy" decoding="async" width="${x.width}" height="${x.height}" src="/thumb/${x.id}" alt="${escapeHtml(x.name)}"><div class="meta"><b>${escapeHtml(x.name)}</b><span>${x.width} × ${x.height} · ${human(x.bytes)}</span></div>`;
 card.querySelector('img').onload=e=>e.target.classList.add('ready');
 card.onclick=()=>open(index);
-gallery.append(card)}layout();
+fragment.append(card)}gallery.append(fragment);
+scheduleLayout();
 cursor=batch.at(-1)?.id??cursor;
 done=batch.length<40;
 empty.hidden=rows.length>0;
@@ -55,9 +57,18 @@ async function ensureViewerRow(index){while(!rows[index]&&!done){const before=ro
 try{await load()}catch{break}
 if(rows.length===before)break}
 return Boolean(rows[index])}
-function layout(){const s=getComputedStyle(gallery),row=parseFloat(s.gridAutoRows),gap=parseFloat(s.rowGap);
-for(const card of gallery.children){const h=card.clientWidth*Number(card.dataset.ratio);
-card.style.gridRowEnd=`span ${Math.ceil((h+gap)/(row+gap))}`}}
+function fillWaterfall(){if(waterfallTask)return waterfallTask;
+waterfallTask=(async()=>{while(ready&&!done&&!dialog.open&&sentinel.getBoundingClientRect().top<=innerHeight+800){const before=rows.length;
+try{await load()}catch{break}
+if(rows.length===before)break;
+await new Promise(resolve=>requestAnimationFrame(resolve))}})().finally(()=>{waterfallTask=null});
+return waterfallTask}
+let layoutFrame=0;
+function layout(){const s=getComputedStyle(gallery),row=parseFloat(s.gridAutoRows),gap=parseFloat(s.rowGap),cards=[...gallery.children],spans=cards.map(card=>Math.ceil((card.clientWidth*Number(card.dataset.ratio)+gap)/(row+gap)));
+cards.forEach((card,index)=>{card.style.gridRowEnd=`span ${spans[index]}`})}
+function scheduleLayout(){if(layoutFrame)return;
+layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;
+layout()})}
 function escapeHtml(s){const d=document.createElement('div');
 d.textContent=s;
 return d.innerHTML}
@@ -254,7 +265,8 @@ closeViewerMenu();
 photo.removeAttribute('src');
 preview.removeAttribute('src');
 resetView();
-closing=false}
+closing=false;
+fillWaterfall()}
 async function decoded(i,token){const id=rows[i].id;
 prefetched.add(id);
 try{const response=await fetch(`/image/${id}`,{priority:'high'});
@@ -435,15 +447,15 @@ e.currentTarget.disabled=false;
 e.currentTarget.querySelector('span').textContent='重新扫描';
 closeMore()};
 
-new ResizeObserver(()=>requestAnimationFrame(layout)).observe(gallery);
+new ResizeObserver(scheduleLayout).observe(gallery);
 addEventListener('resize',()=>{if(dialog.open&&rows[active]){resetView();
 sizeHero(rows[active])}});
-new IntersectionObserver(es=>ready&&es[0].isIntersecting&&load(),{rootMargin:'800px'}).observe(sentinel);
+new IntersectionObserver(es=>es[0].isIntersecting&&fillWaterfall(),{rootMargin:'800px'}).observe(sentinel);
 async function init(){const paths=await refreshFolders();
 if(paths.length){folder=paths[0];
 folderButton.title=folder;
 folderButton.setAttribute('aria-label',`当前路径：${folder}`);
 renderFolders(paths)}
 ready=true;
-load()}
+fillWaterfall()}
 init();
