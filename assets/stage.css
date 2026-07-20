@@ -39,28 +39,25 @@
 
 dialog#lightbox {
   --dismiss-progress: 0;
+  --viewer-wall:#3d4551;
   height: 100dvh;
-  background:
-    radial-gradient(circle at 50% 42%, rgba(40, 39, 35, calc(.26 * (1 - var(--dismiss-progress)))), transparent 62%),
-    rgba(7, 8, 8, calc(.38 * (1 - var(--dismiss-progress))));
-  -webkit-backdrop-filter: blur(20px) saturate(.72) brightness(.72);
-  backdrop-filter: blur(20px) saturate(.72) brightness(.72);
+  background:var(--viewer-wall);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   transition: background 220ms ease-out;
 }
 
 dialog#lightbox::backdrop {
-  background: rgba(5, 6, 6, calc(.16 * (1 - var(--dismiss-progress))));
+  background:var(--viewer-wall);
   transition: background 280ms ease-out;
 }
 
 dialog#lightbox.closing {
-  background: rgba(7, 8, 8, 0);
-  -webkit-backdrop-filter: blur(0) saturate(1) brightness(1);
-  backdrop-filter: blur(0) saturate(1) brightness(1);
+  background:rgba(28,31,38,0);
 }
 
 dialog#lightbox.closing::backdrop {
-  background: rgba(5, 6, 6, 0);
+  background:rgba(22,24,29,0);
 }
 
 #lightbox figure {
@@ -73,8 +70,11 @@ dialog#lightbox.closing::backdrop {
 }
 
 #lightbox .stage {
-  border-radius: 3px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, .38);
+  border-radius:3px;
+  box-shadow:
+    0 1px 2px rgba(4,6,10,.52),
+    0 7px 14px rgba(4,6,10,.3),
+    0 20px 28px rgba(4,6,10,.2);
 }
 
 #lightbox .close,
@@ -173,6 +173,7 @@ dialog#lightbox.closing::backdrop {
 #lightbox .viewer-action-menu span{white-space:nowrap}
 #lightbox .viewer-action-menu small{color:rgba(255,255,255,.3);font-size:9px;font-weight:400;white-space:nowrap}
 #lightbox .viewer-action-menu .recommendations:disabled{opacity:.58;cursor:default}
+#lightbox .viewer-action-menu .recommendations[hidden]{display:none}
 #lightbox .viewer-menu-divider{height:1px;margin:5px 8px;background:rgba(255,255,255,.08)}
 
 #lightbox .viewer-more:hover,
@@ -205,6 +206,34 @@ dialog#lightbox.closing::backdrop {
 #lightbox .details-panel dd{margin:0;overflow:hidden;color:rgba(255,255,255,.76);font-size:11px;text-align:right;text-overflow:ellipsis;white-space:nowrap}
 @keyframes details-in{from{opacity:0;transform:translateX(12px) scale(.98)}to{opacity:1;transform:none}}
 
+:root[data-theme="light"] dialog#lightbox{--viewer-wall:#e2ded6;color:#202228;background:var(--viewer-wall)}
+:root[data-theme="light"] dialog#lightbox::backdrop{background:var(--viewer-wall)}
+:root[data-theme="light"] dialog#lightbox.closing{background:rgba(239,237,231,0)}
+:root[data-theme="light"] dialog#lightbox.closing::backdrop{background:rgba(214,215,214,0)}
+:root[data-theme="light"] #lightbox .stage{box-shadow:0 1px 2px rgba(62,55,47,.3),0 7px 14px rgba(62,55,47,.17),0 20px 28px rgba(62,55,47,.11)}
+:root[data-theme="light"] #lightbox .close,
+:root[data-theme="light"] #lightbox .nav{color:rgba(27,30,36,.58);text-shadow:0 1px 5px rgba(255,255,255,.86)}
+:root[data-theme="light"] #lightbox .close:hover,
+:root[data-theme="light"] #lightbox .nav:hover{color:#16181d;border-color:rgba(0,0,0,.1);background:rgba(255,255,255,.42)}
+:root[data-theme="light"] #lightbox .viewer-more{border-color:rgba(0,0,0,.09);background:rgba(255,255,255,.38);color:rgba(27,30,36,.62);text-shadow:none;box-shadow:0 7px 22px rgba(55,50,45,.08)}
+:root[data-theme="light"] #lightbox .viewer-more[aria-expanded="true"],
+:root[data-theme="light"] #lightbox .viewer-more:hover{color:#17191e;border-color:rgba(0,0,0,.13);background:rgba(255,255,255,.7)}
+:root[data-theme="light"] #lightbox .viewer-more.original-ready{color:rgba(25,28,34,.9)}
+:root[data-theme="light"] #lightbox .viewer-more::after{border-color:rgba(245,244,240,.95)}
+:root[data-theme="light"] #lightbox .viewer-action-menu{border-color:rgba(0,0,0,.1);background:rgba(250,249,246,.86);box-shadow:0 16px 46px rgba(55,50,45,.16)}
+:root[data-theme="light"] #lightbox .viewer-action-menu .download,
+:root[data-theme="light"] #lightbox .viewer-action-menu .info,
+:root[data-theme="light"] #lightbox .viewer-action-menu .recommendations{color:rgba(28,30,35,.72)}
+:root[data-theme="light"] #lightbox .viewer-action-menu small{color:rgba(28,30,35,.35)}
+:root[data-theme="light"] #lightbox .viewer-menu-divider{background:rgba(0,0,0,.08)}
+:root[data-theme="light"] #lightbox .download:hover,
+:root[data-theme="light"] #lightbox .info:hover,
+:root[data-theme="light"] #lightbox .info[aria-expanded="true"]{color:#17191e;background:rgba(0,0,0,.055)}
+:root[data-theme="light"] #lightbox .details-panel{border-color:rgba(0,0,0,.1);background:rgba(250,249,246,.9);color:rgba(27,29,34,.88);box-shadow:0 18px 56px rgba(55,50,45,.18)}
+:root[data-theme="light"] #lightbox .details-heading{color:#1b1d22}
+:root[data-theme="light"] #lightbox .details-panel dt{color:rgba(27,29,34,.45)}
+:root[data-theme="light"] #lightbox .details-panel dd{color:rgba(27,29,34,.74)}
+
 
 header button,
 header .search {
@@ -219,7 +248,8 @@ header .search:focus-within {
 
 @media (max-width: 650px) {
   #lightbox figure { padding: 2vh 0; }
-  #lightbox .stage { border-radius: 0; }
+  #lightbox .stage { border-radius:1px;box-shadow:0 1px 2px rgba(4,6,10,.46),0 5px 10px rgba(4,6,10,.27),0 13px 20px rgba(4,6,10,.18) }
+  :root[data-theme="light"] #lightbox .stage{box-shadow:0 1px 2px rgba(62,55,47,.27),0 5px 10px rgba(62,55,47,.15),0 13px 20px rgba(62,55,47,.1)}
   #lightbox .details-panel {
     left:12px;
     right:12px;

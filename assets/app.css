@@ -1,7 +1,9 @@
-:root{color-scheme:dark;--bg:#101114;--panel:#191a1e;--ink:#f5f5f2;--muted:#9b9da4;--line:#34363c;--accent:#f2f2ee;--control:#1b1c21;--control-hover:#27282e;--header:#141519dc;--menu:#1b1c21f5;--hairline:#ffffff12;--soft:#ffffff08;--shadow:#05060a80;--active-ink:#151619;--glow:#ffffff24}
-:root[data-theme="light"]{color-scheme:light;--bg:#f5f5f3;--panel:#fff;--ink:#1b1c1f;--muted:#74777e;--line:#d9dade;--accent:#202124;--control:#fff;--control-hover:#f0f0ed;--header:#ffffffe8;--menu:#fffffff7;--hairline:#00000012;--soft:#00000006;--shadow:#28282824;--active-ink:#fff;--glow:#00000018}
+:root{color-scheme:dark;--bg:#343a44;--panel:#414854;--ink:#f5f5f2;--muted:#b1b5bd;--line:#59616d;--accent:#f2f2ee;--control:#414752;--control-hover:#4b535f;--header:#303640eb;--menu:#3b424df5;--hairline:#ffffff17;--soft:#10131a1c;--shadow:#10131a70;--active-ink:#2f3540;--glow:#ffffff24}
+:root[data-theme="light"]{color-scheme:light;--bg:#e8e5de;--panel:#f6f3ed;--ink:#202228;--muted:#74777d;--line:#d0cbc2;--accent:#343841;--control:#f4f1eb;--control-hover:#ebe6de;--header:#eeeae3ed;--menu:#f5f2ecf7;--hairline:#00000012;--soft:#5b51450b;--shadow:#51483d24;--active-ink:#fff;--glow:#00000016}
 *{box-sizing:border-box}
-html{scrollbar-color:var(--muted) var(--bg)}
+html{scrollbar-color:var(--muted) var(--bg);scrollbar-gutter:stable}
+html.viewer-open{scrollbar-color:transparent transparent}
+html.viewer-open::-webkit-scrollbar-thumb,html.viewer-open::-webkit-scrollbar-track{background:transparent}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;transition:background .22s ease,color .22s ease}
 header{height:72px;display:flex;align-items:center;justify-content:space-between;padding-inline:max(clamp(20px,2vw,28px),calc((100vw - 1800px)/2 + 28px));border-bottom:1px solid var(--hairline);position:sticky;top:0;z-index:5;background:var(--header);box-shadow:0 8px 30px var(--soft);backdrop-filter:blur(18px) saturate(140%);transition:background .22s ease,border-color .22s ease}
 .brand{width:40px;height:40px;display:flex;align-items:center;justify-content:center;color:var(--ink);text-decoration:none}
@@ -16,7 +18,7 @@ header{height:72px;display:flex;align-items:center;justify-content:space-between
 .folder-heading{padding:8px 11px;color:var(--muted);font-size:10px;letter-spacing:.18em;text-transform:uppercase}
 .folder-tree{display:flex;flex-direction:column}
 .folder-item{position:relative;width:100%;height:auto;min-height:36px;padding:8px 10px 8px calc(12px + (var(--depth,0) * 17px));border:0;border-radius:7px;background:transparent;text-align:left;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.folder-item:not(.root):before{content:'⌞';position:absolute;left:calc(8px + ((var(--depth) - 1) * 17px));color:#555}
+.folder-item:not(.root):before{content:'⌞';position:absolute;left:calc(8px + ((var(--depth) - 1) * 17px));color:var(--muted);opacity:.55}
 .folder-item.selected{background:var(--soft);color:var(--ink)}
 .search{width:min(34vw,310px);display:flex;gap:5px;align-items:center;margin-right:4px;padding:3px 10px 3px 3px;border:1px solid var(--line);border-radius:99px;background:var(--control)}
 .search-toggle{flex:0 0 32px;width:32px;height:32px;border:0;background:transparent;color:var(--muted)}
@@ -37,7 +39,7 @@ button{appearance:none;-webkit-appearance:none;-webkit-tap-highlight-color:trans
 .menu-value{color:var(--muted);font-size:11px}
 .menu-divider{height:1px;margin:6px 8px;background:var(--hairline)}
 main{max-width:1800px;margin:auto;padding:10px clamp(8px,2vw,28px) 60px}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));grid-auto-rows:6px;gap:9px;align-items:start}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));grid-auto-rows:6px;gap:9px;align-items:start;overflow-anchor:none}
 .card{position:relative;display:block;background:var(--panel);overflow:hidden;cursor:zoom-in;border-radius:9px;box-shadow:0 4px 14px var(--soft);border:1px solid var(--hairline);transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease}
 .card img{display:block;width:100%;height:auto;opacity:0;transition:opacity .45s,transform .6s}
 .card img.ready{opacity:1}

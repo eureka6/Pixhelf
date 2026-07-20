@@ -2,7 +2,7 @@ const gallery=document.querySelector('#gallery'),sentinel=document.querySelector
 
 const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more');
 
-let rows=[],cursor=null,loading=false,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
+let rows=[],cursor=null,loading=false,loadTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
 
 let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,currentObjectUrl=null,dismissProgress=0;
 
@@ -22,9 +22,10 @@ function setOriginalReady(ready){viewerMore.classList.toggle('original-ready',re
 viewerMore.title=ready?'更多操作 · 原图已加载':'更多操作';
 viewerMore.setAttribute('aria-label',viewerMore.title)}
 
-async function load(reset=false){if(loading||(!reset&&done))return;
+function load(reset=false){if(loading)return loadTask;
+if(!reset&&done)return Promise.resolve([]);
 loading=true;
-if(reset){gallery.replaceChildren();
+loadTask=(async()=>{if(reset){gallery.replaceChildren();
 rows=[];
 cursor=null;
 done=false}const p=new URLSearchParams({limit:'40'});
@@ -33,7 +34,7 @@ p.set('seed',randomSeed);
 p.set('offset',rows.length)}else if(cursor)p.set('cursor',cursor);
 if(query)p.set('q',query);
 if(folder)p.set('folder',folder);
-try{const batch=await fetch('/api/images?'+p).then(r=>r.json());
+const batch=await fetch('/api/images?'+p).then(r=>r.json());
 for(const x of batch){const index=rows.push(x)-1,card=document.createElement('article');
 card.className='card';
 card.dataset.id=x.id;
@@ -44,12 +45,19 @@ card.onclick=()=>open(index);
 gallery.append(card)}layout();
 cursor=batch.at(-1)?.id??cursor;
 done=batch.length<40;
-empty.hidden=rows.length>0}finally{loading=false}}
+empty.hidden=rows.length>0;
+return batch})().finally(()=>{loading=false;
+loadTask=null});
+return loadTask}
+async function extendViewerQueue(index){if(done||index<rows.length-8)return;
+if(!done&&index>=rows.length-8)try{await load()}catch{}}
+async function ensureViewerRow(index){while(!rows[index]&&!done){const before=rows.length;
+try{await load()}catch{break}
+if(rows.length===before)break}
+return Boolean(rows[index])}
 function layout(){const s=getComputedStyle(gallery),row=parseFloat(s.gridAutoRows),gap=parseFloat(s.rowGap);
 for(const card of gallery.children){const h=card.clientWidth*Number(card.dataset.ratio);
 card.style.gridRowEnd=`span ${Math.ceil((h+gap)/(row+gap))}`}}
-function syncGrid(i){const card=rows[i]?gallery.querySelector(`.card[data-id="${rows[i].id}"]`):null;
-if(card)card.scrollIntoView({block:'center',inline:'nearest',behavior:'smooth'})}
 function escapeHtml(s){const d=document.createElement('div');
 d.textContent=s;
 return d.innerHTML}
@@ -101,10 +109,10 @@ closeMore()});
 function setTheme(theme){document.documentElement.dataset.theme=theme;
 localStorage.setItem('gallery-theme',theme);
 const light=theme==='light';
-themeLabel.textContent=light?'切换黑色主题':'切换白色主题';
-themeValue.textContent=light?'浅色':'深色';
+themeLabel.textContent=light?'切换暗色主题':'切换浅色主题';
+themeValue.textContent=light?'浅色':'暗色';
 themeButton.setAttribute('aria-label',themeLabel.textContent);
-themeColor.content=light?'#f5f5f3':'#101114'}
+themeColor.content=light?'#e8e5de':'#343a44'}
 setTheme(document.documentElement.dataset.theme==='light'?'light':'dark');
 themeButton.onclick=()=>{setTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
 closeMore()};
@@ -170,7 +178,9 @@ preview.src=`/thumb/${x.id}`;
 preview.style.opacity='1';
 photo.alt=x.name;
 updateDownload(x);
-if(!dialog.open)dialog.showModal();
+if(!dialog.open){document.documentElement.classList.add('viewer-open');
+dialog.showModal()}
+extendViewerQueue(i);
 const current=decoded(i,token);
 preloadAround(i,1);
 reveal(await current,i,token)}
@@ -202,13 +212,29 @@ photo.src=img.src;
 requestAnimationFrame(()=>{if(token!==openToken||!dialog.open||active!==i)return;
 photo.style.opacity='1';
 setTimeout(()=>{if(token===openToken&&dialog.open&&active===i)preview.style.opacity='0'},130)})}
+const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+async function returnTarget(){const card=rows[active]?gallery.querySelector(`.card[data-id="${rows[active].id}"]`):null;
+if(!card)return null;
+const image=card.querySelector('img');
+if(image){image.loading='eager';
+image.fetchPriority='high'}
+layout();
+await nextFrame();
+let target=card.getBoundingClientRect();
+if(target.top<16||target.bottom>innerHeight-16){card.scrollIntoView({block:'center',inline:'nearest',behavior:'auto'});
+await nextFrame();
+layout();
+await nextFrame();
+target=card.getBoundingClientRect()}
+if(image&&!image.complete)await Promise.race([image.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,120))]);
+return image?.getBoundingClientRect()||target}
 async function closeViewer(){if(closing||!dialog.open)return;
 closing=true;
-dialog.classList.add('closing');
 openToken++;
 switching=false;
 clearTimeout(closeTimer);
-const card=rows[active]?gallery.querySelector(`.card[data-id="${rows[active].id}"] img`):null,target=card?.getBoundingClientRect(),from=hero.getBoundingClientRect();
+const target=await returnTarget(),from=hero.getBoundingClientRect();
+dialog.classList.add('closing');
 let animation;
 if(target&&target.width&&target.height){const clone=document.createElement('img'),source=Number(getComputedStyle(photo).opacity)>.5?photo:preview,dx=target.left-from.left,dy=target.top-from.top,sx=target.width/from.width,sy=target.height/from.height;
 clone.src=source.currentSrc||source.src;
@@ -221,6 +247,7 @@ clone.remove();
 hero.style.visibility=''}else{animation=dialog.animate([{opacity:1},{opacity:0}],{duration:180,easing:'cubic-bezier(.22,.61,.36,1)',fill:'forwards'});
 await animation.finished.catch(()=>{});
 animation.cancel()}dialog.close();
+document.documentElement.classList.remove('viewer-open');
 dialog.classList.remove('closing');
 closeDetails();
 closeViewerMenu();
@@ -242,15 +269,18 @@ currentObjectUrl=url;
 return img}catch{prefetched.delete(id);
 return null}}
 async function upgrade(i,token){reveal(await decoded(i,token),i,token)}
-async function slide(dir){const next=active+dir;
-if(switching||!rows[next]){resetView();
-return}switching=true;
+async function slide(dir){if(switching)return;
+switching=true;
+const next=active+dir;
+if(dir>0&&!rows[next])await ensureViewerRow(next);
+if(!rows[next]){switching=false;
+resetView();
+return}
 const token=++openToken,out=dir>0?-innerWidth:innerWidth,thumb=decodedThumb(next);
 hero.style.transition='transform .16s ease-in';
 hero.style.transform=`translate3d(${out}px,0,0) scale(1)`;
 const [readyThumb]=await Promise.all([thumb,new Promise(r=>setTimeout(r,160))]);
 active=next;
-syncGrid(next);
 const x=rows[next];
 resetView();
 closeDetails();
@@ -269,6 +299,7 @@ hero.style.transition='none';
 hero.style.transform=`translate3d(${-out}px,0,0) scale(1)`;
 const current=upgrade(next,token);
 preloadAround(next,dir);
+extendViewerQueue(next);
 current.catch(()=>{});
 requestAnimationFrame(()=>requestAnimationFrame(()=>{photo.style.transition='opacity 120ms ease-out';
 hero.style.transition='transform .2s cubic-bezier(.2,.75,.25,1)';
@@ -344,14 +375,15 @@ return}if(moved<12){tx=gesture.tx;
 ty=gesture.ty;
 if(gesture.dismissedOverlay){apply();
 return}
-if(scale>1){clearTimeout(closeTimer);
+const now=Date.now();
+if(scale>1){if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
 lastTap=0;
-scale=1;
+zoom(e.clientX,e.clientY)
+}else{lastTap=now;
+closeTimer=setTimeout(()=>{if(scale>1){scale=1;
 tx=ty=0;
 zoomStep=0;
-apply();
-return}
-const now=Date.now();
+apply()}},DOUBLE_TAP_MS)}return}
 if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
 lastTap=0;
 zoom(e.clientX,e.clientY)}else{lastTap=now;
