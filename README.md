@@ -50,6 +50,20 @@ docker run -d --name gallery \
 
 容器默认监听 `0.0.0.0:3002`。原图目录建议只读挂载，索引和缩略图写入 `gallery-data` 卷。
 
+也可以使用 Docker Compose 一键部署或更新：
+
+```bash
+docker compose up -d --pull always
+```
+
+默认读取当前目录的 `pictures`，并监听主机的 `3002` 端口。可通过环境变量覆盖：
+
+```bash
+GALLERY_PICTURES=/path/to/photos GALLERY_PORT=3002 docker compose up -d --pull always
+```
+
+停止服务但保留索引和缩略图使用 `docker compose down`；连同 `gallery-data` 持久卷一起删除则使用 `docker compose down -v`。
+
 ## 设计边界
 
 - 启动和右上角刷新会增量写入索引；查询每批最多 100 条。
