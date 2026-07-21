@@ -22,7 +22,7 @@ RUN case "$TARGETARCH" in \
     && rustup target add "$rust_target" \
     && cargo build --locked --release --target "$rust_target" \
     && mkdir -p /out \
-    && cp "/src/target/$rust_target/release/lowkey-gallery" /out/gallery
+    && cp "/src/target/$rust_target/release/pixhelf" /out/pixhelf
 
 FROM alpine:latest AS runtime-alpine
 
@@ -31,7 +31,7 @@ RUN addgroup -g 10001 -S gallery \
     && mkdir -p /pictures /data \
     && chown gallery:gallery /data
 
-COPY --from=builder-musl /out/gallery /usr/local/bin/gallery
+COPY --from=builder-musl /out/pixhelf /usr/local/bin/pixhelf
 
 ENV GALLERY_ROOT=/pictures \
     GALLERY_DATA=/data \
@@ -42,6 +42,6 @@ VOLUME ["/pictures", "/data"]
 EXPOSE 3002
 USER gallery
 
-ENTRYPOINT ["/usr/local/bin/gallery"]
+ENTRYPOINT ["/usr/local/bin/pixhelf"]
 
 FROM runtime-alpine AS runtime

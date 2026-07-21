@@ -1,5 +1,5 @@
 variable "IMAGE" {
-  default = "eureka6688/gallery"
+  default = "eureka6688/pixhelf"
 }
 
 variable "VERSION" {

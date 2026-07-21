@@ -4,14 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#343a44">
-  <title>暮色画廊</title>
+  <title>Pixhelf</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script>document.documentElement.dataset.theme=localStorage.getItem('gallery-theme')||'dark'</script>
   <link rel="stylesheet" href="/assets/app.css">
   <link rel="stylesheet" href="/assets/stage.css">
 </head>
 <body>
   <header>
-    <a class="brand" href="/" aria-label="暮色画廊" title="暮色画廊"><svg viewBox="0 0 40 40" aria-hidden="true"><rect x="7.5" y="7.5" width="25" height="25" rx="2"/><circle cx="20" cy="20" r="6"/><path d="M20 3.5v4M20 32.5v4M3.5 20h4M32.5 20h4"/></svg></a>
+    <a class="brand" href="/" aria-label="Pixhelf" title="Pixhelf"><svg viewBox="0 0 40 40" aria-hidden="true"><rect x="7.5" y="7.5" width="25" height="25" rx="2"/><circle cx="20" cy="20" r="6"/><path d="M20 3.5v4M20 32.5v4M3.5 20h4M32.5 20h4"/></svg></a>
     <div class="tools">
       <div class="folder-picker">
         <button id="folders" class="tool-button folder-button" title="选择文件夹" aria-label="选择文件夹" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></button>
@@ -39,6 +40,7 @@
     <div id="sentinel" aria-hidden="true"></div>
   </main>
   <dialog id="lightbox">
+    <div class="viewer-count" aria-live="polite"></div>
     <button class="close" aria-label="关闭">×</button>
     <button class="nav prev" aria-label="上一张">‹</button>
     <figure><div class="stage"><img class="preview" alt=""><img class="original" alt=""></div><div class="details-panel" hidden><div class="details-heading">图片详情</div><dl><div><dt>文件名</dt><dd data-detail="name"></dd></div><div><dt>所在路径</dt><dd data-detail="path"></dd></div><div><dt>尺寸</dt><dd data-detail="dimensions"></dd></div><div><dt>格式</dt><dd data-detail="format"></dd></div><div><dt>文件大小</dt><dd data-detail="size"></dd></div></dl></div><div class="viewer-actions"><div class="viewer-action-menu" hidden><button class="info" aria-label="显示图片详情" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 10.5v6M12 7.5h.01"/></svg><span>图片详情</span></button><button id="recommendations" class="recommendations" aria-label="更多推荐，待完善" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="12" height="11" rx="1.5"/><path d="m7 15 2.5-2.5 2 2 1.5-1.5 3 3M18.5 4v4M16.5 6h4"/></svg><span>更多推荐</span><small>待完善</small></button><div class="viewer-menu-divider"></div><a class="download" aria-label="下载原图" download><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg><span>下载原图</span></a></div><button class="viewer-more" aria-label="更多操作" title="更多操作" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="9.5" r="1.5"/><path d="m5.5 17 4.2-4.2 2.8 2.7 2.3-2.2 3.7 3.7"/></svg></button></div></figure>

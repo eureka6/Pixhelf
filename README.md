@@ -1,6 +1,8 @@
-# 暮色画廊 / Lowkey Gallery
+# Pixhelf
 
 一个面向大型本地图片库的低资源 Rust 图片画廊。原图留在磁盘，SQLite 只保存元数据；列表使用游标分页，缩略图首次访问时生成并长期缓存。
+
+Cargo 包名和构建生成的可执行文件名均为 `pixhelf`。
 
 ## 启动
 
@@ -23,7 +25,7 @@ cargo run --release -- --root /mnt/photos --data /var/lib/gallery --bind 0.0.0.0
 镜像使用 Alpine runtime，二进制按 musl 目标构建：
 
 ```bash
-docker build -t eureka6688/gallery:latest .
+docker build -t eureka6688/pixhelf:latest .
 ```
 
 构建当前处理器架构的 Alpine 镜像：
@@ -45,7 +47,7 @@ docker run -d --name gallery \
   -p 3002:3002 \
   -v /path/to/photos:/pictures:ro \
   -v gallery-data:/data \
-  eureka6688/gallery:latest
+  eureka6688/pixhelf:latest
 ```
 
 容器默认监听 `0.0.0.0:3002`。原图目录建议只读挂载，索引和缩略图写入 `gallery-data` 卷。

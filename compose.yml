@@ -1,12 +1,12 @@
 services:
   gallery:
-    image: eureka6688/gallery:latest
+    image: eureka6688/pixhelf:latest
     container_name: gallery
     restart: unless-stopped
     ports:
-      - "${GALLERY_PORT:-3002}:3002"
+      - "3002:3002"
     volumes:
-      - "${GALLERY_PICTURES:-./pictures}:/pictures:ro"
+      - "./pictures:/pictures:ro"
       - gallery-data:/data
 
 volumes:

@@ -1,16 +1,16 @@
 const gallery=document.querySelector('#gallery'),sentinel=document.querySelector('#sentinel'),empty=document.querySelector('#empty');
 
-const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more');
+const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more'),viewerCount=dialog.querySelector('.viewer-count');
 
 let rows=[],cursor=null,loading=false,loadTask=null,waterfallTask=null,viewerQueueTask=null,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false;
 
-let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,activeId=null,currentObjectUrl=null,dismissProgress=0;
+let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,openToken=0,activeId=null,dismissProgress=0;
 
 const pointers=new Map();
 
 const DOUBLE_TAP_MS=300;
 
-const PREFETCH_RADIUS=4,prefetched=new Set(),preloadImages=new Map();
+const PREFETCH_RADIUS=1,decodedCache=new Map(),DECODE_BUDGET=matchMedia('(max-width:650px)').matches?96*1024*1024:256*1024*1024;
 
 const human=n=>{const u=['B','KB','MB','GB','TB'];
 let i=0;
@@ -22,6 +22,21 @@ function setOriginalReady(ready){viewerMore.classList.toggle('original-ready',re
 viewerMore.title=ready?'更多操作 · 原图已加载':'更多操作';
 viewerMore.setAttribute('aria-label',viewerMore.title)}
 
+function appendCards(from){if(from>=rows.length)return;
+const fragment=document.createDocumentFragment();
+for(let index=from;index<rows.length;index++){const x=rows[index],card=document.createElement('article');
+card.className='card';
+card.dataset.id=x.id;
+card.dataset.ratio=x.height/x.width;
+card.style.setProperty('--ratio',`${x.width}/${x.height}`);
+card.innerHTML=`<img loading="lazy" decoding="async" width="${x.width}" height="${x.height}" src="/thumb/${x.id}" alt="${escapeHtml(x.name)}"><div class="meta"><b>${escapeHtml(x.name)}</b><span>${x.width} × ${x.height} · ${human(x.bytes)}</span></div>`;
+card.querySelector('img').onload=e=>e.target.classList.add('ready');
+card.onclick=()=>open(index);
+galleryWarmObserver.observe(card);
+galleryVisibleObserver.observe(card);
+fragment.append(card)}
+gallery.append(fragment);
+scheduleLayout(from)}
 function load(reset=false){if(loading)return loadTask;
 if(!reset&&done)return Promise.resolve([]);
 loading=true;
@@ -35,17 +50,10 @@ p.set('offset',rows.length)}else if(cursor)p.set('cursor',cursor);
 if(query)p.set('q',query);
 if(folder)p.set('folder',folder);
 const batch=await fetch('/api/images?'+p).then(r=>r.json());
-const firstNewCard=rows.length,fragment=document.createDocumentFragment();
-for(const x of batch){const index=rows.push(x)-1,card=document.createElement('article');
-card.className='card';
-card.dataset.id=x.id;
-card.dataset.ratio=x.height/x.width;
-card.style.setProperty('--ratio',`${x.width}/${x.height}`);
-card.innerHTML=`<img loading="lazy" decoding="async" width="${x.width}" height="${x.height}" src="/thumb/${x.id}" alt="${escapeHtml(x.name)}"><div class="meta"><b>${escapeHtml(x.name)}</b><span>${x.width} × ${x.height} · ${human(x.bytes)}</span></div>`;
-card.querySelector('img').onload=e=>e.target.classList.add('ready');
-card.onclick=()=>open(index);
-fragment.append(card)}gallery.append(fragment);
-scheduleLayout(firstNewCard);
+const firstNewCard=rows.length;
+rows.push(...batch);
+appendCards(firstNewCard);
+updateViewerCount();
 cursor=batch.at(-1)?.id??cursor;
 done=batch.length<40;
 empty.hidden=rows.length>0;
@@ -89,6 +97,14 @@ layout(from)})}
 function escapeHtml(s){const d=document.createElement('div');
 d.textContent=s;
 return d.innerHTML}
+function warmCard(card,priority='auto'){const image=card.querySelector('img');
+if(!image)return Promise.resolve();
+image.loading='eager';
+image.fetchPriority=priority;
+if(!image._decodeTask)image._decodeTask=image.decode().catch(()=>{}).then(()=>{if(image.naturalWidth)image.classList.add('ready')}).finally(()=>{image._decodeTask=null});
+return image._decodeTask}
+const visibleGalleryCards=new Set(),galleryWarmObserver=new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting)warmCard(entry.target)},{rootMargin:'100% 0px'}),galleryVisibleObserver=new IntersectionObserver(entries=>{for(const entry of entries){if(entry.isIntersecting){visibleGalleryCards.add(entry.target);
+warmCard(entry.target,'high')}else visibleGalleryCards.delete(entry.target)}});
 const folderButton=document.querySelector('#folders'),folderMenu=document.querySelector('#folder-menu'),folderTree=document.querySelector('#folder-tree'),moreButton=document.querySelector('#more'),moreMenu=document.querySelector('#more-menu'),themeButton=document.querySelector('#theme'),themeLabel=themeButton.querySelector('.theme-label'),themeValue=themeButton.querySelector('.menu-value'),themeColor=document.querySelector('meta[name="theme-color"]');
 function closeMore(){moreMenu.hidden=true;
 moreButton.setAttribute('aria-expanded','false')}
@@ -189,6 +205,7 @@ setTimeout(()=>{if(!dismissProgress){dialog.classList.remove('dismissing');
 dialog.style.removeProperty('--dismiss-progress')}},240)}
 function updateDownload(x){download.href=`/image/${x.id}`;
 download.download=x.name}
+function updateViewerCount(){viewerCount.textContent=active>=0&&dialog.open?`${active+1} / ${rows.length}`:''}
 async function open(i){if(!rows[i])return;
 const token=++openToken;
 active=i;
@@ -209,28 +226,62 @@ photo.alt=x.name;
 updateDownload(x);
 if(!dialog.open){document.documentElement.classList.add('viewer-open');
 dialog.showModal()}
+updateViewerCount();
 extendViewerQueue(i);
 const current=decoded(i,token);
 preloadAround(i,1);
 reveal(await current,i,token)}
-function preload(i){if(!rows[i]||prefetched.has(rows[i].id))return;
-const id=rows[i].id,img=new Image;
-prefetched.add(id);
-preloadImages.set(id,img);
-img.fetchPriority='low';
-img.onload=()=>preloadImages.delete(id);
-img.onerror=()=>{preloadImages.delete(id);
-prefetched.delete(id)};
-img.src=`/image/${id}`}
+function trimDecodedCache(keepId){let used=0;
+for(const entry of decodedCache.values())used+=entry.bytes;
+if(used<=DECODE_BUDGET)return;
+for(const [id,entry] of [...decodedCache].sort((a,b)=>a[1].used-b[1].used)){if(used<=DECODE_BUDGET)break;
+if(id===keepId||id===activeId||!entry.url)continue;
+decodedCache.delete(id);
+URL.revokeObjectURL(entry.url);
+used-=entry.bytes}}
+function decodedAsset(i,priority='auto'){if(!rows[i])return Promise.resolve(null);
+const x=rows[i],cached=decodedCache.get(x.id);
+if(cached){cached.used=performance.now();
+return cached.promise}
+const entry={bytes:x.width*x.height*4,used:performance.now(),url:null,promise:null};
+entry.promise=(async()=>{try{const response=await fetch(`/image/${x.id}`,{priority});
+if(!response.ok)throw new Error(`HTTP ${response.status}`);
+const blob=await response.blob(),url=URL.createObjectURL(blob),img=new Image;
+entry.url=url;
+img.src=url;
+await img.decode();
+entry.used=performance.now();
+trimDecodedCache(x.id);
+return img}catch{if(entry.url)URL.revokeObjectURL(entry.url);
+decodedCache.delete(x.id);
+return null}})();
+decodedCache.set(x.id,entry);
+return entry.promise}
+function preload(i){decodedAsset(i,'low')}
 function preloadAround(center,direction=1){for(let distance=1;
 distance<=PREFETCH_RADIUS;
 distance++){preload(center+distance*direction);
 preload(center-distance*direction)}}
 function decodedThumb(i){return new Promise(resolve=>{if(!rows[i]){resolve(null);
 return}const img=new Image;
+img.fetchPriority='high';
 img.onload=async()=>{try{await img.decode()}catch{}resolve(img)};
 img.onerror=()=>resolve(null);
 img.src=`/thumb/${rows[i].id}`})}
+function firstDrawable(...tasks){return Promise.any(tasks.map(task=>task.then(img=>img||Promise.reject()))).catch(()=>null)}
+async function syncGalleryPosition(i){appendCards(gallery.children.length);
+const card=gallery.children[i];
+if(!card)return null;
+// Let the already scheduled incremental layout cover newly appended cards;
+// avoid an O(total cards) forced layout on every viewer navigation.
+await nextFrame();
+const image=card.querySelector('img');
+warmCard(card,'high');
+card.scrollIntoView({block:'center',inline:'nearest',behavior:'auto'});
+await nextFrame();
+if(image&&!image.complete)await Promise.race([image.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,500))]);
+if(image?.naturalWidth)image.classList.add('ready');
+return image?.naturalWidth?image:null}
 function reveal(img,i,token){if(token!==openToken||!dialog.open||active!==i)return;
 if(!img){photo.removeAttribute('src');
 photo.style.opacity='0';
@@ -245,9 +296,11 @@ setTimeout(()=>{if(token===openToken&&dialog.open&&active===i)preview.style.opac
 const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
 async function settleViewerLayout(){if(viewerQueueTask)await viewerQueueTask.catch(()=>{});
 if(loadTask)await loadTask.catch(()=>{});
+appendCards(gallery.children.length);
 layout();
 await nextFrame();
 layout();
+await Promise.allSettled([...visibleGalleryCards].map(card=>warmCard(card,'high')));
 await nextFrame()}
 async function returnTarget(id){if(id==null)return null;
 await settleViewerLayout();
@@ -295,21 +348,23 @@ preview.removeAttribute('src');
 activeId=null;
 resetView();
 closing=false;
-fillWaterfall()}
-async function decoded(i,token){const id=rows[i].id;
-prefetched.add(id);
-try{const response=await fetch(`/image/${id}`,{priority:'high'});
-if(!response.ok)throw new Error(`HTTP ${response.status}`);
-const blob=await response.blob();
-if(token!==openToken)return null;
-const url=URL.createObjectURL(blob),img=new Image;
-img.src=url;
-await img.decode();
-if(currentObjectUrl)URL.revokeObjectURL(currentObjectUrl);
-currentObjectUrl=url;
-return img}catch{prefetched.delete(id);
-return null}}
+// The covered gallery may already have moved its sentinel into view. Wait for
+// the modal-era observer task to settle, then explicitly resume pagination;
+// IntersectionObserver will not emit another entry while it stays intersecting.
+requestAnimationFrame(()=>fillWaterfall())}
+async function decoded(i,token){const img=await decodedAsset(i,'high');
+return token===openToken?img:null}
 async function upgrade(i,token){reveal(await decoded(i,token),i,token)}
+function afterTransition(element,property,fallback){return new Promise(resolve=>{let settled=false;
+const finish=()=>{if(settled)return;
+settled=true;
+clearTimeout(timer);
+element.removeEventListener('transitionend',ended);
+element.removeEventListener('transitioncancel',finish);
+resolve()};
+const ended=e=>{if(e.target===element&&e.propertyName===property)finish()},timer=setTimeout(finish,fallback);
+element.addEventListener('transitionend',ended);
+element.addEventListener('transitioncancel',finish)})}
 async function slide(dir){if(switching)return;
 switching=true;
 const next=active+dir;
@@ -320,18 +375,24 @@ if(!rows[next]){switching=false;
 resetView();
 return}
 const token=++openToken,out=dir>0?-innerWidth:innerWidth,thumbUrl=`/thumb/${rows[next].id}`;
-// Start the thumbnail request early, but never make navigation wait for it. Newly
-// paged cards are lazy-loaded behind the modal and their thumbnails may still
-// need to be generated by the server.
-decodedThumb(next).catch(()=>{});
+// Keep the covered gallery aligned with the viewer. Making the matching card a
+// real visible, eager item lets the browser paint its thumbnail before the
+// viewer advances and also preserves the correct close-animation destination.
+const galleryTask=syncGalleryPosition(next),thumbTask=decodedThumb(next),originalTask=decodedAsset(next,'high'),galleryThumb=await galleryTask,incoming=await firstDrawable(Promise.resolve(galleryThumb),thumbTask,originalTask);
+if(closing||!dialog.open){switching=false;
+return}
+if(!incoming){switching=false;
+return}
 hero.style.transition='transform .16s ease-in';
+const slideOut=afterTransition(hero,'transform',220);
 hero.style.transform=`translate3d(${out}px,0,0) scale(1)`;
-await new Promise(r=>setTimeout(r,160));
+await slideOut;
 if(closing||!dialog.open){switching=false;
 return}
 active=next;
 const x=rows[next];
 activeId=x.id;
+updateViewerCount();
 resetView();
 closeDetails();
 closeViewerMenu();
@@ -341,7 +402,9 @@ sizeHero(x);
 photo.style.transition='none';
 photo.style.opacity='0';
 photo.removeAttribute('src');
-preview.src=thumbUrl;
+preview.style.opacity='0';
+preview.removeAttribute('src');
+preview.src=incoming.currentSrc||incoming.src||thumbUrl;
 preview.style.opacity='1';
 photo.alt=x.name;
 updateDownload(x);
@@ -353,8 +416,9 @@ extendViewerQueue(next);
 current.catch(()=>{});
 requestAnimationFrame(()=>requestAnimationFrame(()=>{photo.style.transition='opacity 120ms ease-out';
 hero.style.transition='transform .2s cubic-bezier(.2,.75,.25,1)';
+const slideIn=afterTransition(hero,'transform',260);
 hero.style.transform='translate3d(0,0,0) scale(1)';
-setTimeout(()=>{switching=false},200)}))}
+slideIn.then(()=>{switching=false})}))}
 function setScaleAt(next,x=innerWidth/2,y=innerHeight/2){const rect=hero.getBoundingClientRect(),baseX=rect.left+rect.width/2-tx,baseY=rect.top+rect.height/2-ty,ratio=next/scale;
 tx=x-baseX-ratio*(x-baseX-tx);
 ty=y-baseY-ratio*(y-baseY-ty);
@@ -488,7 +552,7 @@ closeMore()};
 new ResizeObserver(scheduleLayout).observe(gallery);
 addEventListener('resize',()=>{if(dialog.open&&rows[active]){resetView();
 sizeHero(rows[active])}});
-new IntersectionObserver(es=>es[0].isIntersecting&&fillWaterfall(),{rootMargin:'800px'}).observe(sentinel);
+new IntersectionObserver(es=>es[0].isIntersecting&&!dialog.open&&fillWaterfall(),{rootMargin:'800px'}).observe(sentinel);
 async function init(){const paths=await refreshFolders();
 if(paths.length){folder=paths[0];
 folderButton.title=folder;

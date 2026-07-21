@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("lowkey_gallery=info".parse()?),
+                .add_directive("pixhelf=info".parse()?),
         )
         .init();
     let args = Args::parse();
@@ -69,6 +69,15 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route(
+            "/favicon.svg",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "image/svg+xml")],
+                    include_str!("../assets/favicon.svg"),
+                )
+            }),
+        )
         .route(
             "/assets/app.css",
             get(|| async {
@@ -110,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot bind {}", args.bind))?;
     warm_thumbnail_cache(state.clone());
-    tracing::info!(address = %args.bind, "gallery ready");
+    tracing::info!(address = %args.bind, "pixhelf ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown(state))
         .await?;

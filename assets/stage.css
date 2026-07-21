@@ -88,6 +88,20 @@ dialog#lightbox.closing::backdrop {
   transition: opacity 160ms ease, color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.22, .72, .2, 1);
 }
 
+#lightbox .viewer-count {
+  position: fixed;
+  top: 23px;
+  left: 24px;
+  z-index: 4;
+  color: rgba(255,255,255,.58);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .08em;
+  text-shadow: 0 2px 8px rgba(0,0,0,.78);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 180ms cubic-bezier(.22,.72,.2,1);
+}
+
 #lightbox .nav {
   width: 42px;
   height: 68px;
@@ -104,6 +118,7 @@ dialog#lightbox.closing::backdrop {
 
 #lightbox.dismissing .close,
 #lightbox.dismissing .nav,
+#lightbox.dismissing .viewer-count,
 #lightbox.dismissing .viewer-actions,
 #lightbox.dismissing .details-panel {
   opacity: calc(1 - var(--dismiss-progress) * 1.8);
@@ -112,6 +127,7 @@ dialog#lightbox.closing::backdrop {
 
 #lightbox.closing .close,
 #lightbox.closing .nav,
+#lightbox.closing .viewer-count,
 #lightbox.closing .viewer-actions,
 #lightbox.closing .details-panel {
   opacity: 0;
@@ -119,6 +135,7 @@ dialog#lightbox.closing::backdrop {
 }
 
 #lightbox.closing .close { transform: translateY(-10px) scale(.9); }
+#lightbox.closing .viewer-count { transform: translateY(-8px); }
 #lightbox.closing .prev { transform: translateX(-14px) scale(.92); }
 #lightbox.closing .next { transform: translateX(14px) scale(.92); }
 #lightbox.closing .viewer-actions { transform: translateY(10px) scale(.94); }
@@ -212,7 +229,8 @@ dialog#lightbox.closing::backdrop {
 :root[data-theme="light"] dialog#lightbox.closing::backdrop{background:rgba(214,215,214,0)}
 :root[data-theme="light"] #lightbox .stage{box-shadow:0 1px 2px rgba(62,55,47,.3),0 7px 14px rgba(62,55,47,.17),0 20px 28px rgba(62,55,47,.11)}
 :root[data-theme="light"] #lightbox .close,
-:root[data-theme="light"] #lightbox .nav{color:rgba(27,30,36,.58);text-shadow:0 1px 5px rgba(255,255,255,.86)}
+:root[data-theme="light"] #lightbox .nav,
+:root[data-theme="light"] #lightbox .viewer-count{color:rgba(27,30,36,.58);text-shadow:0 1px 5px rgba(255,255,255,.86)}
 :root[data-theme="light"] #lightbox .close:hover,
 :root[data-theme="light"] #lightbox .nav:hover{color:#16181d;border-color:rgba(0,0,0,.1);background:rgba(255,255,255,.42)}
 :root[data-theme="light"] #lightbox .viewer-more{border-color:rgba(0,0,0,.09);background:rgba(255,255,255,.38);color:rgba(27,30,36,.62);text-shadow:none;box-shadow:0 7px 22px rgba(55,50,45,.08)}
@@ -260,6 +278,7 @@ header .search:focus-within {
   }
   #lightbox .viewer-actions{right:calc(12px + env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px))}
   #lightbox .close{top:calc(12px + env(safe-area-inset-top,0px));right:calc(12px + env(safe-area-inset-right,0px))}
+  #lightbox .viewer-count{top:calc(20px + env(safe-area-inset-top,0px));left:calc(16px + env(safe-area-inset-left,0px))}
 }
 
 @keyframes details-up{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
