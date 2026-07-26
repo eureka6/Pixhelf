@@ -1,5 +1,7 @@
 /target
+/dist
 /data
 /pictures
+ssh-git.pub
 *.sqlite-shm
 *.sqlite-wal
