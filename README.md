@@ -53,6 +53,9 @@ VERSION=0.1.0 PLATFORMS=linux/amd64,linux/arm64 docker buildx bake --push
 这些标签指向同一套 Alpine runtime 镜像，并作为 manifest list 发布。Docker 会根据主机
 架构自动拉取正确的镜像：
 
+GitHub 会把 amd64 和 arm64 构建分配给对应架构的原生 Runner，分别推送镜像 digest 后再
+合并 manifest，不使用 QEMU 模拟编译。
+
 ```bash
 docker pull eureka6688/pixhelf:latest
 ```
