@@ -72,6 +72,34 @@ GALLERY_PICTURES=/path/to/photos GALLERY_PORT=3002 docker compose up -d --pull a
 
 停止服务但保留索引和缩略图使用 `docker compose down`；连同 `gallery-data` 持久卷一起删除则使用 `docker compose down -v`。
 
+## 发布 Linux 二进制
+
+推送以 `v` 开头、且与 `Cargo.toml` 中版本一致的标签后，GitHub Actions 会自动构建并发布
+两个完全静态链接的 MUSL 二进制包：
+
+- `pixhelf-vX.Y.Z-linux-amd64-musl.tar.gz`
+- `pixhelf-vX.Y.Z-linux-arm64-musl.tar.gz`
+- `SHA256SUMS`
+
+例如发布 `0.1.0`：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+下载适合处理器架构的压缩包后，解压即可运行：
+
+```bash
+tar -xzf pixhelf-v0.1.0-linux-amd64-musl.tar.gz
+./pixhelf --help
+```
+
+MUSL 静态二进制不依赖目标系统安装 glibc 或其他动态库，因此可覆盖大多数使用
+`x86_64/amd64` 或 `aarch64/arm64` 的 64 位 Linux 发行版，包括 Alpine 和常见 glibc
+发行版。它仍然是 Linux ELF 程序，不能直接用于 Windows、macOS、BSD 或 Android；
+32 位设备、其他 CPU 架构以及过旧的 Linux 内核也不在这两个构建的覆盖范围内。
+
 ## 设计边界
 
 - 启动和右上角刷新会增量写入索引；查询每批最多 100 条。

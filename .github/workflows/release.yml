@@ -1,0 +1,112 @@
+name: Release MUSL binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "pixhelf") | .version'
+          )"
+
+          if [[ "$GITHUB_REF_NAME" != v* || -z "$tag_version" ]]; then
+            echo "Release tags must start with v, for example v0.1.0." >&2
+            exit 1
+          fi
+
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $package_version." >&2
+            exit 1
+          fi
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+          fallback: none
+
+      - name: Build and package static binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          build_archive() {
+            local target="$1"
+            local architecture="$2"
+            local binary="target/$target/release/pixhelf"
+            local staging
+            local archive="release/pixhelf-${GITHUB_REF_NAME}-linux-${architecture}-musl.tar.gz"
+
+            cross build --locked --release --target "$target"
+
+            if readelf -l "$binary" | grep -q 'INTERP'; then
+              echo "$binary contains a dynamic program interpreter." >&2
+              exit 1
+            fi
+
+            if readelf -d "$binary" 2>/dev/null | grep -q 'NEEDED'; then
+              echo "$binary contains dynamic library dependencies." >&2
+              exit 1
+            fi
+
+            staging="$(mktemp -d)"
+            install -m 0755 "$binary" "$staging/pixhelf"
+            tar -C "$staging" -czf "$archive" pixhelf
+            rm -rf "$staging"
+          }
+
+          build_archive x86_64-unknown-linux-musl amd64
+          build_archive aarch64-unknown-linux-musl arm64
+
+          (
+            cd release
+            sha256sum ./*.tar.gz > SHA256SUMS
+          )
+
+          tar -tzf "release/pixhelf-${GITHUB_REF_NAME}-linux-amd64-musl.tar.gz"
+          tar -tzf "release/pixhelf-${GITHUB_REF_NAME}-linux-arm64-musl.tar.gz"
+          (
+            cd release
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Pixhelf $GITHUB_REF_NAME"
+          fi
