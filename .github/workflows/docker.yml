@@ -1,0 +1,91 @@
+name: Build Docker image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Build and publish multi-platform image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "pixhelf") | .version'
+          )"
+
+          if [[ "$GITHUB_REF_NAME" != v* || -z "$tag_version" ]]; then
+            echo "Release tags must start with v, for example v0.1.0." >&2
+            exit 1
+          fi
+
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $package_version." >&2
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: eureka6688/pixhelf
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest
+            type=raw,value=alpine
+            type=raw,value=musl
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},suffix=-alpine
+            type=semver,pattern={{version}},suffix=-musl
+
+      - name: Build and push multi-platform image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true

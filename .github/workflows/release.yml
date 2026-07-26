@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -14,8 +14,10 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish
+    name: Build and publish binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Check out source
@@ -55,12 +57,11 @@ jobs:
 
           mkdir -p release
 
-          build_archive() {
+          build_binary() {
             local target="$1"
             local architecture="$2"
             local binary="target/$target/release/pixhelf"
-            local staging
-            local archive="release/pixhelf-${GITHUB_REF_NAME}-linux-${architecture}-musl.tar.gz"
+            local output="release/pixhelf-linux-${architecture}-musl"
 
             cross build --locked --release --target "$target"
 
@@ -74,22 +75,18 @@ jobs:
               exit 1
             fi
 
-            staging="$(mktemp -d)"
-            install -m 0755 "$binary" "$staging/pixhelf"
-            tar -C "$staging" -czf "$archive" pixhelf
-            rm -rf "$staging"
+            install -m 0755 "$binary" "$output"
           }
 
-          build_archive x86_64-unknown-linux-musl amd64
-          build_archive aarch64-unknown-linux-musl arm64
+          build_binary x86_64-unknown-linux-musl amd64
+          build_binary aarch64-unknown-linux-musl arm64
 
           (
             cd release
-            sha256sum ./*.tar.gz > SHA256SUMS
+            sha256sum ./pixhelf-linux-*-musl > SHA256SUMS
           )
 
-          tar -tzf "release/pixhelf-${GITHUB_REF_NAME}-linux-amd64-musl.tar.gz"
-          tar -tzf "release/pixhelf-${GITHUB_REF_NAME}-linux-arm64-musl.tar.gz"
+          file release/pixhelf-linux-*-musl
           (
             cd release
             sha256sum --check SHA256SUMS

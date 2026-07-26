@@ -40,13 +40,27 @@ docker build -t eureka6688/pixhelf:latest .
 VERSION=0.1.0 docker buildx bake
 ```
 
-默认只构建 `linux/amd64`。构建 `amd64` 和 `arm64` 多架构 Alpine 镜像并推送到仓库：
+默认只构建 `linux/amd64`。本地构建 `amd64` 和 `arm64` 多架构 Alpine 镜像并推送到仓库：
 
 ```bash
 VERSION=0.1.0 PLATFORMS=linux/amd64,linux/arm64 docker buildx bake --push
 ```
 
-生成的标签包括 `latest`、版本号、以及带运行时后缀的版本标签，例如 `0.1.0`、`0.1.0-alpine` 和 `0.1.0-musl`。这些标签指向同一套 Alpine runtime 镜像；多架构发布时会成为 manifest list。
+推送到 `main` 时，GitHub Actions 会自动构建并推送 `linux/amd64` 和 `linux/arm64`
+多架构镜像，更新 `latest`、`alpine`、`musl` 和当前提交的 `sha-*` 标签。推送版本标签时
+还会生成版本号、主次版本号，以及带运行时后缀的版本标签，例如 `0.1.0`、`0.1`、
+`0.1.0-alpine` 和 `0.1.0-musl`。
+这些标签指向同一套 Alpine runtime 镜像，并作为 manifest list 发布。Docker 会根据主机
+架构自动拉取正确的镜像：
+
+```bash
+docker pull eureka6688/pixhelf:latest
+```
+
+自动推送需要在 GitHub 仓库的 Actions secrets 中配置：
+
+- `DOCKERHUB_USERNAME`：Docker Hub 用户名
+- `DOCKERHUB_TOKEN`：具有 `eureka6688/pixhelf` 读写权限的 Docker Hub access token
 
 ```bash
 docker run -d --name gallery \
@@ -75,10 +89,10 @@ GALLERY_PICTURES=/path/to/photos GALLERY_PORT=3002 docker compose up -d --pull a
 ## 发布 Linux 二进制
 
 推送以 `v` 开头、且与 `Cargo.toml` 中版本一致的标签后，GitHub Actions 会自动构建并发布
-两个完全静态链接的 MUSL 二进制包：
+两个完全静态链接、可直接下载的 MUSL 二进制程序：
 
-- `pixhelf-vX.Y.Z-linux-amd64-musl.tar.gz`
-- `pixhelf-vX.Y.Z-linux-arm64-musl.tar.gz`
+- `pixhelf-linux-amd64-musl`
+- `pixhelf-linux-arm64-musl`
 - `SHA256SUMS`
 
 例如发布 `0.1.0`：
@@ -88,11 +102,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-下载适合处理器架构的压缩包后，解压即可运行：
+下载适合处理器架构的程序后，添加执行权限即可运行：
 
 ```bash
-tar -xzf pixhelf-v0.1.0-linux-amd64-musl.tar.gz
-./pixhelf --help
+chmod +x pixhelf-linux-amd64-musl
+./pixhelf-linux-amd64-musl --help
 ```
 
 MUSL 静态二进制不依赖目标系统安装 glibc 或其他动态库，因此可覆盖大多数使用
