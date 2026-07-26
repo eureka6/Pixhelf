@@ -4,91 +4,152 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish, for example v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish binaries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Check out source
+      - name: Check out tagged source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
-      - name: Validate release version
+      - name: Validate tag and package version
         shell: bash
         run: |
           set -euo pipefail
 
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${RELEASE_TAG#v}"
           package_version="$(
             cargo metadata --locked --no-deps --format-version 1 |
               jq -r '.packages[] | select(.name == "pixhelf") | .version'
           )"
 
-          if [[ "$GITHUB_REF_NAME" != v* || -z "$tag_version" ]]; then
+          if [[ "$RELEASE_TAG" != v* || -z "$tag_version" ]]; then
             echo "Release tags must start with v, for example v0.1.0." >&2
             exit 1
           fi
 
           if [[ "$tag_version" != "$package_version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $package_version." >&2
+            echo "Tag $RELEASE_TAG does not match Cargo.toml version $package_version." >&2
             exit 1
           fi
 
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-          fallback: none
+  build:
+    name: Build ${{ matrix.architecture }} MUSL binary
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
-      - name: Build and package static binaries
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install MUSL toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build static binary
         shell: bash
         run: |
           set -euo pipefail
 
+          binary="target/${{ matrix.target }}/release/pixhelf"
+          output="release/pixhelf-linux-${{ matrix.architecture }}-musl"
+
+          cargo build --locked --release --target "${{ matrix.target }}"
+
+          if readelf -l "$binary" | grep -q 'INTERP'; then
+            echo "$binary contains a dynamic program interpreter." >&2
+            exit 1
+          fi
+
+          if readelf -d "$binary" 2>/dev/null | grep -q 'NEEDED'; then
+            echo "$binary contains dynamic library dependencies." >&2
+            exit 1
+          fi
+
           mkdir -p release
+          install -m 0755 "$binary" "$output"
+          file "$output"
 
-          build_binary() {
-            local target="$1"
-            local architecture="$2"
-            local binary="target/$target/release/pixhelf"
-            local output="release/pixhelf-linux-${architecture}-musl"
+      - name: Upload binary for release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: pixhelf-linux-${{ matrix.architecture }}-musl
+          path: release/pixhelf-linux-${{ matrix.architecture }}-musl
+          if-no-files-found: error
+          retention-days: 1
 
-            cross build --locked --release --target "$target"
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
 
-            if readelf -l "$binary" | grep -q 'INTERP'; then
-              echo "$binary contains a dynamic program interpreter." >&2
-              exit 1
-            fi
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
-            if readelf -d "$binary" 2>/dev/null | grep -q 'NEEDED'; then
-              echo "$binary contains dynamic library dependencies." >&2
-              exit 1
-            fi
+      - name: Download built binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pixhelf-linux-*-musl
+          path: release
+          merge-multiple: true
 
-            install -m 0755 "$binary" "$output"
-          }
+      - name: Generate and verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          build_binary x86_64-unknown-linux-musl amd64
-          build_binary aarch64-unknown-linux-musl arm64
-
+          chmod 0755 release/pixhelf-linux-*-musl
           (
             cd release
             sha256sum ./pixhelf-linux-*-musl > SHA256SUMS
-          )
-
-          file release/pixhelf-linux-*-musl
-          (
-            cd release
             sha256sum --check SHA256SUMS
           )
 
@@ -99,11 +160,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release/* \
+            gh release create "$RELEASE_TAG" release/* \
               --verify-tag \
               --generate-notes \
-              --title "Pixhelf $GITHUB_REF_NAME"
+              --title "Pixhelf $RELEASE_TAG"
           fi
