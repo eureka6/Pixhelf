@@ -594,6 +594,17 @@ requestAnimationFrame(()=>needsReconcile?reconcileList():fillWaterfall())}
 async function decoded(i,token){const img=await decodedAsset(i,'high');
 return token===openToken?img:null}
 async function upgrade(i,token,instant=false){reveal(await decoded(i,token),i,token,instant)}
+function showPreparedPreview(image,i){if(!image)return false;
+reconcileRenderedDimensions(i,image);
+preview.src=image.currentSrc||image.src;
+preview.style.opacity='1';
+photo.style.transition='none';
+photo.style.opacity='0';
+photo.removeAttribute('src');
+setOriginalReady(false);
+setViewerFailure(false);
+setViewerLoading(false);
+return true}
 function stopSwitching(navigation){if(navigation===navigationToken)switching=false}
 function interruptSwitching(){if(!switching)return;
 navigationToken++;
@@ -621,13 +632,17 @@ if(!rows[next]){stopSwitching(navigation);
 resetView();
 return}
 const token=++openToken,out=dir>0?-innerWidth:innerWidth;
-// Keep the covered gallery aligned in parallel for the eventual close animation.
-// Viewer navigation must not wait for that card or either image asset to decode.
+// Keep the covered gallery aligned and fetch all candidate assets in parallel.
+// Edge-click navigation waits only for the first decoded candidate so changing
+// aspect ratios never exposes an empty frame.
 const galleryTask=syncGalleryPosition(next),thumbTask=decodedThumb(next),originalTask=decodedAsset(next,'high');
 const incomingTask=firstDrawable(galleryTask.catch(()=>null),thumbTask,originalTask);
 if(navigation!==navigationToken||closing||!dialog.open){stopSwitching(navigation);
 return}
-if(instant){active=next;
+if(instant){const incoming=await incomingTask;
+if(navigation!==navigationToken||closing||!dialog.open){stopSwitching(navigation);
+return}
+active=next;
 const x=rows[next];
 activeId=x.id;
 updateViewerCount();
@@ -636,18 +651,16 @@ closeDetails();
 closeViewerMenu();
 setOriginalReady(false);
 setViewerFailure(false);
-setViewerLoading(true);
 updateDetails(x);
 sizeHero(x);
-photo.style.transition='none';
-preview.style.opacity='0';
-preview.removeAttribute('src');
-photo.style.opacity='0';
-photo.removeAttribute('src');
 preview.alt=x.name;
 photo.alt=x.name;
 updateDownload(x);
-revealPreviewWhenReady(incomingTask,next,token);
+if(!showPreparedPreview(incoming,next)){preview.style.opacity='0';
+preview.removeAttribute('src');
+photo.style.opacity='0';
+photo.removeAttribute('src');
+setViewerLoading(true)}
 trackViewerFailure(next,token,galleryTask,thumbTask,originalTask);
 const current=upgrade(next,token,true);
 preloadDirectional(next,dir);
@@ -708,9 +721,11 @@ function verticalLimit(){const viewportHeight=innerHeight*(innerWidth<=650?.96:.
 return Math.max(0,(hero.clientHeight*scale-viewportHeight)/2)}
 function clampVertical(){const maxY=verticalLimit();
 ty=scale===1?0:Math.max(-maxY,Math.min(maxY,ty))}
+function edgeNavigationDirection(x){const mobile=innerWidth<=650,rect=hero.getBoundingClientRect(),minimum=Math.min(mobile?112:220,Math.max(mobile?68:96,innerWidth*(mobile?.22:.16))),gutter=Math.max(0,(innerWidth-rect.width)/2-16),width=Math.min(innerWidth*(mobile?.3:.28),Math.max(minimum,gutter));
+if(x<=width)return -1;
+if(x>=innerWidth-width)return 1;
+return 0}
 dialog.querySelector('.close').onclick=closeViewer;
-dialog.querySelector('.prev').onclick=()=>slide(-1,true);
-dialog.querySelector('.next').onclick=()=>slide(1,true);
 dialog.addEventListener('cancel',e=>{e.preventDefault();
 if(!viewerMenu.hidden){closeViewerMenu();
 return}
@@ -770,9 +785,8 @@ return}if(moved<12){tx=gesture.tx;
 ty=gesture.ty;
 if(gesture.dismissedOverlay){apply();
 return}
-const edgeTapWidth=Math.min(144,innerWidth*.31);
-if(touch&&scale===1&&e.clientX<=edgeTapWidth)return slide(-1,true);
-if(touch&&scale===1&&e.clientX>=innerWidth-edgeTapWidth)return slide(1,true);
+const navigationDirection=scale===1?edgeNavigationDirection(e.clientX):0;
+if(navigationDirection)return slide(navigationDirection,true);
 const now=Date.now();
 if(scale>1){if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
 lastTap=0;

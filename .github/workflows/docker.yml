@@ -65,13 +65,7 @@ jobs:
       meta-images: eureka6688/pixhelf
       meta-tags: |
         type=raw,value=latest
-        type=raw,value=alpine
-        type=raw,value=musl
-        type=sha,prefix=sha-
         type=semver,pattern={{version}}
-        type=semver,pattern={{major}}.{{minor}}
-        type=semver,pattern={{version}},suffix=-alpine
-        type=semver,pattern={{version}},suffix=-musl
       set-meta-labels: true
     secrets:
       registry-auths: |

@@ -34,24 +34,21 @@ Web 服务会立即开放：空数据库先提交 80 张首屏批次，再用最
 docker build -t eureka6688/pixhelf:latest .
 ```
 
-构建当前处理器架构的 Alpine 镜像：
+本地构建 `amd64` 和 `arm64` 多架构 Alpine 镜像并推送 `latest` 与一个可回退版本号：
 
 ```bash
-VERSION=0.1.0 docker buildx bake
-```
-
-默认只构建 `linux/amd64`。本地构建 `amd64` 和 `arm64` 多架构 Alpine 镜像并推送到仓库：
-
-```bash
-VERSION=0.1.0 PLATFORMS=linux/amd64,linux/arm64 docker buildx bake --push
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --target runtime \
+  --tag eureka6688/pixhelf:latest \
+  --tag eureka6688/pixhelf:0.1.0 \
+  --push .
 ```
 
 推送到 `main` 时，GitHub Actions 会自动构建并推送 `linux/amd64` 和 `linux/arm64`
-多架构镜像，更新 `latest`、`alpine`、`musl` 和当前提交的 `sha-*` 标签。推送版本标签时
-还会生成版本号、主次版本号，以及带运行时后缀的版本标签，例如 `0.1.0`、`0.1`、
-`0.1.0-alpine` 和 `0.1.0-musl`。
-这些标签指向同一套 Alpine runtime 镜像，并作为 manifest list 发布。Docker 会根据主机
-架构自动拉取正确的镜像：
+多架构镜像，只更新 `latest`。推送版本标签时还会同时发布完整版本号，例如 `0.1.0`，
+用于固定版本和回退。两个标签都指向同一套 Alpine + MUSL runtime 镜像，并作为
+manifest list 发布；Docker 会根据主机架构自动拉取正确的镜像：
 
 GitHub 会把 amd64 和 arm64 构建分配给对应架构的原生 Runner，分别推送镜像 digest 后再
 合并 manifest，不使用 QEMU 模拟编译。
