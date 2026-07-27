@@ -4,7 +4,7 @@ const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.sta
 
 let rows=[],cursor=null,loading=false,loadTask=null,resetTask=null,loadController=null,listRevision=0,listSettled=false,waterfallTask=null,waterfallPending=false,viewerQueueTask=null,waterfallRetryTimer=0,waterfallRetryDelay=500,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false,scanning=false,needsReconcile=false;
 
-let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,zoomStep=0,gesture=null,closeTimer,copyNameTimer=0,copyNameRequest=0,openToken=0,navigationToken=0,activeId=null,dismissProgress=0;
+let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,lastTapX=0,lastTapY=0,zoomStep=0,gesture=null,closeTimer,copyNameTimer=0,copyNameRequest=0,openToken=0,navigationToken=0,activeId=null,dismissProgress=0;
 
 const pointers=new Map();
 
@@ -560,6 +560,7 @@ cancelDistantPreloads(null);
 if(switching){switching=false;
 apply(false)}
 clearTimeout(closeTimer);
+lastTap=0;
 const target=returnTarget(returnId),from=hero.getBoundingClientRect();
 dialog.classList.add('closing');
 const source=Number(getComputedStyle(photo).opacity)>.5?photo:preview,sourceReady=source.complete&&source.naturalWidth;
@@ -723,10 +724,10 @@ function verticalLimit(){const viewportHeight=innerHeight*(innerWidth<=650?.96:.
 return Math.max(0,(hero.clientHeight*scale-viewportHeight)/2)}
 function clampVertical(){const maxY=verticalLimit();
 ty=scale===1?0:Math.max(-maxY,Math.min(maxY,ty))}
-function edgeNavigationDirection(x){const mobile=innerWidth<=650,rect=hero.getBoundingClientRect(),minimum=Math.min(mobile?112:220,Math.max(mobile?68:96,innerWidth*(mobile?.22:.16))),gutter=Math.max(0,(innerWidth-rect.width)/2-16),width=Math.min(innerWidth*(mobile?.3:.28),Math.max(minimum,gutter));
-if(x<=width)return -1;
-if(x>=innerWidth-width)return 1;
-return 0}
+function repeatedTap(now,x,y,touch){return lastTap&&now-lastTap<DOUBLE_TAP_MS&&Math.hypot(x-lastTapX,y-lastTapY)<=(touch?52:36)}
+function rememberTap(now,x,y){lastTap=now;
+lastTapX=x;
+lastTapY=y}
 dialog.querySelector('.close').onclick=closeViewer;
 dialog.addEventListener('cancel',e=>{e.preventDefault();
 if(!viewerMenu.hidden){closeViewerMenu();
@@ -745,7 +746,9 @@ dialog.onpointerdown=e=>{const dismissedMenu=!viewerMenu.hidden&&!e.target.close
 if(dismissedMenu)closeViewerMenu();
 const dismissedDetails=!detailsPanel.hidden&&!e.target.closest('.details-panel,.info');
 if(dismissedDetails)closeDetails();
-if(e.target.closest('button,a'))return;
+if(e.target.closest('button,a')){clearTimeout(closeTimer);
+lastTap=0;
+return}
 interruptSwitching();
 clearTimeout(closeTimer);
 dialog.setPointerCapture(e.pointerId);
@@ -773,7 +776,7 @@ ty=scale===1?0:gesture.ty+dy}clampVertical();
 apply(false)};
 
 dialog.onpointerup=dialog.onpointercancel=e=>{if(!pointers.has(e.pointerId))return;
-const dx=gesture?e.clientX-gesture.x:0,dy=gesture?e.clientY-gesture.y:0,moved=gesture?Math.hypot(dx,dy):99,elapsed=Math.max(1,performance.now()-(gesture?.time??0)),touch=e.pointerType!=='mouse',flick=touch&&Math.abs(dx)>16&&Math.abs(dx)/elapsed>.25,wasDismissing=gesture?.axis==='dismiss',wasVertical=gesture?.axis==='vertical';
+const dx=gesture?e.clientX-gesture.x:0,dy=gesture?e.clientY-gesture.y:0,moved=gesture?Math.hypot(dx,dy):99,elapsed=Math.max(1,performance.now()-(gesture?.time??0)),touch=e.pointerType!=='mouse',flick=touch&&Math.abs(dx)>16&&Math.abs(dx)/elapsed>.25,wasDismissing=gesture?.axis==='dismiss',wasVertical=gesture?.axis==='vertical',wasPinching=gesture?.axis==='pinch';
 pointers.delete(e.pointerId);
 hero.classList.remove('dragging');
 if(pointers.size)return;
@@ -782,27 +785,30 @@ else apply();
 return}if(wasDismissing){const fast=dy>42&&dy/elapsed>.55,far=dy>Math.min(140,innerHeight*.17);
 if(fast||far)return closeViewer();
 cancelDismiss();
-return}if(wasVertical){apply();
+return}if(wasVertical||wasPinching){apply();
 return}if(moved<12){tx=gesture.tx;
 ty=gesture.ty;
 if(gesture.dismissedOverlay){apply();
 return}
-const navigationDirection=scale===1?edgeNavigationDirection(e.clientX):0;
-if(navigationDirection)return slide(navigationDirection,true);
-const now=Date.now();
-if(scale>1){if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
+const now=Date.now(),doubleTap=repeatedTap(now,e.clientX,e.clientY,touch);
+if(scale>1){if(doubleTap){clearTimeout(closeTimer);
 lastTap=0;
 zoom(e.clientX,e.clientY)
-}else{lastTap=now;
+}else{rememberTap(now,e.clientX,e.clientY);
 closeTimer=setTimeout(()=>{if(scale>1){scale=1;
 tx=ty=0;
 zoomStep=0;
-apply()}},DOUBLE_TAP_MS)}return}
-if(now-lastTap<DOUBLE_TAP_MS){clearTimeout(closeTimer);
+apply()}lastTap=0},DOUBLE_TAP_MS)}return}
+if(doubleTap){clearTimeout(closeTimer);
 lastTap=0;
-zoom(e.clientX,e.clientY)}else{lastTap=now;
+zoom(e.clientX,e.clientY)}else{
+const direction=e.clientX<innerWidth/2?-1:1;
+rememberTap(now,e.clientX,e.clientY);
+preload(active+direction);
 apply();
-closeTimer=setTimeout(closeViewer,DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=touch?190:260,zoomSwipeDistance=touch?90:140,swipeDistance=touch?30:60,horizontalIntent=Math.abs(dx)>Math.abs(dy)*1.2;
+closeTimer=setTimeout(()=>{lastTap=0;
+slide(direction,true)},DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=touch?190:260,zoomSwipeDistance=touch?90:140,swipeDistance=touch?30:60,horizontalIntent=Math.abs(dx)>Math.abs(dy)*1.2;
+lastTap=0;
 if(scale===1&&(Math.abs(tx)>swipeDistance||flick))return slide(dx<0?1:-1);
 if(scale>1&&horizontalIntent&&dx>zoomSwipeDistance&&tx>maxX+zoomEdge)return slide(-1);
 if(scale>1&&horizontalIntent&&dx<-zoomSwipeDistance&&tx<-(maxX+zoomEdge))return slide(1);
