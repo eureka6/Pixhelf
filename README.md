@@ -91,8 +91,8 @@ GALLERY_PICTURES=/path/to/photos GALLERY_PORT=3002 docker compose up -d --pull a
 推送以 `v` 开头、且与 `Cargo.toml` 中版本一致的标签后，GitHub Actions 会自动构建并发布
 两个完全静态链接、可直接下载的 MUSL 二进制程序：
 
-- `pixhelf-vX.Y.Z-x86_64-unknown-linux-musl`
-- `pixhelf-vX.Y.Z-aarch64-unknown-linux-musl`
+- `pixhelf-x86_64-unknown-linux-musl`
+- `pixhelf-aarch64-unknown-linux-musl`
 - `SHA256SUMS`
 
 例如发布 `0.1.1`：
@@ -105,8 +105,8 @@ git push origin v0.1.1
 下载适合处理器架构的程序后，添加执行权限即可运行：
 
 ```bash
-chmod +x pixhelf-v0.1.1-x86_64-unknown-linux-musl
-./pixhelf-v0.1.1-x86_64-unknown-linux-musl --help
+chmod +x pixhelf-x86_64-unknown-linux-musl
+./pixhelf-x86_64-unknown-linux-musl --help
 ```
 
 MUSL 静态二进制不依赖目标系统安装 glibc 或其他动态库，因此可覆盖大多数使用

@@ -1,0 +1,55 @@
+name: Normalize v0.1.1 release assets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/normalize-v0.1.1-release-assets.yml
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    name: Replace versioned binary names
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Replace release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir release
+          gh release download v0.1.1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release \
+            --pattern "pixhelf-v0.1.1-*-unknown-linux-musl"
+
+          mv release/pixhelf-v0.1.1-x86_64-unknown-linux-musl \
+            release/pixhelf-x86_64-unknown-linux-musl
+          mv release/pixhelf-v0.1.1-aarch64-unknown-linux-musl \
+            release/pixhelf-aarch64-unknown-linux-musl
+          chmod 0755 release/pixhelf-*-unknown-linux-musl
+
+          (
+            cd release
+            sha256sum ./pixhelf-*-unknown-linux-musl > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+          gh release upload v0.1.1 \
+            --repo "$GITHUB_REPOSITORY" \
+            release/* \
+            --clobber
+          gh release delete-asset v0.1.1 \
+            pixhelf-v0.1.1-x86_64-unknown-linux-musl \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes
+          gh release delete-asset v0.1.1 \
+            pixhelf-v0.1.1-aarch64-unknown-linux-musl \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes

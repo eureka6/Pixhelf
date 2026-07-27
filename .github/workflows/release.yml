@@ -95,7 +95,7 @@ jobs:
           set -euo pipefail
 
           binary="target/${{ matrix.target }}/release/pixhelf"
-          output="release/pixhelf-${RELEASE_TAG}-${{ matrix.target }}"
+          output="release/pixhelf-${{ matrix.target }}"
 
           cargo build --locked --release --target "${{ matrix.target }}"
 
@@ -116,8 +116,8 @@ jobs:
       - name: Upload binary for release job
         uses: actions/upload-artifact@v7
         with:
-          name: pixhelf-${{ env.RELEASE_TAG }}-${{ matrix.target }}
-          path: release/pixhelf-${{ env.RELEASE_TAG }}-${{ matrix.target }}
+          name: pixhelf-${{ matrix.target }}
+          path: release/pixhelf-${{ matrix.target }}
           if-no-files-found: error
           retention-days: 1
 
@@ -137,7 +137,7 @@ jobs:
       - name: Download built binaries
         uses: actions/download-artifact@v8
         with:
-          pattern: pixhelf-${{ env.RELEASE_TAG }}-*-unknown-linux-musl
+          pattern: pixhelf-*-unknown-linux-musl
           path: release
           merge-multiple: true
 
@@ -146,10 +146,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod 0755 release/pixhelf-"${RELEASE_TAG}"-*-unknown-linux-musl
+          chmod 0755 release/pixhelf-*-unknown-linux-musl
           (
             cd release
-            sha256sum ./pixhelf-"${RELEASE_TAG}"-*-unknown-linux-musl > SHA256SUMS
+            sha256sum ./pixhelf-*-unknown-linux-musl > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
@@ -162,6 +162,10 @@ jobs:
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release/* --clobber
+            for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              gh release delete-asset "$RELEASE_TAG" \
+                "pixhelf-${RELEASE_TAG}-${target}" --yes 2>/dev/null || true
+            done
           else
             gh release create "$RELEASE_TAG" release/* \
               --verify-tag \
