@@ -562,23 +562,23 @@ apply(false)}
 clearTimeout(closeTimer);
 const target=returnTarget(returnId),from=hero.getBoundingClientRect();
 dialog.classList.add('closing');
-let animation;
 const source=Number(getComputedStyle(photo).opacity)>.5?photo:preview,sourceReady=source.complete&&source.naturalWidth;
-if(target&&target.width&&target.height&&sourceReady){const clone=document.createElement('img'),dx=target.left-from.left,dy=target.top-from.top,sx=target.width/from.width,sy=target.height/from.height;
+let clone=null,animation=null;
+if(target&&target.width&&target.height&&from.width&&from.height&&sourceReady){clone=document.createElement('img');
+const dx=target.left-from.left,dy=target.top-from.top,sx=target.width/from.width,sy=target.height/from.height;
 clone.src=source.currentSrc||source.src;
 Object.assign(clone.style,{position:'fixed',left:`${from.left}px`,top:`${from.top}px`,width:`${from.width}px`,height:`${from.height}px`,objectFit:'contain',zIndex:'10',pointerEvents:'none',transformOrigin:'top left',willChange:'transform,opacity'});
-dialog.append(clone);
+document.body.append(clone);
 hero.style.visibility='hidden';
-animation=clone.animate([{transform:'translate3d(0,0,0) scale(1)',opacity:1},{transform:`translate3d(${dx}px,${dy}px,0) scale(${sx},${sy})`,opacity:.92}],{duration:260,easing:'cubic-bezier(.22,.72,.2,1)',fill:'forwards'});
-await animation.finished.catch(()=>{});
-clone.remove();
-hero.style.visibility=''}else{animation=dialog.animate([{opacity:1},{opacity:0}],{duration:180,easing:'cubic-bezier(.22,.61,.36,1)',fill:'forwards'});
-await animation.finished.catch(()=>{});
-animation.cancel()}dialog.close();
+animation=clone.animate([{transform:'translate3d(0,0,0) scale(1)',opacity:1},{transform:`translate3d(${dx}px,${dy}px,0) scale(${sx},${sy})`,opacity:.92}],{duration:260,easing:'cubic-bezier(.22,.72,.2,1)',fill:'forwards'})}
+// Release the modal top layer immediately. Only the pointer-transparent image
+// clone keeps animating, so the gallery is usable during the closing motion.
+dialog.close();
 if(returnId!=null){const returnCard=gallery.querySelector(`.card[data-id="${returnId}"]`);
 returnCard?.focus({preventScroll:true})}
 document.documentElement.classList.remove('viewer-open');
 dialog.classList.remove('closing');
+hero.style.visibility='';
 closeDetails();
 closeViewerMenu();
 photo.removeAttribute('src');
@@ -590,7 +590,9 @@ closing=false;
 // The covered gallery may already have moved its sentinel into view. Wait for
 // the modal-era observer task to settle, then explicitly resume pagination;
 // IntersectionObserver will not emit another entry while it stays intersecting.
-requestAnimationFrame(()=>needsReconcile?reconcileList():fillWaterfall())}
+requestAnimationFrame(()=>needsReconcile?reconcileList():fillWaterfall());
+if(animation){await animation.finished.catch(()=>{});
+clone.remove()}}
 async function decoded(i,token){const img=await decodedAsset(i,'high');
 return token===openToken?img:null}
 async function upgrade(i,token,instant=false){reveal(await decoded(i,token),i,token,instant)}
