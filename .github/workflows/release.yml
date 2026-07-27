@@ -95,7 +95,7 @@ jobs:
           set -euo pipefail
 
           binary="target/${{ matrix.target }}/release/pixhelf"
-          output="release/pixhelf-linux-${{ matrix.architecture }}-musl"
+          output="release/pixhelf-${RELEASE_TAG}-${{ matrix.target }}"
 
           cargo build --locked --release --target "${{ matrix.target }}"
 
@@ -116,8 +116,8 @@ jobs:
       - name: Upload binary for release job
         uses: actions/upload-artifact@v7
         with:
-          name: pixhelf-linux-${{ matrix.architecture }}-musl
-          path: release/pixhelf-linux-${{ matrix.architecture }}-musl
+          name: pixhelf-${{ env.RELEASE_TAG }}-${{ matrix.target }}
+          path: release/pixhelf-${{ env.RELEASE_TAG }}-${{ matrix.target }}
           if-no-files-found: error
           retention-days: 1
 
@@ -137,7 +137,7 @@ jobs:
       - name: Download built binaries
         uses: actions/download-artifact@v8
         with:
-          pattern: pixhelf-linux-*-musl
+          pattern: pixhelf-${{ env.RELEASE_TAG }}-*-unknown-linux-musl
           path: release
           merge-multiple: true
 
@@ -146,10 +146,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod 0755 release/pixhelf-linux-*-musl
+          chmod 0755 release/pixhelf-"${RELEASE_TAG}"-*-unknown-linux-musl
           (
             cd release
-            sha256sum ./pixhelf-linux-*-musl > SHA256SUMS
+            sha256sum ./pixhelf-"${RELEASE_TAG}"-*-unknown-linux-musl > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
