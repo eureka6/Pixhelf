@@ -95,11 +95,11 @@ GALLERY_PICTURES=/path/to/photos GALLERY_PORT=3002 docker compose up -d --pull a
 - `pixhelf-aarch64-unknown-linux-musl`
 - `SHA256SUMS`
 
-例如发布 `0.1.1`：
+例如发布 `0.1.2`：
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 下载适合处理器架构的程序后，添加执行权限即可运行：

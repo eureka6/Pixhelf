@@ -1,14 +1,22 @@
 const gallery=document.querySelector('#gallery'),sentinel=document.querySelector('#sentinel'),empty=document.querySelector('#empty');
 
 const dialog=document.querySelector('#lightbox'),hero=dialog.querySelector('.stage'),preview=hero.querySelector('.preview'),photo=hero.querySelector('.original'),viewerFailure=hero.querySelector('.viewer-load-failure'),download=dialog.querySelector('.download'),infoButton=dialog.querySelector('.info'),detailsPanel=dialog.querySelector('.details-panel'),copyNameButton=detailsPanel.querySelector('.detail-copy'),viewerMenu=dialog.querySelector('.viewer-action-menu'),viewerMore=dialog.querySelector('.viewer-more'),viewerCount=dialog.querySelector('.viewer-count');
+const adjacentThumbBuffers=['prev','next'].map(side=>{const image=new Image;
+image.className=`viewer-thumb-buffer viewer-thumb-${side}`;
+image.alt='';
+image.decoding='async';
+image.setAttribute('aria-hidden','true');
+return image});
+hero.after(...adjacentThumbBuffers);
 
 let rows=[],cursor=null,loading=false,loadTask=null,resetTask=null,loadController=null,listRevision=0,listSettled=false,waterfallTask=null,waterfallPending=false,viewerQueueTask=null,waterfallRetryTimer=0,waterfallRetryDelay=500,done=false,query='',folder='',active=-1,timer,randomMode=false,randomSeed=1,ready=false,scanning=false,needsReconcile=false;
 
-let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,lastTapX=0,lastTapY=0,zoomStep=0,gesture=null,closeTimer,copyNameTimer=0,copyNameRequest=0,openToken=0,navigationToken=0,activeId=null,dismissProgress=0;
+let scale=1,tx=0,ty=0,switching=false,closing=false,lastTap=0,lastTapX=0,lastTapY=0,zoomStep=0,gesture=null,closeTimer,copyNameTimer=0,copyNameRequest=0,openToken=0,navigationToken=0,thumbRenderGeneration=0,viewerChangeAt=0,activeId=null,dismissProgress=0;
 
 const pointers=new Map();
 
 const DOUBLE_TAP_MS=300;
+const ORIGINAL_PROMOTION_IDLE_MS=110;
 
 const PAGE_SIZE=48,WATERFALL_MARGIN=1200,DIRECTIONAL_PREFETCH=3,INITIAL_REVERSE_PREFETCH=2,decodedCache=new Map(),DECODE_BUDGET=matchMedia('(max-width:650px)').matches?96*1024*1024:256*1024*1024;
 
@@ -110,6 +118,7 @@ ensureCardVisible(best)}}
 function ensureCardVisible(card){const rect=card.getBoundingClientRect(),headerBottom=document.querySelector('header').getBoundingClientRect().bottom,top=headerBottom+10,bottom=innerHeight-12;
 if(rect.top<top||rect.bottom>bottom)card.scrollIntoView({block:'center',inline:'nearest',behavior:'auto'})}
 function resetGallery(){cancelDistantPreloads(null);
+clearAdjacentThumbs();
 for(const card of gallery.children){galleryWarmObserver.unobserve(card);
 galleryVisibleObserver.unobserve(card)}
 visibleGalleryCards.clear();
@@ -314,7 +323,9 @@ themeColor.content=light?'#e8e5de':'#343a44'}
 setTheme(document.documentElement.dataset.theme==='light'?'light':'dark');
 themeButton.onclick=()=>{setTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
 closeMore()};
-function sizeHero(x){const mobile=innerWidth<=650,maxW=innerWidth*(mobile?.965:.92),maxH=innerHeight*(mobile?.91:.9),ratio=Math.min(maxW/x.width,maxH/x.height),w=Math.round(x.width*ratio),h=Math.round(x.height*ratio);
+function viewerDisplaySize(x){const mobile=innerWidth<=650,maxW=innerWidth*(mobile?.965:.92),maxH=innerHeight*(mobile?.91:.9),ratio=Math.min(maxW/x.width,maxH/x.height);
+return {width:Math.round(x.width*ratio),height:Math.round(x.height*ratio)}}
+function sizeHero(x){const {width:w,height:h}=viewerDisplaySize(x);
 hero.style.width=`${w}px`;
 hero.style.height=`${h}px`;
 hero.style.flexBasis=`${w}px`;
@@ -395,6 +406,7 @@ const token=++openToken;
 navigationToken++;
 active=i;
 switching=false;
+viewerChangeAt=performance.now();
 const x=rows[i];
 activeId=x.id;
 resetView();
@@ -419,12 +431,14 @@ updateDownload(x);
 if(!dialog.open){document.documentElement.classList.add('viewer-open');
 dialog.showModal()}
 updateViewerCount();
-extendViewerQueue(i);
+const queuedRowCount=rows.length,queueTask=extendViewerQueue(i);
 const thumbTask=decodedThumb(i),current=decoded(i,token);
 revealPreviewWhenReady(thumbTask,i,token);
 trackViewerFailure(i,token,thumbTask,current);
 preloadDirectional(i,1,true);
-reveal(await current,i,token)}
+prepareAdjacentThumbs(i);
+queueTask.then(()=>{if(rows.length!==queuedRowCount&&token===openToken&&dialog.open&&active===i)prepareAdjacentThumbs(i)}).catch(()=>{});
+await reveal(await current,i,token)}
 function trimDecodedCache(keepId){let used=0;
 for(const entry of decodedCache.values())used+=entry.bytes;
 if(used<=DECODE_BUDGET)return;
@@ -491,6 +505,45 @@ img.fetchPriority='high';
 img.onload=async()=>{try{await img.decode()}catch{}finish(img)};
 img.onerror=()=>finish(null);
 img.src=`/thumb/${rows[i].id}?v=${rows[i].thumb_key}`})}
+function sizeAdjacentThumb(buffer,index){const x=rows[index];
+if(!x)return;
+const {width,height}=viewerDisplaySize(x);
+buffer.style.width=`${width}px`;
+buffer.style.height=`${height}px`}
+function clearAdjacentThumbs(){thumbRenderGeneration++;
+for(const buffer of adjacentThumbBuffers){buffer.renderTask=Promise.resolve(null);
+buffer.removeAttribute('src');
+delete buffer.dataset.index;
+delete buffer.dataset.ready}}
+function renderAdjacentThumb(buffer,index,generation){delete buffer.dataset.ready;
+if(!rows[index]){buffer.renderTask=Promise.resolve(null);
+buffer.removeAttribute('src');
+delete buffer.dataset.index;
+return buffer.renderTask}
+buffer.dataset.index=String(index);
+sizeAdjacentThumb(buffer,index);
+const task=(async()=>{const image=await decodedThumb(index);
+if(!image||generation!==thumbRenderGeneration||buffer.dataset.index!==String(index)||!dialog.open)return null;
+reconcileRenderedDimensions(index,image);
+sizeAdjacentThumb(buffer,index);
+buffer.src=image.currentSrc||image.src;
+try{await buffer.decode()}catch{return null}
+if(generation!==thumbRenderGeneration||buffer.dataset.index!==String(index)||!dialog.open)return null;
+await nextFrame();
+await nextFrame();
+if(generation!==thumbRenderGeneration||buffer.dataset.index!==String(index)||!dialog.open)return null;
+buffer.dataset.ready='true';
+return buffer})();
+buffer.renderTask=task;
+return task}
+function prepareAdjacentThumbs(center){const generation=++thumbRenderGeneration;
+renderAdjacentThumb(adjacentThumbBuffers[0],center-1,generation);
+renderAdjacentThumb(adjacentThumbBuffers[1],center+1,generation)}
+function preparedThumb(index){const buffer=adjacentThumbBuffers.find(candidate=>candidate.dataset.index===String(index));
+if(!buffer)return decodedThumb(index);
+return Promise.resolve(buffer.renderTask).then(image=>image||decodedThumb(index))}
+function resizeAdjacentThumbs(){for(const buffer of adjacentThumbBuffers){const index=Number(buffer.dataset.index);
+if(Number.isInteger(index))sizeAdjacentThumb(buffer,index)}}
 function firstDrawable(...tasks){return new Promise(resolve=>{let settled=false,pending=tasks.length;
 const finish=value=>{if(settled)return;
 settled=true;
@@ -518,23 +571,39 @@ await nextFrame();
 if(image&&!image.complete)await Promise.race([image.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,500))]);
 if(image?.naturalWidth)image.classList.add('ready');
 return image?.naturalWidth?image:null}
-function reveal(img,i,token,instant=false){if(token!==openToken||!dialog.open||active!==i)return;
+async function reveal(img,i,token,instant=false){if(token!==openToken||!dialog.open||active!==i)return;
 if(!img){photo.removeAttribute('src');
 photo.style.opacity='0';
 preview.style.opacity='1';
 setOriginalReady(false);
 if(instant)photo.style.transition='opacity 120ms ease-out';
 return}
+const idleWait=Math.max(0,viewerChangeAt+ORIGINAL_PROMOTION_IDLE_MS-performance.now());
+if(idleWait)await new Promise(resolve=>setTimeout(resolve,idleWait));
+if(token!==openToken||!dialog.open||active!==i)return;
 reconcileRenderedDimensions(i,img);
 setOriginalReady(true);
-if(instant)photo.style.transition='none';
+photo.style.transition='none';
+// Keep the decoded original underneath the thumbnail long enough for the
+// browser to rasterize and upload its texture before it becomes visible.
+photo.style.opacity='.001';
 photo.src=img.src;
 settleViewerSurface();
-requestAnimationFrame(()=>{if(token!==openToken||!dialog.open||active!==i)return;
+try{await photo.decode()}catch{}
+if(token!==openToken||!dialog.open||active!==i)return;
+if(!photo.naturalWidth){photo.style.opacity='0';
+setOriginalReady(false);
+return}
+await nextFrame();
+await nextFrame();
+if(token!==openToken||!dialog.open||active!==i)return;
+photo.style.transition=instant?'opacity 90ms ease-out':'opacity 140ms cubic-bezier(.2,.78,.2,1)';
+const promotion=afterTransition(photo,'opacity',instant?130:180);
 photo.style.opacity='1';
-if(instant){preview.style.opacity='0';
-requestAnimationFrame(()=>{photo.style.transition='opacity 120ms ease-out'})}
-else setTimeout(()=>{if(token===openToken&&dialog.open&&active===i)preview.style.opacity='0'},130)})}
+await promotion;
+if(token!==openToken||!dialog.open||active!==i)return;
+preview.style.opacity='0';
+photo.style.transition='opacity 120ms ease-out'}
 const nextFrame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
 function returnTarget(id){if(id==null)return null;
 const from=gallery.children.length;
@@ -553,10 +622,12 @@ if(image?.naturalWidth)image.classList.add('ready');
 return image?.getBoundingClientRect()||target}
 async function closeViewer(){if(closing||!dialog.open)return;
 closing=true;
+clearDesktopEdgeHover();
 const returnId=activeId;
 openToken++;
 navigationToken++;
 cancelDistantPreloads(null);
+clearAdjacentThumbs();
 if(switching){switching=false;
 apply(false)}
 clearTimeout(closeTimer);
@@ -596,7 +667,7 @@ if(animation){await animation.finished.catch(()=>{});
 clone.remove()}}
 async function decoded(i,token){const img=await decodedAsset(i,'high');
 return token===openToken?img:null}
-async function upgrade(i,token,instant=false){reveal(await decoded(i,token),i,token,instant)}
+async function upgrade(i,token,instant=false){return reveal(await decoded(i,token),i,token,instant)}
 function showPreparedPreview(image,i){if(!image)return false;
 reconcileRenderedDimensions(i,image);
 preview.src=image.currentSrc||image.src;
@@ -638,7 +709,7 @@ const token=++openToken,out=dir>0?-innerWidth:innerWidth;
 // Keep the covered gallery aligned and fetch all candidate assets in parallel.
 // Edge-click navigation waits only for the first decoded candidate so changing
 // aspect ratios never exposes an empty frame.
-const galleryTask=syncGalleryPosition(next),thumbTask=decodedThumb(next),originalTask=decodedAsset(next,'high');
+const galleryTask=syncGalleryPosition(next),thumbTask=preparedThumb(next),originalTask=decodedAsset(next,'high');
 const incomingTask=firstDrawable(galleryTask.catch(()=>null),thumbTask,originalTask);
 if(navigation!==navigationToken||closing||!dialog.open){stopSwitching(navigation);
 return}
@@ -646,6 +717,7 @@ if(instant){const incoming=await incomingTask;
 if(navigation!==navigationToken||closing||!dialog.open){stopSwitching(navigation);
 return}
 active=next;
+viewerChangeAt=performance.now();
 const x=rows[next];
 activeId=x.id;
 updateViewerCount();
@@ -667,7 +739,9 @@ setViewerLoading(true)}
 trackViewerFailure(next,token,galleryTask,thumbTask,originalTask);
 const current=upgrade(next,token,true);
 preloadDirectional(next,dir);
-extendViewerQueue(next);
+const queuedRowCount=rows.length,queueTask=extendViewerQueue(next);
+prepareAdjacentThumbs(next);
+queueTask.then(()=>{if(rows.length!==queuedRowCount&&token===openToken&&dialog.open&&active===next)prepareAdjacentThumbs(next)}).catch(()=>{});
 current.catch(()=>{});
 stopSwitching(navigation);
 return}
@@ -678,6 +752,7 @@ await slideOut;
 if(navigation!==navigationToken||closing||!dialog.open){stopSwitching(navigation);
 return}
 active=next;
+viewerChangeAt=performance.now();
 const x=rows[next];
 activeId=x.id;
 updateViewerCount();
@@ -703,7 +778,10 @@ hero.style.transition='none';
 hero.style.transform=`translate3d(${-out}px,0,0) scale(1)`;
 const current=upgrade(next,token);
 preloadDirectional(next,dir);
-extendViewerQueue(next);
+const queuedRowCount=rows.length,queueTask=extendViewerQueue(next);
+incomingTask.then(()=>{if(token!==openToken||!dialog.open||active!==next)return;
+prepareAdjacentThumbs(next);
+queueTask.then(()=>{if(rows.length!==queuedRowCount&&token===openToken&&dialog.open&&active===next)prepareAdjacentThumbs(next)}).catch(()=>{})});
 current.catch(()=>{});
 requestAnimationFrame(()=>requestAnimationFrame(()=>{if(navigation!==navigationToken||closing||!dialog.open)return;
 photo.style.transition='opacity 120ms ease-out';
@@ -724,6 +802,21 @@ function verticalLimit(){const viewportHeight=innerHeight*(innerWidth<=650?.96:.
 return Math.max(0,(hero.clientHeight*scale-viewportHeight)/2)}
 function clampVertical(){const maxY=verticalLimit();
 ty=scale===1?0:Math.max(-maxY,Math.min(maxY,ty))}
+function edgeNavigationWidth(touch){const coarse=touch||matchMedia('(hover:none) and (pointer:coarse)').matches,shortSide=Math.min(innerWidth,innerHeight),minWidth=coarse?48:104,maxWidth=coarse?58:144;
+return Math.min(maxWidth,Math.max(minWidth,shortSide*(coarse?.1:.2)))}
+function edgeNavigationDirection(x,touch){const edge=edgeNavigationWidth(touch);
+if(x<=edge)return -1;
+if(x>=innerWidth-edge)return 1;
+return 0}
+function clearDesktopEdgeHover(){dialog.classList.remove('edge-hover-prev','edge-hover-next')}
+function updateDesktopEdgeHover(e){const desktop=e.pointerType==='mouse'&&matchMedia('(hover:hover) and (pointer:fine)').matches&&!pointers.size,interactive=e.target.closest('button,a,.details-panel,.viewer-actions'),direction=desktop&&!interactive?edgeNavigationDirection(e.clientX,false):0;
+dialog.style.setProperty('--edge-hit-width',`${edgeNavigationWidth(false)}px`);
+dialog.classList.toggle('edge-hover-prev',direction<0);
+dialog.classList.toggle('edge-hover-next',direction>0)}
+function zoomFromViewerPoint(x,y){const rect=hero.getBoundingClientRect(),inside=x>=rect.left&&x<=rect.right&&y>=rect.top&&y<=rect.bottom;
+if(!inside){x=rect.left+rect.width/2;
+y=rect.top+rect.height/2}
+zoom(x,y)}
 function repeatedTap(now,x,y,touch){return lastTap&&now-lastTap<DOUBLE_TAP_MS&&Math.hypot(x-lastTapX,y-lastTapY)<=(touch?52:36)}
 function rememberTap(now,x,y){lastTap=now;
 lastTapX=x;
@@ -743,6 +836,7 @@ zoomStep=scale===1?0:1;
 apply()};
 
 dialog.onpointerdown=e=>{const dismissedMenu=!viewerMenu.hidden&&!e.target.closest('.viewer-actions');
+clearDesktopEdgeHover();
 if(dismissedMenu)closeViewerMenu();
 const dismissedDetails=!detailsPanel.hidden&&!e.target.closest('.details-panel,.info');
 if(dismissedDetails)closeDetails();
@@ -759,7 +853,8 @@ if(pointers.size===2){gesture.axis='pinch';
 const [a,b]=[...pointers.values()];
 gesture.distance=Math.hypot(a.x-b.x,a.y-b.y)}};
 
-dialog.onpointermove=e=>{if(!pointers.has(e.pointerId)||!gesture)return;
+dialog.onpointermove=e=>{updateDesktopEdgeHover(e);
+if(!pointers.has(e.pointerId)||!gesture)return;
 pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
 if(pointers.size===2){gesture.axis='pinch';
 dismissProgress=0;
@@ -790,10 +885,17 @@ return}if(moved<12){tx=gesture.tx;
 ty=gesture.ty;
 if(gesture.dismissedOverlay){apply();
 return}
+const direction=edgeNavigationDirection(e.clientX,touch);
+if(direction){lastTap=0;
+preload(active+direction);
+apply();
+slide(direction,true);
+updateDesktopEdgeHover(e);
+return}
 const now=Date.now(),doubleTap=repeatedTap(now,e.clientX,e.clientY,touch);
 if(scale>1){if(doubleTap){clearTimeout(closeTimer);
 lastTap=0;
-zoom(e.clientX,e.clientY)
+zoomFromViewerPoint(e.clientX,e.clientY)
 }else{rememberTap(now,e.clientX,e.clientY);
 closeTimer=setTimeout(()=>{if(scale>1){scale=1;
 tx=ty=0;
@@ -801,13 +903,12 @@ zoomStep=0;
 apply()}lastTap=0},DOUBLE_TAP_MS)}return}
 if(doubleTap){clearTimeout(closeTimer);
 lastTap=0;
-zoom(e.clientX,e.clientY)}else{
-const direction=e.clientX<innerWidth/2?-1:1;
+zoomFromViewerPoint(e.clientX,e.clientY)}else{
 rememberTap(now,e.clientX,e.clientY);
-preload(active+direction);
 apply();
 closeTimer=setTimeout(()=>{lastTap=0;
-slide(direction,true)},DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=touch?190:260,zoomSwipeDistance=touch?90:140,swipeDistance=touch?30:60,horizontalIntent=Math.abs(dx)>Math.abs(dy)*1.2;
+resetView();
+closeViewer()},DOUBLE_TAP_MS)}return}const viewportWidth=innerWidth*.98,maxX=Math.max(0,(hero.clientWidth*scale-viewportWidth)/2),zoomEdge=touch?190:260,zoomSwipeDistance=touch?90:140,swipeDistance=touch?30:60,horizontalIntent=Math.abs(dx)>Math.abs(dy)*1.2;
 lastTap=0;
 if(scale===1&&(Math.abs(tx)>swipeDistance||flick))return slide(dx<0?1:-1);
 if(scale>1&&horizontalIntent&&dx>zoomSwipeDistance&&tx>maxX+zoomEdge)return slide(-1);
@@ -815,6 +916,7 @@ if(scale>1&&horizontalIntent&&dx<-zoomSwipeDistance&&tx<-(maxX+zoomEdge))return 
 tx=Math.max(-maxX,Math.min(maxX,tx));
 clampVertical();
 apply()};
+dialog.onpointerleave=clearDesktopEdgeHover;
 
 addEventListener('keydown',e=>{if(!dialog.open)return;
 if(e.key==='ArrowLeft'){e.preventDefault();
@@ -895,7 +997,8 @@ closeMore()}};
 
 new ResizeObserver(()=>scheduleLayout(0)).observe(gallery);
 addEventListener('resize',()=>{if(dialog.open&&rows[active]){resetView();
-sizeHero(rows[active])}
+sizeHero(rows[active]);
+resizeAdjacentThumbs()}
 requestWaterfallCheck()});
 let waterfallCheckFrame=0;
 function requestWaterfallCheck(){if(waterfallCheckFrame)return;
