@@ -1,0 +1,29 @@
+[package]
+name = "pixhelf"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["json", "query", "tokio"] }
+blake3 = "1.8.7"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+mime_guess = "2.0.5"
+natord = "1.0.9"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.11", features = ["compression-gzip", "fs", "set-header", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+walkdir = "2.5.0"
+webp = "0.3.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
