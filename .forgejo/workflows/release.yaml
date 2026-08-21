@@ -1,0 +1,123 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  build:
+    runs-on: docker
+    container:
+      image: docker.io/library/node:22-bookworm
+    steps:
+      - name: Check out source
+        uses: https://data.forgejo.org/actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends ca-certificates curl build-essential pkg-config
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+            | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Test and build Rust application
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Package release assets
+        if: startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME}}"
+          package="pixhelf-${tag}-linux-x86_64"
+          mkdir -p dist
+          install -m 0755 target/release/pixhelf "dist/${package}"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          sha256sum "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+          printf 'RELEASE_TAG=%s\nRELEASE_PACKAGE=%s\n' "$tag" "$package" >> "$GITHUB_ENV"
+
+      - name: Create Forgejo release and upload assets
+        if: startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
+          server="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY}}"
+          api="${server}/api/v1"
+          test -n "$token"
+
+          release_json="$(mktemp)"
+          release_status="$(curl --silent --show-error --output "$release_json" --write-out '%{http_code}' \
+            --header "Authorization: token ${token}" \
+            "${api}/repos/${repository}/releases/tags/${RELEASE_TAG}")"
+
+          case "$release_status" in
+            200)
+              release_id="$(RELEASE_JSON="$release_json" node -e \
+                'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.RELEASE_JSON)).id))')"
+              ;;
+            404)
+              release_payload="$(RELEASE_TAG="$RELEASE_TAG" node <<'NODE'
+          const tag = process.env.RELEASE_TAG;
+          process.stdout.write(JSON.stringify({
+            tag_name: tag,
+            target_commitish: tag,
+            name: tag,
+            body: `Automated release ${tag}`,
+            draft: false,
+            prerelease: tag.includes('-'),
+          }));
+          NODE
+              )"
+              curl --silent --show-error --fail --output "$release_json" \
+                --request POST \
+                --header "Authorization: token ${token}" \
+                --header 'Content-Type: application/json' \
+                --data-binary "$release_payload" \
+                "${api}/repos/${repository}/releases"
+              release_id="$(RELEASE_JSON="$release_json" node -e \
+                'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.RELEASE_JSON)).id))')"
+              ;;
+            *)
+              cat "$release_json"
+              exit 1
+              ;;
+          esac
+
+          assets_json="$(mktemp)"
+          curl --silent --show-error --fail --output "$assets_json" \
+            --header "Authorization: token ${token}" \
+            "${api}/repos/${repository}/releases/${release_id}/assets"
+
+          for asset in "dist/${RELEASE_PACKAGE}.tar.gz" "dist/${RELEASE_PACKAGE}.tar.gz.sha256"; do
+            asset_name="$(basename "$asset")"
+            existing="$(ASSETS_JSON="$assets_json" ASSET_NAME="$asset_name" node -e \
+              'const assets = JSON.parse(require("fs").readFileSync(process.env.ASSETS_JSON)); const found = assets.find((asset) => asset.name === process.env.ASSET_NAME); process.stdout.write(found ? String(found.id) : "")')"
+            if [ -n "$existing" ]; then
+              echo "Release asset already exists: ${asset_name}"
+              continue
+            fi
+            curl --silent --show-error --fail \
+              --request POST \
+              --header "Authorization: token ${token}" \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@${asset}" \
+              "${api}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}"
+            printf '\n'
+          done
