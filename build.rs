@@ -14,6 +14,7 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
+    println!("cargo:rerun-if-env-changed=PIXHELF_SKIP_FRONTEND_BUILD");
 
     if env::var_os("PIXHELF_SKIP_FRONTEND_BUILD").is_some() {
         return;

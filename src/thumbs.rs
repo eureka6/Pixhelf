@@ -1,22 +1,24 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs::{self, File},
+    error::Error,
+    fmt,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use image::{
     DynamicImage, GenericImageView, ImageDecoder, ImageReader, imageops::FilterType,
     metadata::Orientation,
 };
 use serde::Serialize;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -28,11 +30,6 @@ const CACHE_VERSION: &str = "720-webp-q82-v1";
 const THUMBNAIL_FILTER: FilterType = FilterType::Triangle;
 const MAX_ATTEMPTS: u8 = 3;
 
-const PENDING: u8 = 0;
-const PROCESSING: u8 = 1;
-const READY: u8 = 2;
-const FAILED: u8 = 3;
-
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct ThumbnailManager {
@@ -42,186 +39,36 @@ pub struct ThumbnailManager {
     initial_ready: AtomicBool,
 }
 
-const PREVIEW_CACHE_VERSION: &str = "2560-webp-q88-v2";
-const PREVIEW_EDGE: u32 = 2560;
-const PREVIEW_QUALITY: f32 = 88.0;
-const PREVIEW_FILTER: FilterType = FilterType::CatmullRom;
-const PREVIEW_PENDING: u8 = 0;
-const PREVIEW_PROCESSING: u8 = 1;
-const PREVIEW_READY: u8 = 2;
-const PREVIEW_FAILED: u8 = 3;
-
-/// Viewer previews are intentionally independent from the eager thumbnail queue.
-/// They are generated only when a user opens an image, then retained immutably.
-pub struct ViewerPreviewManager {
-    cache_root: PathBuf,
-    entries: RwLock<HashMap<String, Arc<PreviewEntry>>>,
-    slots: Arc<Semaphore>,
+#[derive(Debug)]
+pub enum ThumbnailError {
+    NotFound,
+    Generation(String),
 }
 
-struct PreviewEntry {
-    record: Arc<ImageRecord>,
-    cache_path: PathBuf,
-    state: AtomicU8,
-    last_error: Mutex<Option<String>>,
-    notify: Notify,
-}
-
-impl ViewerPreviewManager {
-    pub fn new(cache_dir: PathBuf) -> Result<Arc<Self>> {
-        let cache_root = cache_dir.join(PREVIEW_CACHE_VERSION);
-        fs::create_dir_all(&cache_root).with_context(|| {
-            format!(
-                "cannot create viewer preview cache: {}",
-                cache_root.display()
-            )
-        })?;
-        purge_temporary_files(&cache_root);
-        Ok(Arc::new(Self {
-            cache_root,
-            entries: RwLock::new(HashMap::new()),
-            slots: Arc::new(Semaphore::new(2)),
-        }))
-    }
-
-    pub fn reconcile(&self, records: &[Arc<ImageRecord>]) {
-        let current_ids: HashSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
-        let mut entries = self.entries.write().expect("viewer preview entries lock");
-        entries.retain(|id, _| current_ids.contains(id.as_str()));
-        for record in records {
-            if entries.contains_key(&record.id) {
-                continue;
-            }
-            let cache_path = shard_path(&self.cache_root, &record.id);
-            let state = if valid_cache_file(&cache_path) {
-                PREVIEW_READY
-            } else {
-                PREVIEW_PENDING
-            };
-            entries.insert(
-                record.id.clone(),
-                Arc::new(PreviewEntry {
-                    record: Arc::clone(record),
-                    cache_path,
-                    state: AtomicU8::new(state),
-                    last_error: Mutex::new(None),
-                    notify: Notify::new(),
-                }),
-            );
-        }
-    }
-
-    pub async fn ensure_ready(&self, id: &str) -> Result<PathBuf> {
-        let entry = self
-            .entries
-            .read()
-            .expect("viewer preview entries lock")
-            .get(id)
-            .cloned()
-            .with_context(|| format!("unknown image: {id}"))?;
-
-        loop {
-            let notified = entry.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            match entry.state.load(Ordering::Acquire) {
-                PREVIEW_READY if valid_cache_file(&entry.cache_path) => {
-                    return Ok(entry.cache_path.clone());
-                }
-                PREVIEW_READY => {
-                    let _ = entry.state.compare_exchange(
-                        PREVIEW_READY,
-                        PREVIEW_PENDING,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
-                }
-                PREVIEW_PENDING => {
-                    if entry
-                        .state
-                        .compare_exchange(
-                            PREVIEW_PENDING,
-                            PREVIEW_PROCESSING,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.start_generation(Arc::clone(&entry));
-                    }
-                }
-                PREVIEW_PROCESSING => notified.as_mut().await,
-                PREVIEW_FAILED => {
-                    let message = entry
-                        .last_error
-                        .lock()
-                        .expect("viewer preview error lock")
-                        .clone()
-                        .unwrap_or_else(|| "viewer preview generation failed".to_owned());
-                    bail!(message);
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    fn start_generation(&self, entry: Arc<PreviewEntry>) {
-        let slots = Arc::clone(&self.slots);
-        tokio::spawn(async move {
-            let record = Arc::clone(&entry.record);
-            let output = entry.cache_path.clone();
-            let result = async move {
-                let _permit = slots
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| anyhow!("viewer preview worker stopped"))?;
-                tokio::task::spawn_blocking(move || generate_preview(&record, &output))
-                    .await
-                    .map_err(|error| anyhow!("viewer preview worker stopped: {error}"))?
-            }
-            .await;
-
-            match result {
-                Ok(()) => {
-                    entry.state.store(PREVIEW_READY, Ordering::Release);
-                    entry.notify.notify_waiters();
-                }
-                Err(error) => {
-                    *entry.last_error.lock().expect("viewer preview error lock") =
-                        Some(error.to_string());
-                    entry.state.store(PREVIEW_FAILED, Ordering::Release);
-                    entry.notify.notify_waiters();
-                    warn!(image = %entry.record.relative_path, %error, "viewer preview generation failed");
-                }
-            }
-        });
-    }
-
-    pub async fn cleanup_stale(&self) {
-        let valid_ids: HashSet<String> = self
-            .entries
-            .read()
-            .expect("viewer preview entries lock")
-            .keys()
-            .cloned()
-            .collect();
-        let root = self.cache_root.clone();
-        if let Err(error) =
-            tokio::task::spawn_blocking(move || cleanup_cache(&root, &valid_ids)).await
-        {
-            warn!(%error, "viewer preview cache cleanup task failed");
+impl fmt::Display for ThumbnailError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("unknown image"),
+            Self::Generation(message) => formatter.write_str(message),
         }
     }
 }
+
+impl Error for ThumbnailError {}
 
 struct ThumbEntry {
     record: Arc<ImageRecord>,
     cache_path: PathBuf,
-    state: AtomicU8,
-    urgent: AtomicBool,
-    attempts: AtomicU8,
-    last_error: Mutex<Option<String>>,
+    state: Mutex<ThumbState>,
     notify: Notify,
+}
+
+enum ThumbState {
+    Pending { urgent: bool, attempts: u8 },
+    Processing { urgent: bool, attempts: u8 },
+    Ready,
+    Failed(String),
+    Removed,
 }
 
 #[derive(Default)]
@@ -235,6 +82,21 @@ struct QueueState {
     urgent: VecDeque<String>,
     background: VecDeque<String>,
     queued: HashSet<String>,
+}
+
+fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Serialize)]
@@ -267,8 +129,15 @@ impl ThumbnailManager {
         let current_ids: HashSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
         let mut missing = Vec::new();
         {
-            let mut entries = self.entries.write().expect("thumbnail entries lock");
-            entries.retain(|id, _| current_ids.contains(id.as_str()));
+            let mut entries = write_lock(&self.entries);
+            entries.retain(|id, entry| {
+                let retained = current_ids.contains(id.as_str());
+                if !retained {
+                    *mutex_lock(&entry.state) = ThumbState::Removed;
+                    entry.notify.notify_waiters();
+                }
+                retained
+            });
 
             for record in records {
                 if entries.contains_key(&record.id) {
@@ -276,26 +145,27 @@ impl ThumbnailManager {
                 }
                 let cache_path = self.cache_path(&record.id);
                 let state = if valid_cache_file(&cache_path) {
-                    READY
+                    ThumbState::Ready
                 } else {
                     missing.push(record.id.clone());
-                    PENDING
+                    ThumbState::Pending {
+                        urgent: false,
+                        attempts: 0,
+                    }
                 };
                 entries.insert(
                     record.id.clone(),
                     Arc::new(ThumbEntry {
                         record: Arc::clone(record),
                         cache_path,
-                        state: AtomicU8::new(state),
-                        urgent: AtomicBool::new(false),
-                        attempts: AtomicU8::new(0),
-                        last_error: Mutex::new(None),
+                        state: Mutex::new(state),
                         notify: Notify::new(),
                     }),
                 );
             }
         }
 
+        self.queue.retain(&current_ids);
         for id in missing {
             self.queue.push_background(id);
         }
@@ -329,24 +199,25 @@ impl ThumbnailManager {
         );
     }
 
-    pub async fn ensure_ready(&self, id: &str) -> Result<PathBuf> {
+    pub async fn ensure_ready(&self, id: &str) -> Result<PathBuf, ThumbnailError> {
         self.promote(id);
         self.wait_for(id).await
     }
 
     pub fn status(&self) -> ThumbnailStatus {
-        let entries = self.entries.read().expect("thumbnail entries lock");
+        let entries = read_lock(&self.entries);
         let mut ready = 0;
         let mut queued = 0;
         let mut processing = 0;
         let mut failed = 0;
 
         for entry in entries.values() {
-            match entry.state.load(Ordering::Acquire) {
-                READY => ready += 1,
-                PROCESSING => processing += 1,
-                FAILED => failed += 1,
-                _ => queued += 1,
+            match &*mutex_lock(&entry.state) {
+                ThumbState::Ready => ready += 1,
+                ThumbState::Processing { .. } => processing += 1,
+                ThumbState::Failed(_) => failed += 1,
+                ThumbState::Pending { .. } => queued += 1,
+                ThumbState::Removed => {}
             }
         }
 
@@ -363,13 +234,7 @@ impl ThumbnailManager {
     }
 
     pub async fn cleanup_stale(&self) {
-        let valid_ids: HashSet<String> = self
-            .entries
-            .read()
-            .expect("thumbnail entries lock")
-            .keys()
-            .cloned()
-            .collect();
+        let valid_ids: HashSet<String> = read_lock(&self.entries).keys().cloned().collect();
         let root = self.cache_root.clone();
         if let Err(error) =
             tokio::task::spawn_blocking(move || cleanup_cache(&root, &valid_ids)).await
@@ -379,54 +244,67 @@ impl ThumbnailManager {
     }
 
     fn promote(&self, id: &str) {
-        let entry = self
-            .entries
-            .read()
-            .expect("thumbnail entries lock")
-            .get(id)
-            .cloned();
-        if let Some(entry) = entry
-            && entry.state.load(Ordering::Acquire) == PENDING
-        {
-            entry.urgent.store(true, Ordering::Release);
+        let entry = read_lock(&self.entries).get(id).cloned();
+        let Some(entry) = entry else {
+            return;
+        };
+
+        let should_queue = {
+            let mut state = mutex_lock(&entry.state);
+            match &mut *state {
+                ThumbState::Pending { urgent, .. } => {
+                    *urgent = true;
+                    true
+                }
+                ThumbState::Failed(_) => {
+                    *state = ThumbState::Pending {
+                        urgent: true,
+                        attempts: 0,
+                    };
+                    true
+                }
+                _ => false,
+            }
+        };
+        if should_queue {
             self.queue.push_urgent(id.to_owned());
         }
     }
 
-    async fn wait_for(&self, id: &str) -> Result<PathBuf> {
-        let entry = self
-            .entries
-            .read()
-            .expect("thumbnail entries lock")
+    async fn wait_for(&self, id: &str) -> Result<PathBuf, ThumbnailError> {
+        let entry = read_lock(&self.entries)
             .get(id)
             .cloned()
-            .with_context(|| format!("unknown image: {id}"))?;
+            .ok_or(ThumbnailError::NotFound)?;
 
         loop {
             let notified = entry.notify.notified();
-            match entry.state.load(Ordering::Acquire) {
-                READY if valid_cache_file(&entry.cache_path) => {
-                    return Ok(entry.cache_path.clone());
-                }
-                READY => {
-                    if entry
-                        .state
-                        .compare_exchange(READY, PENDING, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        self.queue.push_urgent(id.to_owned());
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let should_queue = {
+                let mut state = mutex_lock(&entry.state);
+                match &*state {
+                    ThumbState::Ready if valid_cache_file(&entry.cache_path) => {
+                        return Ok(entry.cache_path.clone());
                     }
+                    ThumbState::Ready => {
+                        *state = ThumbState::Pending {
+                            urgent: true,
+                            attempts: 0,
+                        };
+                        true
+                    }
+                    ThumbState::Failed(message) => {
+                        return Err(ThumbnailError::Generation(message.clone()));
+                    }
+                    ThumbState::Removed => return Err(ThumbnailError::NotFound),
+                    ThumbState::Pending { .. } | ThumbState::Processing { .. } => false,
                 }
-                FAILED => {
-                    let message = entry
-                        .last_error
-                        .lock()
-                        .expect("thumbnail error lock")
-                        .clone()
-                        .unwrap_or_else(|| "thumbnail generation failed".to_owned());
-                    bail!(message);
-                }
-                _ => notified.await,
+            };
+            if should_queue {
+                self.queue.push_urgent(id.to_owned());
+            } else {
+                notified.as_mut().await;
             }
         }
     }
@@ -434,21 +312,17 @@ impl ThumbnailManager {
     async fn worker_loop(self: Arc<Self>, worker: usize) {
         loop {
             let id = self.queue.pop().await;
-            let entry = self
-                .entries
-                .read()
-                .expect("thumbnail entries lock")
-                .get(&id)
-                .cloned();
+            let entry = read_lock(&self.entries).get(&id).cloned();
             let Some(entry) = entry else {
                 continue;
             };
-            if entry
-                .state
-                .compare_exchange(PENDING, PROCESSING, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
             {
-                continue;
+                let mut state = mutex_lock(&entry.state);
+                let ThumbState::Pending { urgent, attempts } = &*state else {
+                    continue;
+                };
+                let (urgent, attempts) = (*urgent, *attempts);
+                *state = ThumbState::Processing { urgent, attempts };
             }
 
             let record = Arc::clone(&entry.record);
@@ -460,22 +334,50 @@ impl ThumbnailManager {
 
             match result {
                 Ok(()) => {
-                    entry.state.store(READY, Ordering::Release);
-                    entry.notify.notify_waiters();
+                    let (ready, removed) = {
+                        let mut state = mutex_lock(&entry.state);
+                        if matches!(*state, ThumbState::Processing { .. }) {
+                            *state = ThumbState::Ready;
+                            (true, false)
+                        } else {
+                            (false, matches!(*state, ThumbState::Removed))
+                        }
+                    };
+                    if ready {
+                        entry.notify.notify_waiters();
+                    } else if removed {
+                        let entries = read_lock(&self.entries);
+                        if !entries.contains_key(&id)
+                            && let Err(error) = fs::remove_file(&entry.cache_path)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale thumbnail");
+                        }
+                    }
                 }
                 Err(error) => {
-                    let attempt = entry.attempts.fetch_add(1, Ordering::AcqRel) + 1;
-                    *entry.last_error.lock().expect("thumbnail error lock") =
-                        Some(error.to_string());
+                    let transition = {
+                        let mut state = mutex_lock(&entry.state);
+                        let ThumbState::Processing { urgent, attempts } = &*state else {
+                            continue;
+                        };
+                        let (urgent, attempt) = (*urgent, attempts.saturating_add(1));
+                        let retry = attempt < MAX_ATTEMPTS;
+                        if retry {
+                            *state = ThumbState::Pending {
+                                urgent,
+                                attempts: attempt,
+                            };
+                        } else {
+                            *state = ThumbState::Failed(error.to_string());
+                        }
+                        (attempt, retry)
+                    };
+                    let (attempt, retry) = transition;
                     warn!(worker, image = %entry.record.relative_path, attempt, %error, "thumbnail generation failed");
-
-                    if attempt < MAX_ATTEMPTS {
-                        entry.state.store(PENDING, Ordering::Release);
-                        entry.notify.notify_waiters();
+                    entry.notify.notify_waiters();
+                    if retry {
                         self.schedule_retry(entry, id, attempt);
-                    } else {
-                        entry.state.store(FAILED, Ordering::Release);
-                        entry.notify.notify_waiters();
                     }
                 }
             }
@@ -491,10 +393,11 @@ impl ThumbnailManager {
         tokio::spawn(async move {
             let delay = Duration::from_millis(200 * (1 << (attempt - 1)));
             tokio::time::sleep(delay).await;
-            if entry.state.load(Ordering::Acquire) != PENDING {
-                return;
-            }
-            if entry.urgent.load(Ordering::Acquire) {
+            let urgent = match &*mutex_lock(&entry.state) {
+                ThumbState::Pending { urgent, .. } => *urgent,
+                _ => return,
+            };
+            if urgent {
                 manager.queue.push_urgent(id);
             } else {
                 manager.queue.push_background(id);
@@ -504,9 +407,18 @@ impl ThumbnailManager {
 }
 
 impl JobQueue {
+    fn retain(&self, valid_ids: &HashSet<&str>) {
+        let mut state = mutex_lock(&self.state);
+        state.urgent.retain(|id| valid_ids.contains(id.as_str()));
+        state
+            .background
+            .retain(|id| valid_ids.contains(id.as_str()));
+        state.queued.retain(|id| valid_ids.contains(id.as_str()));
+    }
+
     fn push_urgent(&self, id: String) {
         let should_notify = {
-            let mut state = self.state.lock().expect("thumbnail queue lock");
+            let mut state = mutex_lock(&self.state);
             if state.queued.contains(&id) {
                 if let Some(position) = state.background.iter().position(|queued| queued == &id) {
                     state.background.remove(position);
@@ -529,7 +441,7 @@ impl JobQueue {
 
     fn push_background(&self, id: String) {
         let should_notify = {
-            let mut state = self.state.lock().expect("thumbnail queue lock");
+            let mut state = mutex_lock(&self.state);
             if state.queued.insert(id.clone()) {
                 state.background.push_back(id);
                 true
@@ -546,8 +458,10 @@ impl JobQueue {
     async fn pop(&self) -> String {
         loop {
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(id) = {
-                let mut state = self.state.lock().expect("thumbnail queue lock");
+                let mut state = mutex_lock(&self.state);
                 let id = state
                     .urgent
                     .pop_front()
@@ -559,7 +473,7 @@ impl JobQueue {
             } {
                 return id;
             }
-            notified.await;
+            notified.as_mut().await;
         }
     }
 }
@@ -583,17 +497,6 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
         THUMBNAIL_FILTER,
         WEBP_QUALITY,
         "thumbnail",
-    )
-}
-
-fn generate_preview(record: &ImageRecord, output: &Path) -> Result<()> {
-    generate_image_cache(
-        record,
-        output,
-        PREVIEW_EDGE,
-        PREVIEW_FILTER,
-        PREVIEW_QUALITY,
-        "viewer preview",
     )
 }
 
@@ -650,9 +553,12 @@ fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
         sequence
     ));
     let write_result = (|| -> Result<()> {
-        let mut file = File::create(&temporary)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         file.write_all(encoded.as_ref())?;
-        file.flush()?;
+        file.sync_all()?;
         drop(file);
         fs::rename(&temporary, output)?;
         Ok(())
@@ -664,32 +570,38 @@ fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
 }
 
 fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
-    for entry in WalkDir::new(root).min_depth(1).into_iter().flatten() {
-        if !entry.file_type().is_file()
-            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("webp")
-        {
-            continue;
+    visit_cache_files(root, |path| {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
+            return;
         }
-        let id = entry
-            .path()
+        let id = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or_default();
         if !valid_ids.contains(id)
-            && let Err(error) = fs::remove_file(entry.path())
+            && let Err(error) = fs::remove_file(path)
         {
-            warn!(path = %entry.path().display(), %error, "cannot remove stale thumbnail");
+            warn!(path = %path.display(), %error, "cannot remove stale thumbnail");
         }
-    }
+    });
 }
 
 fn purge_temporary_files(root: &Path) {
-    for entry in WalkDir::new(root).min_depth(1).into_iter().flatten() {
-        if entry.file_type().is_file()
-            && entry.path().extension().and_then(|ext| ext.to_str()) == Some("tmp")
-            && let Err(error) = fs::remove_file(entry.path())
+    visit_cache_files(root, |path| {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
+            && let Err(error) = fs::remove_file(path)
         {
-            warn!(path = %entry.path().display(), %error, "cannot remove temporary thumbnail");
+            warn!(path = %path.display(), %error, "cannot remove temporary thumbnail");
+        }
+    });
+}
+
+fn visit_cache_files(root: &Path, mut visit: impl FnMut(&Path)) {
+    for entry in WalkDir::new(root).min_depth(1) {
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => visit(entry.path()),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "cannot inspect thumbnail cache"),
         }
     }
 }
@@ -716,42 +628,90 @@ mod tests {
     }
 
     #[test]
-    fn generates_bounded_viewer_preview_without_upscaling() {
-        let temp = tempfile::tempdir().unwrap();
-        let gallery = temp.path().join("gallery");
-        fs::create_dir(&gallery).unwrap();
-        image::RgbImage::new(5000, 2500)
-            .save(gallery.join("wide.png"))
-            .unwrap();
-        let index = scan_gallery(&gallery, None).unwrap();
-        let output = temp.path().join("preview.webp");
-        generate_preview(&index.images[0], &output).unwrap();
-        assert_eq!(image::open(output).unwrap().dimensions(), (2560, 1280));
-
-        image::RgbImage::new(400, 200)
-            .save(gallery.join("small.png"))
-            .unwrap();
-        let index = scan_gallery(&gallery, None).unwrap();
-        let small = index
-            .images
-            .iter()
-            .find(|image| image.name == "small.png")
-            .unwrap();
-        let output = temp.path().join("small.webp");
-        generate_preview(small, &output).unwrap();
-        assert_eq!(image::open(output).unwrap().dimensions(), (400, 200));
-    }
-
-    #[test]
     fn queue_promotes_without_duplicate_jobs() {
         let queue = JobQueue::default();
         queue.push_background("image".to_owned());
         queue.push_background("image".to_owned());
         queue.push_urgent("image".to_owned());
 
-        let state = queue.state.lock().unwrap();
+        let state = mutex_lock(&queue.state);
         assert_eq!(state.urgent.as_slices().0, ["image"]);
         assert!(state.background.is_empty());
         assert_eq!(state.queued.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queue_wakes_all_needed_workers() {
+        let queue = Arc::new(JobQueue::default());
+        let first_queue = Arc::clone(&queue);
+        let second_queue = Arc::clone(&queue);
+        let first = tokio::spawn(async move { first_queue.pop().await });
+        let second = tokio::spawn(async move { second_queue.pop().await });
+        tokio::task::yield_now().await;
+
+        queue.push_background("first".to_owned());
+        queue.push_background("second".to_owned());
+
+        let first = tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first worker timed out")
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second worker timed out")
+            .unwrap();
+        assert_eq!(
+            HashSet::from([first, second]),
+            HashSet::from(["first".into(), "second".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_thumbnail_can_be_retried() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let image_path = gallery.join("image.png");
+        image::RgbImage::new(20, 10).save(&image_path).unwrap();
+        let index = scan_gallery(&gallery, None).unwrap();
+        fs::write(&image_path, "invalid image").unwrap();
+
+        let manager = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        manager.reconcile(&index.images);
+        manager.start_workers(1);
+        let id = &index.images[0].id;
+        assert!(matches!(
+            manager.ensure_ready(id).await,
+            Err(ThumbnailError::Generation(_))
+        ));
+
+        image::RgbImage::new(20, 10).save(&image_path).unwrap();
+        let thumbnail = manager.ensure_ready(id).await.unwrap();
+        assert!(valid_cache_file(&thumbnail));
+    }
+
+    #[tokio::test]
+    async fn removing_an_entry_releases_waiters() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        image::RgbImage::new(20, 10)
+            .save(gallery.join("image.png"))
+            .unwrap();
+        let index = scan_gallery(&gallery, None).unwrap();
+        let manager = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        manager.reconcile(&index.images);
+
+        let id = index.images[0].id.clone();
+        let waiting_manager = Arc::clone(&manager);
+        let waiter = tokio::spawn(async move { waiting_manager.ensure_ready(&id).await });
+        tokio::task::yield_now().await;
+        manager.reconcile(&[]);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("thumbnail waiter timed out")
+            .expect("thumbnail waiter stopped");
+        assert!(matches!(result, Err(ThumbnailError::NotFound)));
     }
 }

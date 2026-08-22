@@ -6,7 +6,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use image::{ImageDecoder, ImageReader, metadata::Orientation};
 use serde::Serialize;
 use tracing::warn;
@@ -37,22 +37,13 @@ pub struct Album {
 #[derive(Clone, Default)]
 pub struct GalleryIndex {
     pub images: Vec<Arc<ImageRecord>>,
-    pub by_id: HashMap<String, Arc<ImageRecord>>,
     pub albums: Vec<Album>,
+    pub revision: String,
 }
 
 impl GalleryIndex {
-    pub fn get(&self, id: &str) -> Option<Arc<ImageRecord>> {
-        self.by_id.get(id).cloned()
-    }
-
     pub fn same_revision(&self, other: &Self) -> bool {
-        self.images.len() == other.images.len()
-            && self
-                .images
-                .iter()
-                .zip(&other.images)
-                .all(|(left, right)| left.id == right.id)
+        self.revision == other.revision
     }
 }
 
@@ -68,14 +59,17 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
-        .filter_map(|entry| match entry {
-            Ok(entry) => Some(entry),
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if previous.is_some() => {
+                return Err(anyhow!(error).context("gallery rescan was incomplete"));
+            }
             Err(error) => {
                 warn!(%error, "cannot inspect gallery entry");
-                None
+                continue;
             }
-        })
-    {
+        };
         if !entry.file_type().is_file() || !is_supported_image(entry.path()) {
             continue;
         }
@@ -84,11 +78,18 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         let relative = path
             .strip_prefix(root)
             .with_context(|| format!("{} is outside the gallery root", path.display()))?;
-        let relative_path = path_to_url(relative);
+        let Some(relative_path) = path_to_url(relative) else {
+            warn!(path = %path.display(), "image path is not valid UTF-8");
+            continue;
+        };
+        let existing = previous_by_path.get(relative_path.as_str()).copied();
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
                 warn!(path = %path.display(), %error, "cannot read image metadata");
+                if let Some(existing) = existing {
+                    images.push(Arc::clone(existing));
+                }
                 continue;
             }
         };
@@ -100,7 +101,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         let modified_ns = modified.as_nanos();
         let size = metadata.len();
 
-        if let Some(existing) = previous_by_path.get(relative_path.as_str())
+        if let Some(existing) = existing
             && existing.size == size
             && existing.modified_ns == modified_ns
         {
@@ -112,13 +113,16 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             Ok(dimensions) => dimensions,
             Err(error) => {
                 warn!(path = %path.display(), %error, "cannot decode image header");
+                if let Some(existing) = existing {
+                    images.push(Arc::clone(existing));
+                }
                 continue;
             }
         };
         let album = relative
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .map(path_to_url)
+            .and_then(path_to_url)
             .unwrap_or_default();
         let name = path
             .file_name()
@@ -144,6 +148,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     images.sort_by(|left, right| {
         natord::compare_ignore_case(&left.relative_path, &right.relative_path)
     });
+    let revision = index_revision(&images);
 
     let mut album_counts = BTreeMap::<String, usize>::new();
     for image in &images {
@@ -162,16 +167,21 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             count,
         })
         .collect();
-    let by_id = images
-        .iter()
-        .map(|record| (record.id.clone(), Arc::clone(record)))
-        .collect();
-
     Ok(GalleryIndex {
         images,
-        by_id,
         albums,
+        revision,
     })
+}
+
+fn index_revision(images: &[Arc<ImageRecord>]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pixhelf-index-v1\0");
+    for image in images {
+        hasher.update(image.id.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
@@ -213,11 +223,11 @@ fn image_id(relative_path: &str, size: u64, modified_ns: u128) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn path_to_url(path: &Path) -> String {
+fn path_to_url(path: &Path) -> Option<String> {
     path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
 }
 
 #[cfg(test)]
@@ -255,5 +265,48 @@ mod tests {
         assert_eq!(index.images[0].album, "album");
         assert_eq!((index.images[0].width, index.images[0].height), (20, 10));
         assert_eq!(index.albums[0].count, 1);
+    }
+
+    #[test]
+    fn rescan_keeps_previous_record_while_file_is_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.png");
+        image::RgbImage::new(20, 10).save(&path).unwrap();
+        let previous = scan_gallery(temp.path(), None).unwrap();
+        let previous_id = previous.images[0].id.clone();
+
+        fs::write(&path, "incomplete image data").unwrap();
+        let updated = scan_gallery(temp.path(), Some(&previous)).unwrap();
+
+        assert_eq!(updated.images.len(), 1);
+        assert_eq!(updated.images[0].id, previous_id);
+    }
+
+    #[test]
+    fn incomplete_rescan_does_not_return_a_partial_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous = GalleryIndex::default();
+        let missing = temp.path().join("missing");
+
+        assert!(scan_gallery(&missing, Some(&previous)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_non_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        image::RgbImage::new(20, 10)
+            .save(temp.path().join("valid.png"))
+            .unwrap();
+        let invalid_name = OsString::from_vec(vec![0xff, b'.', b'p', b'n', b'g']);
+        image::RgbImage::new(20, 10)
+            .save(temp.path().join(invalid_name))
+            .unwrap();
+
+        let index = scan_gallery(temp.path(), None).unwrap();
+        assert_eq!(index.images.len(), 1);
+        assert_eq!(index.images[0].name, "valid.png");
     }
 }

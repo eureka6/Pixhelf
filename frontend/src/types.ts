@@ -7,6 +7,7 @@ export interface Album {
 export interface GallerySummary {
   total: number;
   albums: Album[];
+  revision: string;
 }
 
 export interface GalleryImage {
@@ -19,8 +20,6 @@ export interface GalleryImage {
   size: number;
   modifiedMs: number;
   thumbnailUrl: string;
-  previewUrl: string;
-  originalUrl: string;
 }
 
 export interface ImagesPage {
@@ -41,4 +40,4 @@ export interface ThumbnailStatus {
   backgroundComplete: boolean;
 }
 
-export type SortMode = "name-asc" | "name-desc" | "newest";
+export type SortMode = "name-asc" | "name-desc" | "newest" | "explore";

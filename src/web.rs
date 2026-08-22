@@ -16,7 +16,7 @@ use tracing::error;
 
 use crate::{
     gallery::{Album, GalleryIndex, ImageRecord},
-    thumbs::{ThumbnailManager, ThumbnailStatus, ViewerPreviewManager},
+    thumbs::{ThumbnailError, ThumbnailManager, ThumbnailStatus},
 };
 
 const INDEX_HTML: &[u8] = include_bytes!(concat!(
@@ -36,7 +36,6 @@ const APP_CSS: &[u8] = include_bytes!(concat!(
 pub struct AppState {
     pub index: Arc<RwLock<GalleryIndex>>,
     pub thumbnails: Arc<ThumbnailManager>,
-    pub previews: Arc<ViewerPreviewManager>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -44,9 +43,21 @@ pub struct AppState {
 struct ImagesQuery {
     album: Option<String>,
     search: Option<String>,
-    sort: Option<String>,
+    #[serde(default)]
+    sort: ImageSort,
+    seed: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ImageSort {
+    #[default]
+    NameAsc,
+    NameDesc,
+    Newest,
+    Explore,
 }
 
 #[derive(Serialize)]
@@ -54,6 +65,7 @@ struct ImagesQuery {
 struct GallerySummary {
     total: usize,
     albums: Vec<Album>,
+    revision: String,
 }
 
 #[derive(Serialize)]
@@ -78,8 +90,6 @@ struct ImageView {
     size: u64,
     modified_ms: u64,
     thumbnail_url: String,
-    preview_url: String,
-    original_url: String,
 }
 
 impl From<&ImageRecord> for ImageView {
@@ -94,8 +104,6 @@ impl From<&ImageRecord> for ImageView {
             size: record.size,
             modified_ms: record.modified_ms,
             thumbnail_url: format!("/api/images/{}/thumbnail", record.id),
-            preview_url: format!("/api/images/{}/preview", record.id),
-            original_url: format!("/api/images/{}/original", record.id),
         }
     }
 }
@@ -107,8 +115,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/images", get(images))
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
-        .route("/api/images/{id}/preview", get(preview))
-        .route("/api/images/{id}/original", get(original))
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
         .fallback(frontend)
@@ -126,6 +132,7 @@ async fn gallery_summary(State(state): State<AppState>) -> Json<GallerySummary> 
     Json(GallerySummary {
         total: index.images.len(),
         albums: index.albums.clone(),
+        revision: index.revision.clone(),
     })
 }
 
@@ -133,7 +140,7 @@ async fn images(
     State(state): State<AppState>,
     Query(query): Query<ImagesQuery>,
 ) -> Json<ImagesResponse> {
-    let index = state.index.read().await;
+    let records = state.index.read().await.images.clone();
     let search = query
         .search
         .as_deref()
@@ -142,9 +149,8 @@ async fn images(
         .map(str::to_lowercase);
     let album = query.album.as_deref().filter(|album| !album.is_empty());
 
-    let mut matches: Vec<&Arc<ImageRecord>> = index
-        .images
-        .iter()
+    let mut matches: Vec<Arc<ImageRecord>> = records
+        .into_iter()
         .filter(|record| album.is_none_or(|album| record.album == album))
         .filter(|record| {
             search
@@ -153,10 +159,15 @@ async fn images(
         })
         .collect();
 
-    match query.sort.as_deref() {
-        Some("name-desc") => matches.reverse(),
-        Some("newest") => matches.sort_by_key(|record| Reverse(record.modified_ms)),
-        _ => {}
+    match query.sort {
+        ImageSort::NameAsc => {}
+        ImageSort::NameDesc => matches.reverse(),
+        ImageSort::Newest => matches.sort_by_key(|record| Reverse(record.modified_ms)),
+        ImageSort::Explore => {
+            let seed_key =
+                *blake3::hash(query.seed.as_deref().unwrap_or_default().as_bytes()).as_bytes();
+            matches.sort_by_cached_key(|record| exploration_rank(&seed_key, &record.id));
+        }
     }
 
     let total = matches.len();
@@ -177,6 +188,10 @@ async fn images(
     })
 }
 
+fn exploration_rank(seed_key: &[u8; 32], image_id: &str) -> [u8; 32] {
+    *blake3::keyed_hash(seed_key, image_id.as_bytes()).as_bytes()
+}
+
 async fn thumbnail_status(State(state): State<AppState>) -> Json<ThumbnailStatus> {
     Json(state.thumbnails.status())
 }
@@ -186,59 +201,19 @@ async fn thumbnail(
     Path(id): Path<String>,
     request: Request,
 ) -> Result<Response, StatusCode> {
-    if state.index.read().await.get(&id).is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let path = state.thumbnails.ensure_ready(&id).await.map_err(|error| {
-        error!(%id, %error, "cannot serve thumbnail");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let path = match state.thumbnails.ensure_ready(&id).await {
+        Ok(path) => path,
+        Err(ThumbnailError::NotFound) => return Err(StatusCode::NOT_FOUND),
+        Err(error) => {
+            error!(%id, %error, "cannot serve thumbnail");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
     serve_file(
         path,
         request,
         &format!("\"thumb-{id}\""),
         "public, max-age=31536000, immutable",
-    )
-    .await
-}
-
-async fn preview(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    request: Request,
-) -> Result<Response, StatusCode> {
-    if state.index.read().await.get(&id).is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let path = state.previews.ensure_ready(&id).await.map_err(|error| {
-        error!(%id, %error, "cannot serve viewer preview");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    serve_file(
-        path,
-        request,
-        &format!("\"preview-{id}\""),
-        "public, max-age=31536000, immutable",
-    )
-    .await
-}
-
-async fn original(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    request: Request,
-) -> Result<Response, StatusCode> {
-    let record = state
-        .index
-        .read()
-        .await
-        .get(&id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    serve_file(
-        record.path.clone(),
-        request,
-        &format!("\"image-{id}\""),
-        "private, max-age=3600",
     )
     .await
 }
@@ -291,33 +266,31 @@ fn add_cache_headers(
 }
 
 async fn app_js() -> Response {
-    embedded(APP_JS, "text/javascript; charset=utf-8", true)
+    embedded(APP_JS, "text/javascript; charset=utf-8")
 }
 
 async fn app_css() -> Response {
-    embedded(APP_CSS, "text/css; charset=utf-8", true)
+    embedded(APP_CSS, "text/css; charset=utf-8")
 }
 
 async fn frontend(request: Request) -> Response {
+    if request.uri().path() != "/" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    embedded(INDEX_HTML, "text/html; charset=utf-8", false)
+    embedded(INDEX_HTML, "text/html; charset=utf-8")
 }
 
-fn embedded(content: &'static [u8], content_type: &'static str, immutable: bool) -> Response {
+fn embedded(content: &'static [u8], content_type: &'static str) -> Response {
     let mut response = Response::new(Body::from(content));
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(if immutable {
-            "public, max-age=31536000, immutable"
-        } else {
-            "no-cache"
-        }),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -328,6 +301,22 @@ fn embedded(content: &'static [u8], content_type: &'static str, immutable: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_router() -> Router {
+        let temp = tempfile::tempdir().unwrap();
+        let thumbnails = ThumbnailManager::new(temp.path().to_owned()).unwrap();
+        router(AppState {
+            index: Arc::new(RwLock::new(GalleryIndex::default())),
+            thumbnails,
+        })
+    }
+
+    async fn request(path: &str) -> Response {
+        empty_router()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn image_view_uses_versioned_id_urls() {
@@ -345,7 +334,60 @@ mod tests {
         };
         let view = ImageView::from(&record);
         assert_eq!(view.thumbnail_url, "/api/images/abc/thumbnail");
-        assert_eq!(view.preview_url, "/api/images/abc/preview");
-        assert_eq!(view.original_url, "/api/images/abc/original");
+    }
+
+    #[test]
+    fn exploration_rank_is_stable_and_seeded() {
+        let first_seed = *blake3::hash(b"first-queue").as_bytes();
+        let second_seed = *blake3::hash(b"second-queue").as_bytes();
+
+        assert_eq!(
+            exploration_rank(&first_seed, "image-1"),
+            exploration_rank(&first_seed, "image-1")
+        );
+        assert_ne!(
+            exploration_rank(&first_seed, "image-1"),
+            exploration_rank(&second_seed, "image-1")
+        );
+        assert_ne!(
+            exploration_rank(&first_seed, "image-1"),
+            exploration_rank(&first_seed, "image-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_sort_modes() {
+        assert_eq!(
+            request("/api/images?sort=name-asc").await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request("/api/images?sort=explore&seed=test").await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request("/api/images?sort=unexpected").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_api_and_thumbnail_routes_return_not_found() {
+        assert_eq!(
+            request("/api/does-not-exist").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request("/api/images/missing/thumbnail").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(request("/missing").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn fixed_asset_names_are_revalidated() {
+        let response = request("/assets/app.js").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
     }
 }

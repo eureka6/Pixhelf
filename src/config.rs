@@ -48,15 +48,11 @@ impl Config {
             }
         }
 
-        if !gallery_dir.is_dir() {
-            bail!(
-                "gallery directory does not exist: {}",
-                gallery_dir.display()
-            );
-        }
-
+        gallery_dir = canonical_directory(&gallery_dir, "gallery")?;
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("cannot create cache directory: {}", cache_dir.display()))?;
+        cache_dir = canonical_directory(&cache_dir, "cache")?;
+        ensure_cache_is_external(&gallery_dir, &cache_dir)?;
 
         Ok(Self {
             gallery_dir,
@@ -67,6 +63,27 @@ impl Config {
             scan_interval,
         })
     }
+}
+
+fn canonical_directory(path: &std::path::Path, label: &str) -> Result<PathBuf> {
+    if !path.is_dir() {
+        bail!("{label} directory does not exist: {}", path.display());
+    }
+    std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve {label} directory: {}", path.display()))
+}
+
+fn ensure_cache_is_external(
+    gallery_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Result<()> {
+    if cache_dir.starts_with(gallery_dir) {
+        bail!(
+            "cache directory must be outside the gallery directory: {}",
+            cache_dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -115,11 +132,46 @@ fn print_help() {
 Usage: pixhelf [OPTIONS]\n\n\
 Options:\n  \
   --gallery-dir PATH     Gallery root (default: ./pic)\n  \
-  --cache-dir PATH       Thumbnail and viewer preview cache (default: ./.pixhelf-cache/thumbnails)\n  \
+  --cache-dir PATH       Thumbnail cache (default: ./.pixhelf-cache/thumbnails)\n  \
   --listen HOST:PORT     Listen address (default: 0.0.0.0:3002)\n  \
-  --initial-batch N      Thumbnails prepared before serving (default: 60)\n  \
+  --initial-batch N      Priority thumbnail batch (default: 60)\n  \
   --workers N            Background thumbnail workers (default: 2-4, based on CPU)\n  \
   --scan-interval SEC    Gallery rescan interval (default: 10)\n  \
   -h, --help             Show this help"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_numeric_ranges() {
+        let mut valid = ["4".to_owned()].into_iter();
+        assert_eq!(number_value(&mut valid, "--workers", 1, 16).unwrap(), 4);
+
+        let mut invalid = ["0".to_owned()].into_iter();
+        assert!(number_value(&mut invalid, "--workers", 1, 16).is_err());
+    }
+
+    #[test]
+    fn resolves_existing_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            canonical_directory(temp.path(), "test").unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
+        assert!(canonical_directory(&temp.path().join("missing"), "test").is_err());
+    }
+
+    #[test]
+    fn rejects_cache_directories_inside_the_gallery() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        let nested_cache = gallery.join("cache");
+        let external_cache = temp.path().join("cache");
+
+        assert!(ensure_cache_is_external(&gallery, &nested_cache).is_err());
+        assert!(ensure_cache_is_external(&gallery, &external_cache).is_ok());
+    }
 }
