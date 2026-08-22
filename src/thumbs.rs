@@ -574,11 +574,11 @@ fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
         if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
             return;
         }
-        let id = path
+        let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or_default();
-        if !valid_ids.contains(id)
+        if !valid_ids.contains(stem)
             && let Err(error) = fs::remove_file(path)
         {
             warn!(path = %path.display(), %error, "cannot remove stale thumbnail");
@@ -625,6 +625,27 @@ mod tests {
         generate_thumbnail(&index.images[0], &output).unwrap();
         let generated = image::open(output).unwrap();
         assert_eq!(generated.dimensions(), (720, 360));
+    }
+
+    #[test]
+    fn cleanup_keeps_only_the_single_high_quality_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let id = "abcdef";
+        let thumbnail = shard_path(root, id);
+        let old_compact = thumbnail.with_file_name(format!("{id}-360.webp"));
+        let stale = shard_path(root, "stale");
+        fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&thumbnail, [1; 32]).unwrap();
+        fs::write(&old_compact, [1; 32]).unwrap();
+        fs::write(&stale, [1; 32]).unwrap();
+
+        cleanup_cache(root, &HashSet::from([id.to_owned()]));
+
+        assert!(thumbnail.exists());
+        assert!(!old_compact.exists());
+        assert!(!stale.exists());
     }
 
     #[test]

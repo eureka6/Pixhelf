@@ -13,13 +13,8 @@ export interface GallerySummary {
 export interface GalleryImage {
   id: string;
   name: string;
-  album: string;
-  relativePath: string;
   width: number;
   height: number;
-  size: number;
-  modifiedMs: number;
-  thumbnailUrl: string;
 }
 
 export interface ImagesPage {
@@ -38,6 +33,12 @@ export interface ThumbnailStatus {
   failed: number;
   initialBatchReady: boolean;
   backgroundComplete: boolean;
+}
+
+export interface BootstrapData {
+  summary: GallerySummary;
+  status: ThumbnailStatus;
+  images: ImagesPage;
 }
 
 export type SortMode = "name-asc" | "name-desc" | "newest" | "explore";

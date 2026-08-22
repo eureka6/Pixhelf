@@ -1,13 +1,10 @@
-import {
-  type ReactNode,
-  useEffect,
-  useRef,
-} from "react";
+import type { ComponentChildren } from "preact";
+import { useEffect, useRef } from "preact/hooks";
 
 type ToolbarPopoverProps = {
-  children: ReactNode;
+  children: ComponentChildren;
   closeLabel: string;
-  icon: ReactNode;
+  icon: ComponentChildren;
   id: string;
   open: boolean;
   openLabel: string;

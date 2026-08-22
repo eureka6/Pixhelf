@@ -246,6 +246,86 @@ try {
       searchValue: document.querySelector("#gallery-search-field input")?.value,
     }));
 
+    let mobileCardNames = null;
+    if (target.name === "mobile") {
+      const firstCard = page.locator("[data-image-id]").first();
+      const secondCard = page.locator("[data-image-id]").nth(1);
+      await firstCard.dispatchEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: "touch",
+        isPrimary: true,
+      });
+      await page.waitForFunction(() =>
+        document.querySelector("[data-image-id]")?.getAttribute("data-name-visible") === "true"
+      );
+      const shownOnContact = await firstCard.getAttribute("data-name-visible");
+      await firstCard.dispatchEvent("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: "touch",
+        isPrimary: true,
+      });
+      const retainedOnRelease = await firstCard.getAttribute("data-name-visible");
+      await page.waitForTimeout(1_900);
+      const retainedWithoutTimeout = await firstCard.getAttribute("data-name-visible");
+
+      await secondCard.dispatchEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 2,
+        pointerType: "touch",
+        isPrimary: true,
+      });
+      await page.waitForFunction(() =>
+        document.querySelectorAll('[data-name-visible="true"]').length === 1 &&
+        document.querySelectorAll("[data-image-id]")[1]
+          ?.getAttribute("data-name-visible") === "true"
+      );
+      await page.waitForTimeout(180);
+      const switchedToSecond = await secondCard.getAttribute("data-name-visible");
+      const firstHidden = await firstCard.getAttribute("data-name-visible");
+      const activeCount = await page.locator('[data-name-visible="true"]').count();
+      const displayedCount = await page.locator('[data-name-visible="true"] .image-name')
+        .evaluateAll((names) => names.filter((name) =>
+          Number.parseFloat(getComputedStyle(name).opacity) > 0.99
+        ).length);
+
+      await secondCard.dispatchEvent("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 2,
+        pointerType: "touch",
+        isPrimary: true,
+      });
+      await secondCard.evaluate((card) => {
+        globalThis.__pixhelfCardClickCount = 0;
+        card.addEventListener("click", () => {
+          globalThis.__pixhelfCardClickCount += 1;
+        }, { once: true });
+      });
+      const secondCardBox = await secondCard.boundingBox();
+      if (secondCardBox) {
+        await page.touchscreen.tap(
+          secondCardBox.x + secondCardBox.width / 2,
+          secondCardBox.y + secondCardBox.height / 2,
+        );
+      }
+      const clickCount = await page.evaluate(() => globalThis.__pixhelfCardClickCount ?? 0);
+      mobileCardNames = {
+        shownOnContact,
+        retainedOnRelease,
+        retainedWithoutTimeout,
+        switchedToSecond,
+        firstHidden,
+        activeCount,
+        displayedCount,
+        clickCount,
+      };
+    }
+
     let desktopSidebar = null;
     let mobileNavigation = null;
     if (target.name === "desktop") {
@@ -429,6 +509,7 @@ try {
       searchDisclosure,
       exploration,
       homeNavigation,
+      mobileCardNames,
       desktopSidebar,
       mobileNavigation,
       browserErrors,
@@ -554,6 +635,14 @@ try {
         mobileNavigation.drawerWidth < 200 ||
         mobileNavigation.closed !== 0 ||
         mobileNavigation.restored !== "false" ||
+        mobileCardNames?.shownOnContact !== "true" ||
+        mobileCardNames.retainedOnRelease !== "true" ||
+        mobileCardNames.retainedWithoutTimeout !== "true" ||
+        mobileCardNames.switchedToSecond !== "true" ||
+        mobileCardNames.firstHidden !== "false" ||
+        mobileCardNames.activeCount !== 1 ||
+        mobileCardNames.displayedCount !== 1 ||
+        mobileCardNames.clickCount !== 1 ||
         layout.cardNameDisplay === "none" ||
         layout.cardNameOpacity > 0.01 ||
         layout.cardNameWhiteSpace !== "nowrap"

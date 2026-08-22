@@ -17,6 +17,7 @@ pub struct ImageRecord {
     pub id: String,
     pub path: PathBuf,
     pub relative_path: String,
+    pub(crate) search_key: String,
     pub name: String,
     pub album: String,
     pub width: u32,
@@ -130,11 +131,13 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             .unwrap_or(&relative_path)
             .to_owned();
         let id = image_id(&relative_path, size, modified_ns);
+        let search_key = relative_path.to_lowercase();
 
         images.push(Arc::new(ImageRecord {
             id,
             path,
             relative_path,
+            search_key,
             name,
             album,
             width,

@@ -1,6 +1,6 @@
 [package]
 name = "pixhelf"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 build = "build.rs"
 
@@ -12,9 +12,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 mime_guess = "2.0.5"
 natord = "1.0.9"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.149"
 tokio = { version = "1.53.1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["compression-gzip", "fs", "set-header", "trace"] }
+tower-http = { version = "0.6.11", features = ["compression-br", "compression-gzip", "fs", "set-header", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 walkdir = "2.5.0"

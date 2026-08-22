@@ -1,4 +1,5 @@
 import type {
+  BootstrapData,
   GallerySummary,
   ImagesPage,
   SortMode,
@@ -24,7 +25,7 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 
   try {
     const response = await fetch(url, {
-      cache: "no-store",
+      cache: "no-cache",
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
@@ -46,6 +47,21 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   } finally {
     window.clearTimeout(timeout);
     signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+export function takeInitialBootstrap(): BootstrapData | null {
+  const element = document.getElementById("pixhelf-bootstrap");
+  if (!element) return null;
+
+  try {
+    const source = element.textContent?.trim();
+    if (!source || source.startsWith("__PIXHELF_")) return null;
+    return JSON.parse(source) as BootstrapData;
+  } catch {
+    return null;
+  } finally {
+    element.remove();
   }
 }
 

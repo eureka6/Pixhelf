@@ -2,7 +2,7 @@ import {
   Check,
   Dices,
   Folder,
-  Image as ImageIcon,
+  ImageIcon,
   Images,
   LoaderCircle,
   PanelLeftClose,
@@ -10,20 +10,19 @@ import {
   RefreshCw,
   Search,
   X,
-} from "lucide-react";
+} from "./icons";
+import type { CSSProperties, RefObject } from "preact";
+import { memo } from "preact/compat";
 import {
-  type CSSProperties,
-  type RefObject,
-  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-} from "react";
+} from "preact/hooks";
 import { ToolbarPopover } from "./ToolbarPopover";
-import { getGallery, getImages, getStatus } from "./api";
+import { getGallery, getImages, getStatus, takeInitialBootstrap } from "./api";
 import type {
   GalleryImage,
   GallerySummary,
@@ -31,12 +30,16 @@ import type {
 } from "./types";
 
 const PAGE_SIZE = 60;
-const MOBILE_PAGE_SIZE = 36;
+const MOBILE_PAGE_SIZE = 48;
+const CARD_PREFETCH_MARGIN = "1200px 0px";
+const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
+const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
 const SIDEBAR_STORAGE_KEY = "pixhelf.sidebar-collapsed";
 const GALLERY_POLL_INTERVAL_MS = 10_000;
 const IMAGE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const MOBILE_NAV_EXIT_MS = 240;
 const COUNT_FORMATTER = new Intl.NumberFormat("zh-CN");
+const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
 type ImagePageState = {
   images: GalleryImage[];
@@ -164,15 +167,69 @@ function createExploreSeed(): string {
   return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
 }
 
+const CARD_LOAD_CALLBACKS = new WeakMap<Element, () => void>();
+let cardLoadObserver: IntersectionObserver | null = null;
+
+function observeCardLoad(element: Element, load: () => void): () => void {
+  let observing = false;
+  const startObserving = () => {
+    if (!("IntersectionObserver" in window)) {
+      load();
+      return;
+    }
+    if (!cardLoadObserver) {
+      cardLoadObserver = new IntersectionObserver(
+        (entries, observer) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const callback = CARD_LOAD_CALLBACKS.get(entry.target);
+            CARD_LOAD_CALLBACKS.delete(entry.target);
+            observer.unobserve(entry.target);
+            callback?.();
+          }
+        },
+        { rootMargin: CARD_PREFETCH_MARGIN },
+      );
+    }
+    observing = true;
+    CARD_LOAD_CALLBACKS.set(element, load);
+    cardLoadObserver.observe(element);
+  };
+
+  if (document.readyState === "complete") {
+    startObserving();
+  } else {
+    window.addEventListener("load", startObserving, { once: true });
+  }
+  return () => {
+    window.removeEventListener("load", startObserving);
+    if (!observing) return;
+    CARD_LOAD_CALLBACKS.delete(element);
+    cardLoadObserver?.unobserve(element);
+  };
+}
+
 function App() {
   useVisualViewportTop();
-  const [summary, setSummary] = useState<GallerySummary | null>(null);
-  const [status, setStatus] = useState<ThumbnailStatus | null>(null);
-  const [imagePage, setImagePage] = useState<ImagePageState>(EMPTY_IMAGE_PAGE);
+  const [summary, setSummary] = useState<GallerySummary | null>(
+    INITIAL_BOOTSTRAP?.summary ?? null,
+  );
+  const [status, setStatus] = useState<ThumbnailStatus | null>(
+    INITIAL_BOOTSTRAP?.status ?? null,
+  );
+  const [imagePage, setImagePage] = useState<ImagePageState>(() => (
+    INITIAL_BOOTSTRAP
+      ? {
+          images: INITIAL_BOOTSTRAP.images.items,
+          total: INITIAL_BOOTSTRAP.images.total,
+          nextOffset: INITIAL_BOOTSTRAP.images.nextOffset,
+        }
+      : EMPTY_IMAGE_PAGE
+  ));
   const [album, setAlbum] = useState("");
   const [search, setSearch] = useState("");
   const [exploreSeed, setExploreSeed] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!INITIAL_BOOTSTRAP);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -183,7 +240,10 @@ function App() {
   const pageSize = compactLayout ? MOBILE_PAGE_SIZE : PAGE_SIZE;
   const debouncedSearch = useDebounced(search.trim(), 250);
   const requestVersionRef = useRef(0);
-  const summaryRevisionRef = useRef<string | null>(null);
+  const summaryRevisionRef = useRef<string | null>(
+    INITIAL_BOOTSTRAP?.summary.revision ?? null,
+  );
+  const skipInitialImagesRef = useRef(Boolean(INITIAL_BOOTSTRAP));
   const loadMoreControllerRef = useRef<AbortController | null>(null);
   const loadingMoreRef = useRef(false);
   const { images, total, nextOffset } = imagePage;
@@ -226,6 +286,7 @@ function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    if (reloadToken === 0 && INITIAL_BOOTSTRAP) return;
     const controller = new AbortController();
     getGallery(controller.signal)
       .then((next) => {
@@ -281,7 +342,10 @@ function App() {
         if (!controller.signal.aborted) timer = window.setTimeout(poll, 5000);
       }
     };
-    void poll();
+    const initialDelay = INITIAL_BOOTSTRAP
+      ? (INITIAL_BOOTSTRAP.status.backgroundComplete ? 10_000 : 1_500)
+      : 0;
+    timer = window.setTimeout(poll, initialDelay);
     return () => {
       controller.abort();
       window.clearTimeout(timer);
@@ -289,6 +353,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (skipInitialImagesRef.current) {
+      skipInitialImagesRef.current = false;
+      return;
+    }
     const controller = new AbortController();
     const requestVersion = ++requestVersionRef.current;
     loadMoreControllerRef.current?.abort();
@@ -382,7 +450,11 @@ function App() {
       ([entry]) => {
         if (entry.isIntersecting) void loadMore();
       },
-      { rootMargin: compactLayout ? "280px 0px" : "600px 0px" },
+      {
+        rootMargin: compactLayout
+          ? MOBILE_PAGE_PREFETCH_MARGIN
+          : DESKTOP_PAGE_PREFETCH_MARGIN,
+      },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -616,7 +688,7 @@ function Header({
             ref={searchInputRef}
             type="search"
             value={search}
-            onChange={(event) => onSearchChange(event.target.value)}
+            onInput={(event) => onSearchChange(event.currentTarget.value)}
             placeholder="搜索文件名"
             aria-label="搜索文件名"
             enterKeyHint="search"
@@ -853,20 +925,10 @@ function MasonryGallery({
   );
   const settledRevealIdsRef = useRef(new Set<string>());
   const revealRowMembersRef = useRef<string[][]>([]);
-  const activeNameTimerRef = useRef(0);
   const columnCount = useColumnCount(ref, initialColumnCount);
-  const eagerRowCount = columnCount <= 2 ? 6 : 2;
-  const highPriorityRowCount = columnCount <= 2 ? 4 : 1;
+  const eagerRowCount = 1;
 
-  useEffect(() => () => window.clearTimeout(activeNameTimerRef.current), []);
-
-  const revealName = useCallback((id: string) => {
-    window.clearTimeout(activeNameTimerRef.current);
-    setActiveNameId(id);
-    activeNameTimerRef.current = window.setTimeout(() => {
-      setActiveNameId((current) => current === id ? null : current);
-    }, 1_800);
-  }, []);
+  const showName = useCallback((id: string) => setActiveNameId(id), []);
 
   const markRevealImageSettled = useCallback((rowIndex: number, id: string) => {
     settledRevealIdsRef.current.add(id);
@@ -895,9 +957,8 @@ function MasonryGallery({
     return result;
   }, [columnCount, images]);
 
-  const synchronizedRowCount = columnCount <= 2
-    ? Math.max(0, ...columns.map((column) => column.length))
-    : 0;
+  // Masonry row indices drift apart vertically, so only coordinate the first row.
+  const synchronizedRowCount = columnCount <= 2 && images.length > 0 ? 1 : 0;
   const synchronizedRowMembers = useMemo(
     () => Array.from({ length: synchronizedRowCount }, (_, rowIndex) => (
       columns
@@ -925,13 +986,12 @@ function MasonryGallery({
               <ImageCard
                 key={image.id}
                 image={image}
-                index={index}
                 eager={rowIndex < eagerRowCount}
-                highPriority={rowIndex < highPriorityRowCount}
+                highPriority={index === 0}
                 revealReady={!synchronizeReveal || readyRevealRows.has(rowIndex)}
                 revealGroup={synchronizeReveal ? rowIndex : undefined}
                 nameVisible={activeNameId === image.id}
-                onNameTrigger={revealName}
+                onNameTouch={showName}
                 onSettled={synchronizeReveal ? markRevealImageSettled : undefined}
               />
             );
@@ -944,31 +1004,41 @@ function MasonryGallery({
 
 const ImageCard = memo(function ImageCard({
   image,
-  index,
   eager,
   highPriority,
   revealReady,
   revealGroup,
   nameVisible,
-  onNameTrigger,
+  onNameTouch,
   onSettled,
 }: {
   image: GalleryImage;
-  index: number;
   eager: boolean;
   highPriority: boolean;
   revealReady: boolean;
   revealGroup?: number;
   nameVisible: boolean;
-  onNameTrigger: (id: string) => void;
+  onNameTouch: (id: string) => void;
   onSettled?: (rowIndex: number, id: string) => void;
 }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [loadRequested, setLoadRequested] = useState(eager);
+  const cardRef = useRef<HTMLElement>(null);
   const retryTimerRef = useRef(0);
 
   useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
+  useEffect(() => {
+    if (eager) {
+      setLoadRequested(true);
+      return;
+    }
+    if (loadRequested) return;
+    const card = cardRef.current;
+    if (!card) return;
+    return observeCardLoad(card, () => setLoadRequested(true));
+  }, [eager, loadRequested]);
 
   const handleError = () => {
     setLoaded(false);
@@ -984,12 +1054,13 @@ const ImageCard = memo(function ImageCard({
     }, delay);
   };
 
-  const thumbnailUrl = attempt
-    ? `${image.thumbnailUrl}?retry=${attempt}`
-    : image.thumbnailUrl;
+  const thumbnailUrl = `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
+  const retryQuery = attempt ? `retry=${attempt}` : "";
+  const imageUrl = retryQuery ? `${thumbnailUrl}?${retryQuery}` : thumbnailUrl;
   const revealed = loaded && revealReady;
   return (
     <figure
+      ref={cardRef}
       className="image-card"
       title={image.name}
       data-image-id={image.id}
@@ -997,19 +1068,20 @@ const ImageCard = memo(function ImageCard({
       data-loaded={revealed}
       data-failed={failed}
       data-reveal-ready={revealReady}
+      data-eager={eager}
+      data-high-priority={highPriority}
       style={{
         aspectRatio: `${image.width} / ${image.height}`,
-        "--card-order": Math.min(index, 12),
       } as CSSProperties}
-      onPointerUp={(event) => {
-        if (event.pointerType !== "mouse") onNameTrigger(image.id);
+      onPointerDown={(event) => {
+        if (event.pointerType !== "mouse") onNameTouch(image.id);
       }}
     >
-      {!failed ? (
+      {!failed && loadRequested ? (
         <img
-          src={thumbnailUrl}
+          src={imageUrl}
           alt={image.name}
-          loading={eager ? "eager" : "lazy"}
+          loading="eager"
           decoding="async"
           fetchPriority={highPriority ? "high" : "auto"}
           className={revealed ? "loaded" : ""}
@@ -1019,11 +1091,11 @@ const ImageCard = memo(function ImageCard({
           }}
           onError={handleError}
         />
-      ) : (
+      ) : failed ? (
         <span className="image-fallback" role="img" aria-label={`${image.name} 加载失败`}>
           <ImageIcon size={24} />
         </span>
-      )}
+      ) : null}
       <span className="image-name">{image.name}</span>
     </figure>
   );

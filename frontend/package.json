@@ -1,7 +1,7 @@
 {
   "name": "pixhelf-frontend",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -10,14 +10,9 @@
     "visual-check": "node scripts/visual-check.mjs"
   },
   "dependencies": {
-    "lucide-react": "^0.539.0",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "preact": "^10.27.1"
   },
   "devDependencies": {
-    "@types/react": "^19.1.10",
-    "@types/react-dom": "^19.1.7",
-    "@vitejs/plugin-react": "^4.7.0",
     "playwright-core": "^1.62.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.3"
