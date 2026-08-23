@@ -36,6 +36,14 @@ export function Check(props: IconProps) {
   return <Icon {...props}><path d="M20 6 9 17l-5-5" /></Icon>;
 }
 
+export function ChevronLeft(props: IconProps) {
+  return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
+}
+
+export function ChevronRight(props: IconProps) {
+  return <Icon {...props}><path d="m9 18 6-6-6-6" /></Icon>;
+}
+
 export function Dices(props: IconProps) {
   return (
     <Icon {...props}>
@@ -43,6 +51,16 @@ export function Dices(props: IconProps) {
       <path d="m17.92 14 3.5-3.5a2.24 2.24 0 0 0 0-3l-5-4.92a2.24 2.24 0 0 0-3 0L10 6" />
       <path d="M6 18h.01" /><path d="M10 14h.01" />
       <path d="M15 6h.01" /><path d="M18 9h.01" />
+    </Icon>
+  );
+}
+
+export function Download(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M12 15V3" />
     </Icon>
   );
 }
@@ -76,6 +94,28 @@ export function LoaderCircle(props: IconProps) {
   return <Icon {...props}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></Icon>;
 }
 
+export function Maximize2(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M15 3h6v6" /><path d="m21 3-7 7" />
+      <path d="m3 21 7-7" /><path d="M9 21H3v-6" />
+    </Icon>
+  );
+}
+
+export function Minimize2(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m14 10 7-7" /><path d="M20 10h-6V4" />
+      <path d="m3 21 7-7" /><path d="M4 14h6v6" />
+    </Icon>
+  );
+}
+
+export function Minus(props: IconProps) {
+  return <Icon {...props}><path d="M5 12h14" /></Icon>;
+}
+
 export function PanelLeftClose(props: IconProps) {
   return (
     <Icon {...props}>
@@ -92,6 +132,10 @@ export function PanelLeftOpen(props: IconProps) {
       <path d="M9 3v18" /><path d="m14 9 3 3-3 3" />
     </Icon>
   );
+}
+
+export function Plus(props: IconProps) {
+  return <Icon {...props}><path d="M5 12h14" /><path d="M12 5v14" /></Icon>;
 }
 
 export function RefreshCw(props: IconProps) {

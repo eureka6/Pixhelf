@@ -28,6 +28,7 @@ const THUMBNAIL_EDGE: u32 = 720;
 const WEBP_QUALITY: f32 = 82.0;
 const CACHE_VERSION: &str = "720-webp-q82-v1";
 const THUMBNAIL_FILTER: FilterType = FilterType::Triangle;
+const LEGACY_VIEWER_CACHE_VERSION: &str = "viewer-3200-webp-q88-fast-v1";
 const MAX_ATTEMPTS: u8 = 3;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -116,6 +117,16 @@ impl ThumbnailManager {
         let cache_root = cache_dir.join(CACHE_VERSION);
         fs::create_dir_all(&cache_root)
             .with_context(|| format!("cannot create thumbnail cache: {}", cache_root.display()))?;
+        let legacy_viewer_cache = cache_dir.join(LEGACY_VIEWER_CACHE_VERSION);
+        if legacy_viewer_cache.is_dir()
+            && let Err(error) = fs::remove_dir_all(&legacy_viewer_cache)
+        {
+            warn!(
+                path = %legacy_viewer_cache.display(),
+                %error,
+                "cannot remove obsolete viewer cache"
+            );
+        }
         purge_temporary_files(&cache_root);
         Ok(Arc::new(Self {
             cache_root,
@@ -625,6 +636,19 @@ mod tests {
         generate_thumbnail(&index.images[0], &output).unwrap();
         let generated = image::open(output).unwrap();
         assert_eq!(generated.dimensions(), (720, 360));
+    }
+
+    #[test]
+    fn manager_removes_the_obsolete_second_preview_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join(LEGACY_VIEWER_CACHE_VERSION);
+        fs::create_dir(&legacy).unwrap();
+        fs::write(legacy.join("preview.webp"), [1; 32]).unwrap();
+
+        let manager = ThumbnailManager::new(temp.path().to_path_buf()).unwrap();
+
+        assert!(manager.cache_root.is_dir());
+        assert!(!legacy.exists());
     }
 
     #[test]

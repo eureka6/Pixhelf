@@ -22,6 +22,7 @@ import {
   useState,
 } from "preact/hooks";
 import { ToolbarPopover } from "./ToolbarPopover";
+import { ImageViewer, preloadOriginalImage } from "./ImageViewer";
 import { getGallery, getImages, getStatus, takeInitialBootstrap } from "./api";
 import type {
   GalleryImage,
@@ -30,7 +31,6 @@ import type {
 } from "./types";
 
 const PAGE_SIZE = 60;
-const MOBILE_PAGE_SIZE = 48;
 const CARD_PREFETCH_MARGIN = "1200px 0px";
 const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
 const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
@@ -168,42 +168,31 @@ function createExploreSeed(): string {
 }
 
 const CARD_LOAD_CALLBACKS = new WeakMap<Element, () => void>();
+const READY_THUMBNAIL_IDS = new Set<string>();
 let cardLoadObserver: IntersectionObserver | null = null;
 
 function observeCardLoad(element: Element, load: () => void): () => void {
-  let observing = false;
-  const startObserving = () => {
-    if (!("IntersectionObserver" in window)) {
-      load();
-      return;
-    }
-    if (!cardLoadObserver) {
-      cardLoadObserver = new IntersectionObserver(
-        (entries, observer) => {
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            const callback = CARD_LOAD_CALLBACKS.get(entry.target);
-            CARD_LOAD_CALLBACKS.delete(entry.target);
-            observer.unobserve(entry.target);
-            callback?.();
-          }
-        },
-        { rootMargin: CARD_PREFETCH_MARGIN },
-      );
-    }
-    observing = true;
-    CARD_LOAD_CALLBACKS.set(element, load);
-    cardLoadObserver.observe(element);
-  };
-
-  if (document.readyState === "complete") {
-    startObserving();
-  } else {
-    window.addEventListener("load", startObserving, { once: true });
+  if (!("IntersectionObserver" in window)) {
+    load();
+    return () => undefined;
   }
+  if (!cardLoadObserver) {
+    cardLoadObserver = new IntersectionObserver(
+      (entries, observer) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const callback = CARD_LOAD_CALLBACKS.get(entry.target);
+          CARD_LOAD_CALLBACKS.delete(entry.target);
+          observer.unobserve(entry.target);
+          callback?.();
+        }
+      },
+      { rootMargin: CARD_PREFETCH_MARGIN },
+    );
+  }
+  CARD_LOAD_CALLBACKS.set(element, load);
+  cardLoadObserver.observe(element);
   return () => {
-    window.removeEventListener("load", startObserving);
-    if (!observing) return;
     CARD_LOAD_CALLBACKS.delete(element);
     cardLoadObserver?.unobserve(element);
   };
@@ -234,10 +223,10 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
+  const [viewerImageId, setViewerImageId] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const compactLayout = useMediaQuery("(max-width: 720px)");
   const mobileNavMounted = useDelayedUnmount(mobileNavOpen, MOBILE_NAV_EXIT_MS);
-  const pageSize = compactLayout ? MOBILE_PAGE_SIZE : PAGE_SIZE;
   const debouncedSearch = useDebounced(search.trim(), 250);
   const requestVersionRef = useRef(0);
   const summaryRevisionRef = useRef<string | null>(
@@ -245,7 +234,7 @@ function App() {
   );
   const skipInitialImagesRef = useRef(Boolean(INITIAL_BOOTSTRAP));
   const loadMoreControllerRef = useRef<AbortController | null>(null);
-  const loadingMoreRef = useRef(false);
+  const loadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
   const { images, total, nextOffset } = imagePage;
 
   useLayoutEffect(() => {
@@ -361,7 +350,7 @@ function App() {
     const requestVersion = ++requestVersionRef.current;
     loadMoreControllerRef.current?.abort();
     loadMoreControllerRef.current = null;
-    loadingMoreRef.current = false;
+    loadMorePromiseRef.current = null;
     setLoading(true);
     setLoadingMore(false);
     setError(null);
@@ -373,7 +362,7 @@ function App() {
         sort: exploreSeed ? "explore" : "name-asc",
         seed: exploreSeed,
         offset: 0,
-        limit: pageSize,
+        limit: PAGE_SIZE,
       },
       controller.signal,
     )
@@ -399,48 +388,57 @@ function App() {
       controller.abort();
       const loadMoreController = loadMoreControllerRef.current;
       loadMoreControllerRef.current = null;
-      loadingMoreRef.current = false;
+      loadMorePromiseRef.current = null;
       loadMoreController?.abort();
     };
-  }, [album, debouncedSearch, exploreSeed, pageSize, reloadToken]);
+  }, [album, debouncedSearch, exploreSeed, reloadToken]);
 
-  const loadMore = useCallback(async () => {
-    if (loading || nextOffset === null || loadingMoreRef.current) return;
+  const loadMore = useCallback((): Promise<GalleryImage[]> => {
+    if (loading || nextOffset === null) return Promise.resolve([]);
+    const pending = loadMorePromiseRef.current;
+    if (pending) return pending;
+
     const controller = new AbortController();
     const requestVersion = requestVersionRef.current;
     loadMoreControllerRef.current = controller;
-    loadingMoreRef.current = true;
     setLoadingMore(true);
-    try {
-      const page = await getImages(
-        {
-          album,
-          search: debouncedSearch,
-          sort: exploreSeed ? "explore" : "name-asc",
-          seed: exploreSeed,
-          offset: nextOffset,
-          limit: pageSize,
-        },
-        controller.signal,
-      );
-      if (requestVersion !== requestVersionRef.current) return;
-      setImagePage((current) => ({
-        images: appendUniqueImages(current.images, page.items),
-        total: page.total,
-        nextOffset: page.nextOffset,
-      }));
-    } catch (reason) {
-      if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
-        setError(errorMessage(reason, "无法继续加载图片"));
+
+    const promise = (async () => {
+      try {
+        const page = await getImages(
+          {
+            album,
+            search: debouncedSearch,
+            sort: exploreSeed ? "explore" : "name-asc",
+            seed: exploreSeed,
+            offset: nextOffset,
+            limit: PAGE_SIZE,
+          },
+          controller.signal,
+        );
+        if (requestVersion !== requestVersionRef.current) return [];
+        setImagePage((current) => ({
+          images: appendUniqueImages(current.images, page.items),
+          total: page.total,
+          nextOffset: page.nextOffset,
+        }));
+        return page.items;
+      } catch (reason) {
+        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
+          setError(errorMessage(reason, "无法继续加载图片"));
+        }
+        return [];
+      } finally {
+        if (loadMoreControllerRef.current === controller) {
+          loadMoreControllerRef.current = null;
+          loadMorePromiseRef.current = null;
+          if (requestVersion === requestVersionRef.current) setLoadingMore(false);
+        }
       }
-    } finally {
-      if (loadMoreControllerRef.current === controller) {
-        loadMoreControllerRef.current = null;
-        loadingMoreRef.current = false;
-        if (requestVersion === requestVersionRef.current) setLoadingMore(false);
-      }
-    }
-  }, [album, debouncedSearch, exploreSeed, loading, nextOffset, pageSize]);
+    })();
+    loadMorePromiseRef.current = promise;
+    return promise;
+  }, [album, debouncedSearch, exploreSeed, loading, nextOffset]);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -460,18 +458,49 @@ function App() {
     return () => observer.disconnect();
   }, [compactLayout, loadMore, nextOffset]);
 
+  const viewerIndex = viewerImageId
+    ? images.findIndex((image) => image.id === viewerImageId)
+    : -1;
+
+  useEffect(() => {
+    if (!viewerImageId || viewerIndex < 0 || nextOffset === null) return;
+    if (viewerIndex >= images.length - 5) void loadMore();
+  }, [images.length, loadMore, nextOffset, viewerImageId, viewerIndex]);
+
+  const navigateViewer = useCallback((direction: -1 | 1) => {
+    if (!viewerImageId) return;
+    const currentIndex = images.findIndex((image) => image.id === viewerImageId);
+    if (currentIndex < 0) return;
+    const target = images[currentIndex + direction];
+    if (target) {
+      setViewerImageId(target.id);
+      return;
+    }
+    if (direction < 0 || nextOffset === null) return;
+
+    const startingId = viewerImageId;
+    void loadMore().then((incoming) => {
+      const next = incoming[0];
+      if (!next) return;
+      setViewerImageId((current) => current === startingId ? next.id : current);
+    });
+  }, [images, loadMore, nextOffset, viewerImageId]);
+
   const galleryPath = `/${album.replace(/^\/+/, "")}`;
   const chooseAlbum = (path: string) => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     setAlbum(path);
     setExploreSeed("");
+    setViewerImageId(null);
     setMobileNavOpen(false);
   };
   const changeSearch = (value: string) => {
     setSearch(value);
     setExploreSeed("");
+    setViewerImageId(null);
   };
   const startExploring = () => {
+    setViewerImageId(null);
     setExploreSeed(createExploreSeed());
   };
   const goHome = () => {
@@ -479,6 +508,7 @@ function App() {
     setAlbum("");
     setSearch("");
     setExploreSeed("");
+    setViewerImageId(null);
     setMobileNavOpen(false);
   };
   return (
@@ -552,6 +582,7 @@ function App() {
           <MasonryGallery
             images={images}
             initialColumnCount={compactLayout ? 2 : 5}
+            onOpen={setViewerImageId}
           />
         ) : (
           <div className="empty-state">
@@ -570,6 +601,17 @@ function App() {
           )}
         </div>
       </main>
+      {viewerIndex >= 0 && (
+        <ImageViewer
+          images={images}
+          activeIndex={viewerIndex}
+          total={total}
+          hasMore={nextOffset !== null}
+          loadingMore={loadingMore}
+          onNavigate={navigateViewer}
+          onClose={() => setViewerImageId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -889,114 +931,126 @@ function AlbumButton({
   );
 }
 
-function useColumnCount(
+type MasonryMetrics = {
+  width: number;
+  columnCount: number;
+  gap: number;
+};
+
+function useMasonryMetrics(
   ref: RefObject<HTMLDivElement | null>,
   initialColumnCount: number,
-): number {
-  const [columns, setColumns] = useState(initialColumnCount);
+): MasonryMetrics {
+  const [metrics, setMetrics] = useState<MasonryMetrics>({
+    width: 0,
+    columnCount: initialColumnCount,
+    gap: 6,
+  });
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
+    let frame = 0;
+    let pendingWidth = element.clientWidth;
     const update = (width: number) => {
+      if (width <= 0) return;
       const minimumCardWidth = 218;
-      const gap = 6;
+      const declaredGap = Number.parseFloat(
+        getComputedStyle(element).getPropertyValue("--masonry-gap"),
+      );
+      const gap = Number.isFinite(declaredGap) ? declaredGap : 6;
       const next = Math.floor((width + gap) / (minimumCardWidth + gap));
-      setColumns(Math.min(6, Math.max(2, next)));
+      const roundedWidth = Math.round(width * 100) / 100;
+      const columnCount = Math.min(6, Math.max(2, next));
+      setMetrics((current) => (
+        current.width === roundedWidth
+        && current.columnCount === columnCount
+        && current.gap === gap
+          ? current
+          : { width: roundedWidth, columnCount, gap }
+      ));
     };
-    update(element.clientWidth);
-    const observer = new ResizeObserver(([entry]) => update(entry.contentRect.width));
+    const schedule = (width: number) => {
+      pendingWidth = width;
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        update(pendingWidth);
+      });
+    };
+
+    update(pendingWidth);
+    const observer = new ResizeObserver(([entry]) => schedule(entry.contentRect.width));
     observer.observe(element);
-    return () => observer.disconnect();
-  }, [initialColumnCount, ref]);
-  return columns;
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [ref]);
+  return metrics;
 }
 
 function MasonryGallery({
   images,
   initialColumnCount,
+  onOpen,
 }: {
   images: GalleryImage[];
   initialColumnCount: number;
+  onOpen: (id: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [activeNameId, setActiveNameId] = useState<string | null>(null);
-  const [readyRevealRows, setReadyRevealRows] = useState<Set<number>>(
-    () => new Set(),
-  );
-  const settledRevealIdsRef = useRef(new Set<string>());
-  const revealRowMembersRef = useRef<string[][]>([]);
-  const columnCount = useColumnCount(ref, initialColumnCount);
-  const eagerRowCount = 1;
+  const { width, columnCount, gap } = useMasonryMetrics(ref, initialColumnCount);
 
   const showName = useCallback((id: string) => setActiveNameId(id), []);
 
-  const markRevealImageSettled = useCallback((rowIndex: number, id: string) => {
-    settledRevealIdsRef.current.add(id);
-    const rowMembers = revealRowMembersRef.current[rowIndex];
-    if (!rowMembers?.every((memberId) => settledRevealIdsRef.current.has(memberId))) return;
-
-    setReadyRevealRows((current) => {
-      if (current.has(rowIndex)) return current;
-      const next = new Set(current);
-      next.add(rowIndex);
-      return next;
-    });
-  }, []);
-
-  const columns = useMemo(() => {
-    const result: { image: GalleryImage; index: number }[][] = Array.from(
-      { length: columnCount },
-      () => [],
-    );
+  const layout = useMemo(() => {
+    if (width <= 0) return { height: 0, items: [] };
+    const cardWidth = Math.max(1, (width - gap * (columnCount - 1)) / columnCount);
     const heights = Array(columnCount).fill(0) as number[];
-    images.forEach((image, index) => {
+    const items = images.map((image, index) => {
       const target = heights.indexOf(Math.min(...heights));
-      result[target].push({ image, index });
-      heights[target] += image.height / Math.max(image.width, 1) + 0.05;
+      const cardHeight = Math.max(
+        64,
+        cardWidth * image.height / Math.max(image.width, 1),
+      );
+      const top = heights[target];
+      heights[target] = top + cardHeight + gap;
+      return {
+        image,
+        index,
+        style: {
+          left: target * (cardWidth + gap),
+          top,
+          width: cardWidth,
+          height: cardHeight,
+        } as CSSProperties,
+      };
     });
-    return result;
-  }, [columnCount, images]);
-
-  // Masonry row indices drift apart vertically, so only coordinate the first row.
-  const synchronizedRowCount = columnCount <= 2 && images.length > 0 ? 1 : 0;
-  const synchronizedRowMembers = useMemo(
-    () => Array.from({ length: synchronizedRowCount }, (_, rowIndex) => (
-      columns
-        .map((column) => column[rowIndex]?.image.id)
-        .filter((id): id is string => Boolean(id))
-    )),
-    [columns, synchronizedRowCount],
-  );
-
-  useLayoutEffect(() => {
-    revealRowMembersRef.current = synchronizedRowMembers;
-  }, [synchronizedRowMembers]);
+    return {
+      items,
+      height: items.length ? Math.max(...heights) - gap : 0,
+    };
+  }, [columnCount, gap, images, width]);
 
   return (
     <div
       ref={ref}
       className="masonry"
-      style={{ "--columns": columnCount } as CSSProperties}
+      data-columns={columnCount}
+      style={{ height: layout.height } as CSSProperties}
     >
-      {columns.map((column, columnIndex) => (
-        <div className="masonry-column" key={columnIndex}>
-          {column.map(({ image, index }, rowIndex) => {
-            const synchronizeReveal = rowIndex < synchronizedRowCount;
-            return (
-              <ImageCard
-                key={image.id}
-                image={image}
-                eager={rowIndex < eagerRowCount}
-                highPriority={index === 0}
-                revealReady={!synchronizeReveal || readyRevealRows.has(rowIndex)}
-                revealGroup={synchronizeReveal ? rowIndex : undefined}
-                nameVisible={activeNameId === image.id}
-                onNameTouch={showName}
-                onSettled={synchronizeReveal ? markRevealImageSettled : undefined}
-              />
-            );
-          })}
-        </div>
+      {layout.items.map(({ image, index, style }) => (
+        <ImageCard
+          key={image.id}
+          image={image}
+          layoutStyle={style}
+          eager={index < columnCount}
+          highPriority={index === 0}
+          nameVisible={activeNameId === image.id}
+          onNameTouch={showName}
+          onOpen={onOpen}
+        />
       ))}
     </div>
   );
@@ -1004,28 +1058,29 @@ function MasonryGallery({
 
 const ImageCard = memo(function ImageCard({
   image,
+  layoutStyle,
   eager,
   highPriority,
-  revealReady,
-  revealGroup,
   nameVisible,
   onNameTouch,
-  onSettled,
+  onOpen,
 }: {
   image: GalleryImage;
+  layoutStyle: CSSProperties;
   eager: boolean;
   highPriority: boolean;
-  revealReady: boolean;
-  revealGroup?: number;
   nameVisible: boolean;
   onNameTouch: (id: string) => void;
-  onSettled?: (rowIndex: number, id: string) => void;
+  onOpen: (id: string) => void;
 }) {
-  const [loaded, setLoaded] = useState(false);
+  const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
+  const [loaded, setLoaded] = useState(alreadyReady);
   const [failed, setFailed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const [loadRequested, setLoadRequested] = useState(eager);
+  const [loadRequested, setLoadRequested] = useState(eager || alreadyReady);
   const cardRef = useRef<HTMLElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
   const retryTimerRef = useRef(0);
 
   useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
@@ -1040,24 +1095,41 @@ const ImageCard = memo(function ImageCard({
     return observeCardLoad(card, () => setLoadRequested(true));
   }, [eager, loadRequested]);
 
-  const handleError = () => {
-    setLoaded(false);
-    setFailed(true);
-    const delay = IMAGE_RETRY_DELAYS_MS[attempt];
-    if (delay === undefined) {
-      if (revealGroup !== undefined) onSettled?.(revealGroup, image.id);
-      return;
-    }
-    retryTimerRef.current = window.setTimeout(() => {
-      setAttempt((current) => current + 1);
-      setFailed(false);
-    }, delay);
-  };
-
   const thumbnailUrl = `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
   const retryQuery = attempt ? `retry=${attempt}` : "";
   const imageUrl = retryQuery ? `${thumbnailUrl}?${retryQuery}` : thumbnailUrl;
-  const revealed = loaded && revealReady;
+
+  const markLoaded = useCallback(() => {
+    window.clearTimeout(retryTimerRef.current);
+    READY_THUMBNAIL_IDS.add(image.id);
+    setLoaded(true);
+    setFailed(false);
+    setRetrying(false);
+  }, [image.id]);
+
+  useLayoutEffect(() => {
+    const element = imageRef.current;
+    if (element?.complete && element.naturalWidth > 0) markLoaded();
+  }, [imageUrl, loadRequested, markLoaded]);
+
+  const handleError = () => {
+    window.clearTimeout(retryTimerRef.current);
+    READY_THUMBNAIL_IDS.delete(image.id);
+    setLoaded(false);
+    const delay = IMAGE_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) {
+      setRetrying(false);
+      setFailed(true);
+      return;
+    }
+    setFailed(false);
+    setRetrying(true);
+    retryTimerRef.current = window.setTimeout(() => {
+      setAttempt((current) => current + 1);
+      setRetrying(false);
+    }, delay);
+  };
+
   return (
     <figure
       ref={cardRef}
@@ -1065,30 +1137,46 @@ const ImageCard = memo(function ImageCard({
       title={image.name}
       data-image-id={image.id}
       data-name-visible={nameVisible}
-      data-loaded={revealed}
+      data-loaded={loaded}
       data-failed={failed}
-      data-reveal-ready={revealReady}
+      data-loading={loadRequested && !loaded && !failed}
+      data-retrying={retrying}
       data-eager={eager}
       data-high-priority={highPriority}
       style={{
+        ...layoutStyle,
         aspectRatio: `${image.width} / ${image.height}`,
       } as CSSProperties}
+      onPointerEnter={() => preloadOriginalImage(image)}
       onPointerDown={(event) => {
+        preloadOriginalImage(image);
         if (event.pointerType !== "mouse") onNameTouch(image.id);
       }}
+      onFocus={() => preloadOriginalImage(image)}
+      onClick={() => onOpen(image.id)}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onOpen(image.id);
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`查看 ${image.name}`}
+      aria-haspopup="dialog"
     >
       {!failed && loadRequested ? (
         <img
+          ref={imageRef}
           src={imageUrl}
           alt={image.name}
           loading="eager"
           decoding="async"
           fetchPriority={highPriority ? "high" : "auto"}
-          className={revealed ? "loaded" : ""}
-          onLoad={() => {
-            setLoaded(true);
-            if (revealGroup !== undefined) onSettled?.(revealGroup, image.id);
-          }}
+          width={image.width}
+          height={image.height}
+          draggable={false}
+          className={loaded ? "loaded" : ""}
+          onLoad={markLoaded}
           onError={handleError}
         />
       ) : failed ? (

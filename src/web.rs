@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/images", get(images))
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
+        .route("/api/images/{id}/original", get(original))
         .route("/assets/{version}/app.js", get(app_js))
         .route("/assets/{version}/app.css", get(app_css))
         .fallback(frontend)
@@ -324,6 +325,33 @@ async fn thumbnail(
         path,
         request,
         &format!("\"thumb-{id}\""),
+        "public, max-age=31536000, immutable",
+    )
+    .await
+}
+
+async fn original(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    // Resolve the opaque id through the index instead of accepting a filesystem path
+    // from the request. Cloning the path also avoids holding the read lock while the
+    // file is streamed to a slow client.
+    let path = {
+        let index = state.index.read().await;
+        index
+            .images
+            .iter()
+            .find(|image| image.id == id)
+            .map(|image| image.path.clone())
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+
+    serve_file(
+        path,
+        request,
+        &format!("\"original-{id}\""),
         "public, max-age=31536000, immutable",
     )
     .await
@@ -617,7 +645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_api_and_thumbnail_routes_return_not_found() {
+    async fn unknown_api_and_image_routes_return_not_found() {
         assert_eq!(
             request("/api/does-not-exist").await.status(),
             StatusCode::NOT_FOUND
@@ -626,7 +654,49 @@ mod tests {
             request("/api/images/missing/thumbnail").await.status(),
             StatusCode::NOT_FOUND
         );
+        assert_eq!(
+            request("/api/images/missing/original").await.status(),
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(request("/missing").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn indexed_images_expose_original_with_immutable_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        image::RgbImage::new(20, 10)
+            .save(gallery.join("image.png"))
+            .unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let id = index.images[0].id.clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(index)),
+            thumbnails,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{id}/original"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
     }
 
     #[tokio::test]

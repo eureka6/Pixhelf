@@ -63,7 +63,9 @@ try {
         cards: document.querySelectorAll("[data-image-id]").length,
         cardTags: [...document.querySelectorAll("[data-image-id]")]
           .map((element) => element.tagName),
-        masonryColumns: document.querySelectorAll(".masonry-column").length,
+        masonryColumns: Number(
+          document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
+        ),
         loadedCards: document.querySelectorAll("[data-image-id] img.loaded").length,
         brokenVisibleImages: [...document.images].filter((image) => {
           const rect = image.getBoundingClientRect();
@@ -113,9 +115,240 @@ try {
       };
     });
 
+    let resizeStability = null;
+    if (target.name === "desktop") {
+      await page.evaluate(() => {
+        globalThis.__pixhelfResizeLoadedIds = [
+          ...document.querySelectorAll('[data-image-id][data-loaded="true"]'),
+        ].map((card) => card.getAttribute("data-image-id"));
+        for (const card of document.querySelectorAll("[data-image-id]")) {
+          card.setAttribute(
+            "data-resize-probe",
+            card.getAttribute("data-image-id") ?? "",
+          );
+        }
+        globalThis.__pixhelfResizeSkeletonSeen = false;
+        globalThis.__pixhelfResizeObserver = new MutationObserver(() => {
+          if (document.querySelector(".skeleton-grid")) {
+            globalThis.__pixhelfResizeSkeletonSeen = true;
+          }
+        });
+        globalThis.__pixhelfResizeObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+        });
+        globalThis.__pixhelfImageRequestsBeforeResize = performance
+          .getEntriesByType("resource")
+          .filter((entry) => new URL(entry.name).pathname === "/api/images")
+          .length;
+      });
+
+      for (const size of [
+        { width: 680, columns: 3 },
+        { width: 520, columns: 2 },
+        { width: 1000, columns: 3 },
+        { width: target.width, columns: 5 },
+      ]) {
+        await page.setViewportSize({ width: size.width, height: target.height });
+        await page.waitForFunction((columns) =>
+          document.querySelector(".masonry")?.getAttribute("data-columns") === String(columns)
+        , size.columns);
+        await page.waitForTimeout(100);
+      }
+
+      await page.waitForFunction(() => {
+        const loadedIds = globalThis.__pixhelfResizeLoadedIds ?? [];
+        return loadedIds.every((id) => {
+          const card = document.querySelector(`[data-image-id="${CSS.escape(id)}"]`);
+          const image = card?.querySelector("img");
+          return card?.getAttribute("data-loaded") === "true"
+            && image?.complete
+            && image.naturalWidth > 0;
+        });
+      });
+      resizeStability = await page.evaluate(() => {
+        globalThis.__pixhelfResizeObserver?.disconnect();
+        const cards = [...document.querySelectorAll("[data-image-id]")];
+        const imageRequestsAfter = performance
+          .getEntriesByType("resource")
+          .filter((entry) => new URL(entry.name).pathname === "/api/images")
+          .length;
+        const visibleImages = cards
+          .map((card) => card.querySelector("img"))
+          .filter((image) => {
+            if (!image) return false;
+            const rect = image.getBoundingClientRect();
+            return rect.bottom > 0 && rect.top < innerHeight;
+          });
+        return {
+          cardsPreserved: cards.every((card) =>
+            card.getAttribute("data-resize-probe") === card.getAttribute("data-image-id")
+          ),
+          loadedCardsPreserved: (globalThis.__pixhelfResizeLoadedIds ?? []).every((id) =>
+            document.querySelector(`[data-image-id="${CSS.escape(id)}"]`)
+              ?.getAttribute("data-loaded") === "true"
+          ),
+          skeletonSeen: globalThis.__pixhelfResizeSkeletonSeen,
+          imagePageRequests: imageRequestsAfter
+            - globalThis.__pixhelfImageRequestsBeforeResize,
+          brokenVisibleImages: visibleImages.filter((image) =>
+            !image.complete || image.naturalWidth <= 0
+          ).length,
+          columns: Number(
+            document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
+          ),
+        };
+      });
+    }
+
+    const firstViewerTitle = await page.locator("[data-image-id]").first().getAttribute("title");
     await page.locator("[data-image-id]").first().click();
-    await page.waitForTimeout(200);
+    await page.waitForSelector(".image-viewer");
+    const viewerChrome = await page.evaluate(() => ({
+      fullscreenButtons: document.querySelectorAll(".viewer-fullscreen").length,
+      gestureHelp: document.querySelectorAll(".viewer-gesture-help").length,
+      loadingStatus: document.querySelectorAll(".viewer-load-status").length,
+      loadingCopyVisible: document.body.textContent?.includes("正在加载原图") ?? false,
+    }));
+    await page.waitForFunction(() =>
+      document.querySelector(".image-viewer")?.getAttribute("data-full-loaded") === "true"
+    , undefined, { timeout: 60_000 });
+    await page.waitForFunction(() => {
+      const originalPaths = performance.getEntriesByType("resource")
+        .map((entry) => new URL(entry.name).pathname)
+        .filter((path) => path.endsWith("/original"));
+      return new Set(originalPaths).size >= 2;
+    }, undefined, { timeout: 60_000 });
+    await page.waitForTimeout(260);
     const dialogsAfterImageClick = await page.locator('[role="dialog"]').count();
+    await page.screenshot({ path: `/tmp/pixhelf-viewer-${target.name}.png` });
+    const viewer = await page.evaluate(() => {
+      const overlay = document.querySelector(".image-viewer");
+      const original = document.querySelector(".viewer-original");
+      const media = document.querySelector(".viewer-media")?.getBoundingClientRect();
+      const resourcePaths = performance.getEntriesByType("resource")
+        .map((entry) => new URL(entry.name).pathname);
+      const originalSource = original instanceof HTMLImageElement
+        ? original.currentSrc || original.src
+        : original?.getAttribute("data-original-url") ?? "";
+      return {
+        title: document.querySelector(".viewer-heading strong")?.textContent ?? "",
+        fullLoaded: overlay?.getAttribute("data-full-loaded"),
+        originalPath: originalSource ? new URL(originalSource, location.href).pathname : "",
+        renderer: overlay?.getAttribute("data-renderer"),
+        renderedPixels: original instanceof HTMLCanvasElement
+          ? [original.width, original.height]
+          : [original?.clientWidth ?? 0, original?.clientHeight ?? 0],
+        prefetchedOriginals: new Set(
+          resourcePaths.filter((path) => path.endsWith("/original")),
+        ).size,
+        previewRequests: resourcePaths.filter((path) => path.endsWith("/preview")).length,
+        rootInert: document.querySelector("#root")?.inert ?? false,
+        closeFocused: document.activeElement?.classList.contains("viewer-close") ?? false,
+        mediaContained: media
+          ? media.left >= -1 && media.top >= -1 && media.right <= innerWidth + 1 &&
+            media.bottom <= innerHeight + 1
+          : false,
+        position: document.querySelector(".viewer-heading span")?.textContent ?? "",
+      };
+    });
+    Object.assign(viewer, viewerChrome);
+    await page.locator(".viewer-fullscreen").click();
+    await page.waitForFunction(() =>
+      document.fullscreenElement?.classList.contains("image-viewer")
+    );
+    await page.waitForFunction(() =>
+      document.querySelector(".viewer-fullscreen")?.getAttribute("aria-label") === "退出全屏"
+    );
+    viewer.fullscreenEntered = true;
+    viewer.fullscreenLabel = await page.locator(".viewer-fullscreen").getAttribute("aria-label");
+    await page.locator(".viewer-fullscreen").click();
+    await page.waitForFunction(() => document.fullscreenElement === null);
+    viewer.fullscreenExited = true;
+    await page.locator(".viewer-zoom-controls .viewer-control").last().click();
+    await page.waitForFunction(() =>
+      document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "true"
+    );
+    viewer.zoomed = await page.locator(".viewer-zoom-value").textContent();
+    await page.waitForTimeout(260);
+    viewer.zoomScale = await page.locator(".viewer-media").evaluate((media) =>
+      new DOMMatrix(getComputedStyle(media).transform).a
+    );
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction((title) =>
+      document.querySelector(".viewer-heading strong")?.textContent !== title
+    , firstViewerTitle);
+    viewer.keyboardNavigation = await page.locator(".viewer-heading strong").textContent();
+    if (target.name === "mobile") {
+      const cdp = await page.context().newCDPSession(page);
+      const dispatchTouch = (type, touchPoints) => cdp.send("Input.dispatchTouchEvent", {
+        type,
+        touchPoints: touchPoints.map((point) => ({
+          ...point,
+          radiusX: 2,
+          radiusY: 2,
+          force: 1,
+        })),
+      });
+
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "false"
+      );
+      await dispatchTouch("touchStart", [
+        { id: 11, x: 145, y: 420 },
+        { id: 12, x: 245, y: 420 },
+      ]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [
+        { id: 11, x: 95, y: 420 },
+        { id: 12, x: 295, y: 420 },
+      ]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchEnd", []);
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "true"
+      );
+      viewer.pinchZoomed = true;
+      await page.waitForTimeout(40);
+      viewer.pinchScale = await page.locator(".viewer-media").evaluate((media) =>
+        new DOMMatrix(getComputedStyle(media).transform).a
+      );
+
+      await page.touchscreen.tap(195, 420);
+      await page.waitForTimeout(70);
+      await page.touchscreen.tap(195, 420);
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "false"
+      );
+      viewer.doubleTapReset = true;
+      await page.waitForTimeout(260);
+      viewer.doubleTapScale = await page.locator(".viewer-media").evaluate((media) =>
+        new DOMMatrix(getComputedStyle(media).transform).a
+      );
+
+      const titleBeforeSwipe = await page.locator(".viewer-heading strong").textContent();
+      await dispatchTouch("touchStart", [{ id: 31, x: 320, y: 420 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 31, x: 90, y: 420 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchEnd", []);
+      await page.waitForFunction((title) =>
+        document.querySelector(".viewer-heading strong")?.textContent !== title
+      , titleBeforeSwipe);
+      viewer.swipeNavigation = await page.locator(".viewer-heading strong").textContent();
+
+      await dispatchTouch("touchStart", [{ id: 41, x: 195, y: 210 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 41, x: 195, y: 510 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchEnd", []);
+      viewer.closedByGesture = true;
+    } else {
+      await page.keyboard.press("Escape");
+    }
+    await page.waitForSelector(".image-viewer", { state: "detached" });
+    viewer.closed = await page.locator(".image-viewer").count();
+    viewer.rootRestored = await page.locator("#root").evaluate((root) => !root.inert);
 
     const searchToggleBefore = await page.locator(".search-toggle").boundingBox();
     await page.locator(".search-toggle").click();
@@ -314,6 +547,10 @@ try {
         );
       }
       const clickCount = await page.evaluate(() => globalThis.__pixhelfCardClickCount ?? 0);
+      await page.waitForSelector(".image-viewer");
+      const viewerOpenedFromTouch = await page.locator(".image-viewer").count();
+      await page.locator(".viewer-close").click();
+      await page.waitForSelector(".image-viewer", { state: "detached" });
       mobileCardNames = {
         shownOnContact,
         retainedOnRelease,
@@ -323,6 +560,7 @@ try {
         activeCount,
         displayedCount,
         clickCount,
+        viewerOpenedFromTouch,
       };
     }
 
@@ -361,7 +599,9 @@ try {
         ).visibility,
         ariaHidden: document.querySelector(".desktop-sidebar")?.getAttribute("aria-hidden"),
         stored: localStorage.getItem("pixhelf.sidebar-collapsed"),
-        columns: document.querySelectorAll(".masonry-column").length,
+        columns: Number(
+          document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
+        ),
         redundantHeadings: document.querySelectorAll(".sidebar-heading").length,
         pathDetails: document.querySelectorAll(".album-copy small").length,
         progressPanels: document.querySelectorAll(".sidebar-progress").length,
@@ -505,7 +745,9 @@ try {
     const result = {
       name: target.name,
       ...layout,
+      resizeStability,
       dialogsAfterImageClick,
+      viewer,
       searchDisclosure,
       exploration,
       homeNavigation,
@@ -524,7 +766,40 @@ try {
       layout.masonryColumns !== expectedColumns ||
       layout.cardTags.some((tag) => tag !== "FIGURE") ||
       layout.dialogs !== 0 ||
-      dialogsAfterImageClick !== 0 ||
+      dialogsAfterImageClick !== 1 ||
+      viewer.title !== firstViewerTitle ||
+      viewer.fullLoaded !== "true" ||
+      !viewer.originalPath.endsWith("/original") ||
+      viewer.renderer !== "bitmap" ||
+      viewer.renderedPixels.some((size) => size <= 0 || size > 4096) ||
+      viewer.prefetchedOriginals < 2 ||
+      viewer.previewRequests !== 0 ||
+      viewer.fullscreenButtons !== 1 ||
+      viewer.gestureHelp !== 0 ||
+      viewer.loadingStatus !== 0 ||
+      viewer.loadingCopyVisible ||
+      !viewer.fullscreenEntered ||
+      viewer.fullscreenLabel !== "退出全屏" ||
+      !viewer.fullscreenExited ||
+      !viewer.rootInert ||
+      !viewer.closeFocused ||
+      !viewer.mediaContained ||
+      !viewer.position.includes("/") ||
+      viewer.zoomed !== "150%" ||
+      Math.abs(viewer.zoomScale - 1.5) > 0.02 ||
+      !viewer.keyboardNavigation ||
+      viewer.keyboardNavigation === firstViewerTitle ||
+      (target.name === "mobile" && (
+        !viewer.pinchZoomed ||
+        viewer.pinchScale < 1.5 ||
+        !viewer.doubleTapReset ||
+        Math.abs(viewer.doubleTapScale - 1) > 0.02 ||
+        !viewer.swipeNavigation ||
+        viewer.swipeNavigation === viewer.keyboardNavigation ||
+        !viewer.closedByGesture
+      )) ||
+      viewer.closed !== 0 ||
+      !viewer.rootRestored ||
       searchDisclosure.expanded !== "true" ||
       !searchDisclosure.focused ||
       searchDisclosure.panelRole !== "group" ||
@@ -563,6 +838,15 @@ try {
       layout.exploreSearchGap > 8 ||
       layout.sidebarStatuses !== 1 ||
       layout.sidebarGalleryMetas !== 1 ||
+      (target.name === "desktop" && (
+        !resizeStability ||
+        !resizeStability.cardsPreserved ||
+        !resizeStability.loadedCardsPreserved ||
+        resizeStability.skeletonSeen ||
+        resizeStability.imagePageRequests !== 0 ||
+        resizeStability.brokenVisibleImages !== 0 ||
+        resizeStability.columns !== 5
+      )) ||
       !layout.galleryPath.startsWith("/") ||
       !layout.galleryCount.endsWith("张图片") ||
       layout.galleryMetaRowDelta < 0 ||
@@ -643,6 +927,7 @@ try {
         mobileCardNames.activeCount !== 1 ||
         mobileCardNames.displayedCount !== 1 ||
         mobileCardNames.clickCount !== 1 ||
+        mobileCardNames.viewerOpenedFromTouch !== 1 ||
         layout.cardNameDisplay === "none" ||
         layout.cardNameOpacity > 0.01 ||
         layout.cardNameWhiteSpace !== "nowrap"
