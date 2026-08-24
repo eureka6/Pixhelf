@@ -4,24 +4,39 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  ChevronsDown,
   Download,
   LoaderCircle,
   Maximize2,
-  Minus,
   Minimize2,
-  Plus,
   RefreshCw,
   X,
 } from "./icons";
 import type { GalleryImage } from "./types";
+import {
+  getViewerOriginalAsset,
+  getViewerOriginalStatus,
+  getViewerThumbnailStatus,
+  getViewerViewportRenderAsset,
+  getViewerViewportRenderStatus,
+  prepareViewerImages,
+  viewerOriginalUrl,
+  viewerThumbnailUrl,
+} from "./viewerAssets";
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 const DOUBLE_TAP_SCALE = 2.5;
 const DOUBLE_TAP_DELAY_MS = 280;
-const ORIGINAL_PRELOAD_LIMIT = 6;
-const SECOND_NEIGHBOR_PRELOAD_DELAY_MS = 500;
+const VIEWER_SCROLL_EPSILON = 2;
+const WHEEL_HANDOFF_DELAY_MS = 220;
 const MAX_RENDER_EDGE = 4096;
+const MAX_NATIVE_IMAGE_EDGE = 12_288;
+const MOBILE_VIEWPORT_RENDER_EDGE = 2048;
+const MOBILE_SWIPE_MOTION_MS = 170;
+const MOBILE_SWIPE_CLEANUP_MS = MOBILE_SWIPE_MOTION_MS + 50;
+const MOBILE_ORIGINAL_UPGRADE_DELAY_MS = MOBILE_SWIPE_CLEANUP_MS + 40;
 
 type ViewerTransform = {
   scale: number;
@@ -37,9 +52,14 @@ type PointerPoint = {
 type GestureStart = {
   point: PointerPoint;
   transform: ViewerTransform;
+  scrollTop: number;
   startedAt: number;
   pointerType: string;
 };
+
+type GestureMode = "pan" | "navigate" | "page" | "dismiss" | "pinch";
+
+type ViewerPage = "image" | "transition" | "details";
 
 type PinchStart = {
   distance: number;
@@ -54,9 +74,22 @@ type OriginalLoadState = {
   failed: boolean;
 };
 
-type NetworkInformation = {
-  effectiveType?: string;
-  saveData?: boolean;
+type ThumbnailLoadState = {
+  id: string;
+  loaded: boolean;
+  failed: boolean;
+};
+
+type FullResolutionState = {
+  id: string;
+  requested: boolean;
+  loaded: boolean;
+  failed: boolean;
+};
+
+type PreparedSwipeSnapshot = {
+  imageId: string;
+  element: HTMLDivElement;
 };
 
 type ViewportSize = {
@@ -72,7 +105,6 @@ type GestureHandlers = {
 };
 
 const DEFAULT_TRANSFORM: ViewerTransform = { scale: 1, x: 0, y: 0 };
-const originalPreloads = new Map<string, HTMLImageElement>();
 
 function readViewportSize(): ViewportSize {
   return {
@@ -106,15 +138,6 @@ function useViewportSize(): ViewportSize {
   return size;
 }
 
-function thumbnailUrl(image: GalleryImage): string {
-  return `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
-}
-
-function originalUrl(image: GalleryImage, attempt = 0): string {
-  const url = `/api/images/${encodeURIComponent(image.id)}/original`;
-  return attempt ? `${url}?retry=${attempt}` : url;
-}
-
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
@@ -135,31 +158,40 @@ function rubberBand(distance: number, limit: number): number {
   return Math.sign(distance) * limit * (1 - Math.exp(-Math.abs(distance) / limit));
 }
 
-function shouldPreloadViewerImages(): boolean {
-  if (document.visibilityState !== "visible") return false;
-  const connection = (navigator as Navigator & { connection?: NetworkInformation }).connection;
-  if (connection?.saveData) return false;
-  return connection?.effectiveType !== "slow-2g" && connection?.effectiveType !== "2g";
+function mouseSideDirection(button: number): -1 | 1 | null {
+  if (button === 3) return -1;
+  if (button === 4) return 1;
+  return null;
 }
 
-export function preloadOriginalImage(image: GalleryImage): void {
-  if (!shouldPreloadViewerImages()) return;
-  const url = originalUrl(image);
-  if (originalPreloads.has(url)) return;
+function viewerMediaDimensions(
+  image: GalleryImage,
+  viewport: ViewportSize,
+): { width: number; height: number } {
+  const compact = viewport.width <= 720;
+  const availableWidth = Math.max(1, viewport.width - (compact ? 12 : 144));
+  const availableHeight = Math.max(1, viewport.height - (compact ? 128 : 104));
+  const imageRatio = image.width / Math.max(1, image.height);
+  const width = Math.min(availableWidth, availableHeight * imageRatio);
+  return { width, height: width / imageRatio };
+}
 
-  const loader = new Image();
-  loader.decoding = "async";
-  loader.fetchPriority = "low";
-  loader.src = url;
-  originalPreloads.set(url, loader);
-
-  while (originalPreloads.size > ORIGINAL_PRELOAD_LIMIT) {
-    const oldestUrl = originalPreloads.keys().next().value as string | undefined;
-    if (!oldestUrl) break;
-    const oldest = originalPreloads.get(oldestUrl);
-    if (oldest && !oldest.complete) oldest.src = "";
-    originalPreloads.delete(oldestUrl);
-  }
+function viewportRenderDimensions(
+  image: GalleryImage,
+  viewport: ViewportSize,
+): { width: number; height: number } {
+  const media = viewerMediaDimensions(image, viewport);
+  const density = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+  const requestedWidth = media.width * density;
+  const requestedHeight = media.height * density;
+  const scale = Math.min(
+    1,
+    MOBILE_VIEWPORT_RENDER_EDGE / Math.max(1, requestedWidth, requestedHeight),
+  );
+  return {
+    width: Math.max(1, Math.round(requestedWidth * scale)),
+    height: Math.max(1, Math.round(requestedHeight * scale)),
+  };
 }
 
 export function ImageViewer({
@@ -181,10 +213,18 @@ export function ImageViewer({
 }) {
   const image = images[activeIndex]!;
   const viewport = useViewportSize();
+  const compactViewport = viewport.width <= 720;
+  const useViewportBitmapRenderer = compactViewport && typeof createImageBitmap === "function";
+  const useSafeCanvasRenderer = !useViewportBitmapRenderer
+    && Math.max(image.width, image.height) > MAX_NATIVE_IMAGE_EDGE;
+  const useCanvasRenderer = useViewportBitmapRenderer || useSafeCanvasRenderer;
+  const mediaDimensions = viewerMediaDimensions(image, viewport);
+  const viewportRender = viewportRenderDimensions(image, viewport);
   const canPrevious = activeIndex > 0;
   const canNext = activeIndex < images.length - 1 || hasMore;
   const waitingForNext = loadingMore && activeIndex === images.length - 1;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const detailsSectionRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const mediaRef = useRef<HTMLDivElement>(null);
@@ -193,12 +233,21 @@ export function ImageViewer({
   const gestureStartRef = useRef<GestureStart | null>(null);
   const pinchStartRef = useRef<PinchStart | null>(null);
   const gestureAxisRef = useRef<"x" | "y" | null>(null);
+  const gestureModeRef = useRef<GestureMode | null>(null);
   const pinchedRef = useRef(false);
   const lastTapRef = useRef<{ at: number; point: PointerPoint } | null>(null);
   const lastTouchAtRef = useRef(0);
   const gestureHandlersRef = useRef<GestureHandlers | null>(null);
   const retryTimerRef = useRef(0);
+  const scrollTopRef = useRef(0);
+  const scrollPageRef = useRef<ViewerPage>("image");
+  const wheelZoomBlockedUntilRef = useRef(0);
+  const displayedOriginalsRef = useRef(new Set<string>());
+  const swipeCleanupTimerRef = useRef(0);
+  const swipeOutgoingRef = useRef<HTMLElement | null>(null);
+  const preparedSwipeSnapshotRef = useRef<PreparedSwipeSnapshot | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [scrollPage, setScrollPage] = useState<ViewerPage>("image");
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenAvailable, setFullscreenAvailable] = useState(
     () => typeof document !== "undefined"
@@ -207,23 +256,83 @@ export function ImageViewer({
   );
   const [transform, setTransform] = useState<ViewerTransform>(DEFAULT_TRANSFORM);
   const transformRef = useRef<ViewerTransform>(DEFAULT_TRANSFORM);
-  const [nativeFallbackId, setNativeFallbackId] = useState<string | null>(null);
+  const [thumbnailState, setThumbnailState] = useState<ThumbnailLoadState>({
+    id: image.id,
+    loaded: getViewerThumbnailStatus(image) === "ready",
+    failed: false,
+  });
+  const initialOriginalSource = viewerOriginalUrl(image);
+  const initialOriginalReady = useViewportBitmapRenderer
+    ? getViewerViewportRenderStatus(
+      image,
+      viewportRender.width,
+      viewportRender.height,
+    ) === "ready"
+    : !useSafeCanvasRenderer && (
+      displayedOriginalsRef.current.has(initialOriginalSource)
+      || getViewerOriginalStatus(image) === "ready"
+    );
   const [loadState, setLoadState] = useState<OriginalLoadState>({
     id: image.id,
     attempt: 0,
+    loaded: initialOriginalReady,
+    failed: false,
+  });
+  const [fullResolutionState, setFullResolutionState] = useState<FullResolutionState>({
+    id: image.id,
+    requested: false,
     loaded: false,
     failed: false,
   });
+  const fallbackOriginalReady = useViewportBitmapRenderer
+    ? getViewerViewportRenderStatus(
+      image,
+      viewportRender.width,
+      viewportRender.height,
+    ) === "ready"
+    : !useSafeCanvasRenderer && (
+      displayedOriginalsRef.current.has(initialOriginalSource)
+      || getViewerOriginalStatus(image) === "ready"
+    );
   const currentLoadState = loadState.id === image.id
     ? loadState
-    : { id: image.id, attempt: 0, loaded: false, failed: false };
-  const fullSource = originalUrl(image, currentLoadState.attempt);
-  const useBitmapRenderer = typeof createImageBitmap === "function"
-    && nativeFallbackId !== image.id;
+    : { id: image.id, attempt: 0, loaded: fallbackOriginalReady, failed: false };
+  const currentFullResolution = fullResolutionState.id === image.id
+    ? fullResolutionState
+    : { id: image.id, requested: false, loaded: false, failed: false };
+  const thumbnailLoaded = thumbnailState.id === image.id
+    ? thumbnailState.loaded
+    : getViewerThumbnailStatus(image) === "ready";
+  const thumbnailFailed = thumbnailState.id === image.id && thumbnailState.failed;
+  const fullSource = viewerOriginalUrl(image, currentLoadState.attempt);
 
   const commitTransform = (next: ViewerTransform) => {
     transformRef.current = next;
     setTransform(next);
+  };
+
+  const syncScrollPage = (top: number) => {
+    const viewer = dialogRef.current;
+    const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 0;
+    const nextPage: ViewerPage = top <= VIEWER_SCROLL_EPSILON
+      ? "image"
+      : detailsTop > 0 && top >= detailsTop - VIEWER_SCROLL_EPSILON
+        ? "details"
+        : "transition";
+    if (scrollPageRef.current === nextPage) return;
+    scrollPageRef.current = nextPage;
+    setScrollPage(nextPage);
+  };
+
+  const forceViewerScroll = (top: number) => {
+    const viewer = dialogRef.current;
+    if (!viewer) return;
+    const previousBehavior = viewer.style.scrollBehavior;
+    viewer.style.scrollBehavior = "auto";
+    viewer.scrollTop = top;
+    viewer.style.scrollBehavior = previousBehavior;
+    scrollTopRef.current = viewer.scrollTop;
+    syncScrollPage(viewer.scrollTop);
   };
 
   const constrainTransform = (next: ViewerTransform): ViewerTransform => {
@@ -250,6 +359,10 @@ export function ImageViewer({
       commitTransform(DEFAULT_TRANSFORM);
       return;
     }
+    if ((dialogRef.current?.scrollTop ?? scrollTopRef.current) > VIEWER_SCROLL_EPSILON) {
+      return;
+    }
+    forceViewerScroll(0);
 
     const bounds = surface.getBoundingClientRect();
     const center = {
@@ -272,19 +385,207 @@ export function ImageViewer({
     zoomAt(transformRef.current.scale + amount);
   };
 
+  const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const scrollToDetails = (focus = false) => {
+    commitTransform(DEFAULT_TRANSFORM);
+    wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
+    const viewer = dialogRef.current;
+    const details = detailsSectionRef.current;
+    if (!viewer || !details) return;
+    viewer.scrollTo({
+      top: details.offsetTop,
+      behavior: reducedMotion() ? "auto" : "smooth",
+    });
+    if (focus) {
+      window.requestAnimationFrame(() => details.focus({ preventScroll: true }));
+    }
+  };
+
+  const scrollToImage = (focus = false) => {
+    wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
+    dialogRef.current?.scrollTo({
+      top: 0,
+      behavior: reducedMotion() ? "auto" : "smooth",
+    });
+    if (focus) {
+      window.requestAnimationFrame(() => closeButtonRef.current?.focus({ preventScroll: true }));
+    }
+  };
+
+  const parkViewerControlFocus = () => {
+    const viewer = dialogRef.current;
+    const active = document.activeElement;
+    if (
+      viewer
+      && active instanceof HTMLElement
+      && active !== viewer
+      && viewer.contains(active)
+    ) {
+      viewer.focus({ preventScroll: true });
+    }
+  };
+
+  const clearSwipeMotion = () => {
+    window.clearTimeout(swipeCleanupTimerRef.current);
+    swipeCleanupTimerRef.current = 0;
+    dialogRef.current?.removeAttribute("data-swipe-direction");
+    const outgoing = swipeOutgoingRef.current;
+    swipeOutgoingRef.current = null;
+    outgoing?.getAnimations().forEach((animation) => animation.cancel());
+    outgoing?.remove();
+  };
+
+  const prepareSwipeSnapshot = (): PreparedSwipeSnapshot | null => {
+    const media = mediaRef.current;
+    if (!media) return null;
+    const snapshot = media.cloneNode(true) as HTMLDivElement;
+    snapshot.classList.add("viewer-swipe-outgoing");
+    snapshot.setAttribute("aria-hidden", "true");
+    snapshot.querySelectorAll<HTMLElement>("[id]").forEach((element) => {
+      element.removeAttribute("id");
+    });
+    const thumbnail = snapshot.querySelector<HTMLElement>(".viewer-thumbnail");
+    snapshot.querySelectorAll(".viewer-original").forEach((original) => original.remove());
+    if (thumbnail) {
+      thumbnail.style.opacity = "1";
+      thumbnail.style.filter = "none";
+    }
+    return {
+      imageId: image.id,
+      element: snapshot,
+    };
+  };
+
+  const takePreparedSwipeSnapshot = () => {
+    const media = mediaRef.current;
+    const prepared = preparedSwipeSnapshotRef.current;
+    if (
+      !media
+      || !prepared
+      || prepared.imageId !== image.id
+    ) return null;
+    preparedSwipeSnapshotRef.current = null;
+    const bounds = media.getBoundingClientRect();
+    const snapshot = prepared.element;
+    Object.assign(snapshot.style, {
+      position: "fixed",
+      left: `${bounds.left}px`,
+      top: `${bounds.top}px`,
+      width: `${bounds.width}px`,
+      height: `${bounds.height}px`,
+      transform: "translate3d(0, 0, 0)",
+    });
+    document.body.append(snapshot);
+    return snapshot;
+  };
+
+  const navigateWithSwipeMotion = (direction: -1 | 1) => {
+    if (!compactViewport || reducedMotion()) {
+      commitTransform(DEFAULT_TRANSFORM);
+      onNavigate(direction);
+      return;
+    }
+
+    clearSwipeMotion();
+    const releaseStartedAt = performance.now();
+    const outgoing = takePreparedSwipeSnapshot();
+    const viewer = dialogRef.current;
+    if (viewer) viewer.dataset.swipeDirection = direction > 0 ? "next" : "previous";
+    commitTransform(DEFAULT_TRANSFORM);
+    onNavigate(direction);
+    if (viewer) {
+      viewer.dataset.swipeSnapshot = outgoing ? "prepared" : "skipped";
+      viewer.dataset.swipeReleaseCostMs = (performance.now() - releaseStartedAt).toFixed(2);
+    }
+
+    if (outgoing) {
+      swipeOutgoingRef.current = outgoing;
+      const travel = Math.max(128, viewport.width * 0.38) * -direction;
+      const animation = outgoing.animate(
+        [
+          { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)" },
+          { opacity: 0, transform: `translate3d(${travel}px, 0, 0) scale(.985)` },
+        ],
+        {
+          duration: MOBILE_SWIPE_MOTION_MS,
+          easing: "cubic-bezier(.18, .82, .24, 1)",
+          fill: "forwards",
+        },
+      );
+      void animation.finished.catch(() => undefined).then(() => {
+        if (swipeOutgoingRef.current !== outgoing) return;
+        swipeOutgoingRef.current = null;
+        outgoing.remove();
+      });
+    }
+
+    swipeCleanupTimerRef.current = window.setTimeout(() => {
+      dialogRef.current?.removeAttribute("data-swipe-direction");
+      const staleOutgoing = swipeOutgoingRef.current;
+      swipeOutgoingRef.current = null;
+      staleOutgoing?.remove();
+      swipeCleanupTimerRef.current = 0;
+    }, MOBILE_SWIPE_CLEANUP_MS);
+  };
+
   useLayoutEffect(() => {
     window.clearTimeout(retryTimerRef.current);
     pointersRef.current.clear();
     gestureStartRef.current = null;
     pinchStartRef.current = null;
     gestureAxisRef.current = null;
+    gestureModeRef.current = null;
     pinchedRef.current = false;
     lastTapRef.current = null;
-    setNativeFallbackId(null);
     setDragging(false);
     commitTransform(DEFAULT_TRANSFORM);
-    setLoadState({ id: image.id, attempt: 0, loaded: false, failed: false });
-  }, [image.id]);
+    wheelZoomBlockedUntilRef.current = 0;
+    forceViewerScroll(0);
+    setThumbnailState({
+      id: image.id,
+      loaded: getViewerThumbnailStatus(image) === "ready",
+      failed: false,
+    });
+    setLoadState({
+      id: image.id,
+      attempt: 0,
+      loaded: useViewportBitmapRenderer
+        ? getViewerViewportRenderStatus(
+          image,
+          viewportRender.width,
+          viewportRender.height,
+        ) === "ready"
+        : !useSafeCanvasRenderer && (
+          displayedOriginalsRef.current.has(viewerOriginalUrl(image))
+          || getViewerOriginalStatus(image) === "ready"
+        ),
+      failed: false,
+    });
+    setFullResolutionState({
+      id: image.id,
+      requested: false,
+      loaded: false,
+      failed: false,
+    });
+  }, [
+    image.id,
+    useSafeCanvasRenderer,
+    useViewportBitmapRenderer,
+    viewportRender.height,
+    viewportRender.width,
+  ]);
+
+  useLayoutEffect(() => {
+    if (transformRef.current.scale > MIN_SCALE) {
+      forceViewerScroll(0);
+      commitTransform(constrainTransform(transformRef.current));
+      return;
+    }
+    if (scrollPageRef.current === "details") {
+      forceViewerScroll(detailsSectionRef.current?.offsetTop ?? viewport.height);
+    }
+  }, [viewport.width, viewport.height]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -369,12 +670,14 @@ export function ImageViewer({
         case "ArrowLeft":
           if (canPrevious) {
             event.preventDefault();
+            parkViewerControlFocus();
             onNavigate(-1);
           }
           break;
         case "ArrowRight":
           if (canNext) {
             event.preventDefault();
+            parkViewerControlFocus();
             onNavigate(1);
           }
           break;
@@ -391,6 +694,26 @@ export function ImageViewer({
           event.preventDefault();
           commitTransform(DEFAULT_TRANSFORM);
           break;
+        case "ArrowDown":
+        case "PageDown":
+          if (
+            transformRef.current.scale <= MIN_SCALE &&
+            (dialogRef.current?.scrollTop ?? 0) < (detailsSectionRef.current?.offsetTop ?? Infinity)
+          ) {
+            event.preventDefault();
+            scrollToDetails(true);
+          }
+          break;
+        case "ArrowUp":
+        case "PageUp":
+          if (
+            transformRef.current.scale <= MIN_SCALE &&
+            (dialogRef.current?.scrollTop ?? 0) > 1
+          ) {
+            event.preventDefault();
+            scrollToImage(true);
+          }
+          break;
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -398,21 +721,168 @@ export function ImageViewer({
   }, [canNext, canPrevious, onClose, onNavigate]);
 
   useEffect(() => {
-    if (!shouldPreloadViewerImages()) return;
-    const next = images[activeIndex + 1];
-    const previous = images[activeIndex - 1];
-    if (next) preloadOriginalImage(next);
-    if (previous) preloadOriginalImage(previous);
+    const pressedButtons = new Set<number>();
+    const suppressSideButton = (event: MouseEvent | PointerEvent) => {
+      if (mouseSideDirection(event.button) === null) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    };
+    const navigateFromSideButton = (event: MouseEvent | PointerEvent) => {
+      const direction = mouseSideDirection(event.button);
+      if (direction === null || !suppressSideButton(event)) return;
+      if (pressedButtons.has(event.button)) return;
+      pressedButtons.add(event.button);
+      if (direction < 0 && canPrevious) onNavigate(-1);
+      if (direction > 0 && canNext) onNavigate(1);
+    };
+    const releaseSideButton = (event: MouseEvent | PointerEvent) => {
+      if (!suppressSideButton(event)) return;
+      pressedButtons.delete(event.button);
+    };
+    const resetSideButtons = () => pressedButtons.clear();
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "mouse") navigateFromSideButton(event);
+    };
+    const handlePointerCancel = (event: PointerEvent) => {
+      if (mouseSideDirection(event.button) !== null) suppressSideButton(event);
+      resetSideButtons();
+    };
 
-    if (!currentLoadState.loaded) return;
-    const timer = window.setTimeout(() => {
-      const secondNext = images[activeIndex + 2];
-      if (secondNext) preloadOriginalImage(secondNext);
-    }, SECOND_NEIGHBOR_PRELOAD_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [activeIndex, currentLoadState.loaded, images]);
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("pointerup", releaseSideButton, true);
+    window.addEventListener("pointercancel", handlePointerCancel, true);
+    window.addEventListener("mousedown", navigateFromSideButton, true);
+    window.addEventListener("mouseup", releaseSideButton, true);
+    window.addEventListener("auxclick", suppressSideButton, true);
+    window.addEventListener("blur", resetSideButtons);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("pointerup", releaseSideButton, true);
+      window.removeEventListener("pointercancel", handlePointerCancel, true);
+      window.removeEventListener("mousedown", navigateFromSideButton, true);
+      window.removeEventListener("mouseup", releaseSideButton, true);
+      window.removeEventListener("auxclick", suppressSideButton, true);
+      window.removeEventListener("blur", resetSideButtons);
+    };
+  }, [canNext, canPrevious, onNavigate]);
 
-  useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
+  useEffect(() => {
+    prepareViewerImages(images, activeIndex);
+    if (!useViewportBitmapRenderer) return;
+    for (const offset of [0, 1, -1]) {
+      const candidate = images[activeIndex + offset];
+      if (!candidate) continue;
+      if (offset !== 0 && getViewerOriginalStatus(candidate) === "idle") continue;
+      const render = viewportRenderDimensions(candidate, viewport);
+      getViewerViewportRenderAsset(
+        candidate,
+        render.width,
+        render.height,
+        0,
+        offset === 0 ? "high" : "low",
+      );
+    }
+  }, [
+    activeIndex,
+    images,
+    useViewportBitmapRenderer,
+    viewport.height,
+    viewport.width,
+  ]);
+
+  useEffect(() => {
+    if (
+      !useViewportBitmapRenderer
+      || !currentLoadState.loaded
+      || currentFullResolution.requested
+      || dragging
+    ) return;
+    let disposed = false;
+    let delayTimer = 0;
+    let idleHandle = 0;
+    let frame = 0;
+    const requestUpgrade = () => {
+      if (disposed) return;
+      setFullResolutionState((current) => current.id === image.id
+        ? { ...current, requested: true, failed: false }
+        : { id: image.id, requested: true, loaded: false, failed: false });
+    };
+    const idleScheduler = window as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (transform.scale > MIN_SCALE) {
+      frame = window.requestAnimationFrame(requestUpgrade);
+    } else {
+      delayTimer = window.setTimeout(() => {
+        if (idleScheduler.requestIdleCallback) {
+          idleHandle = idleScheduler.requestIdleCallback(requestUpgrade, { timeout: 360 });
+        } else {
+          frame = window.requestAnimationFrame(requestUpgrade);
+        }
+      }, MOBILE_ORIGINAL_UPGRADE_DELAY_MS);
+    }
+    return () => {
+      disposed = true;
+      window.clearTimeout(delayTimer);
+      if (frame) window.cancelAnimationFrame(frame);
+      if (idleHandle) idleScheduler.cancelIdleCallback?.(idleHandle);
+    };
+  }, [
+    currentFullResolution.requested,
+    currentLoadState.loaded,
+    dragging,
+    image.id,
+    transform.scale,
+    useViewportBitmapRenderer,
+  ]);
+
+  useEffect(() => {
+    if (!compactViewport || reducedMotion()) {
+      preparedSwipeSnapshotRef.current = null;
+      return;
+    }
+    let disposed = false;
+    let prepared: PreparedSwipeSnapshot | null = null;
+    let idleHandle = 0;
+    let fallbackTimer = 0;
+    const prepare = () => {
+      if (disposed) return;
+      prepared = prepareSwipeSnapshot();
+      if (prepared) preparedSwipeSnapshotRef.current = prepared;
+    };
+    const idleScheduler = window as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleScheduler.requestIdleCallback) {
+      idleHandle = idleScheduler.requestIdleCallback(prepare, { timeout: 180 });
+    } else {
+      fallbackTimer = globalThis.setTimeout(prepare, 32);
+    }
+    return () => {
+      disposed = true;
+      if (idleHandle) idleScheduler.cancelIdleCallback?.(idleHandle);
+      globalThis.clearTimeout(fallbackTimer);
+      if (preparedSwipeSnapshotRef.current === prepared) {
+        preparedSwipeSnapshotRef.current = null;
+      }
+    };
+  }, [
+    compactViewport,
+    image.id,
+    thumbnailLoaded,
+    viewportRender.height,
+    viewportRender.width,
+  ]);
+
+  useEffect(() => () => {
+    window.clearTimeout(retryTimerRef.current);
+    window.clearTimeout(swipeCleanupTimerRef.current);
+    swipeOutgoingRef.current?.remove();
+    preparedSwipeSnapshotRef.current = null;
+  }, []);
 
   const handleOriginalError = () => {
     if (currentLoadState.attempt === 0) {
@@ -440,95 +910,95 @@ export function ImageViewer({
     });
   };
 
-  useEffect(() => {
-    if (!useBitmapRenderer) return;
-    const controller = new AbortController();
-    let bitmap: ImageBitmap | null = null;
+  useLayoutEffect(() => {
+    if (!useCanvasRenderer) return;
     let disposed = false;
+    let frame = 0;
+    const attempt = currentLoadState.attempt;
+    const viewportAsset = useViewportBitmapRenderer
+      ? getViewerViewportRenderAsset(
+        image,
+        viewportRender.width,
+        viewportRender.height,
+        attempt,
+        "high",
+      )
+      : null;
+    const originalAsset = useSafeCanvasRenderer
+      ? getViewerOriginalAsset(image, attempt, "high")
+      : null;
 
-    const renderOriginal = async () => {
+    const renderOriginal = () => {
+      const status = viewportAsset?.status ?? originalAsset?.status;
+      if (disposed || status === "loading") return;
+      if (status === "failed") {
+        handleOriginalError();
+        return;
+      }
       try {
-        const response = await fetch(fullSource, {
-          signal: controller.signal,
-          cache: currentLoadState.attempt ? "reload" : "force-cache",
-          credentials: "same-origin",
-        });
-        if (!response.ok) throw new Error(`original request failed: ${response.status}`);
-        const blob = await response.blob();
-        if (!blob.size) throw new Error("original response is empty");
-
-        const sourceScale = Math.min(
-          1,
-          MAX_RENDER_EDGE / Math.max(1, image.width, image.height),
-        );
-        const resizeWidth = Math.max(1, Math.round(image.width * sourceScale));
-        const resizeHeight = Math.max(1, Math.round(image.height * sourceScale));
-        try {
-          bitmap = await createImageBitmap(blob, {
-            imageOrientation: "from-image",
-            resizeWidth,
-            resizeHeight,
-            resizeQuality: "high",
-          });
-        } catch {
-          try {
-            // Some WebKit versions decode the format but reject resize options.
-            bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
-          } catch {
-            // The native image element remains a compatibility fallback for browsers
-            // whose createImageBitmap implementation supports fewer image variants.
-            if (!disposed) setNativeFallbackId(image.id);
-            return;
-          }
-        }
-        if (disposed) {
-          bitmap.close();
-          bitmap = null;
-          return;
-        }
-
-        const bitmapScale = Math.min(
-          1,
-          MAX_RENDER_EDGE / Math.max(1, bitmap.width, bitmap.height),
-        );
-        const renderWidth = Math.max(1, Math.round(bitmap.width * bitmapScale));
-        const renderHeight = Math.max(1, Math.round(bitmap.height * bitmapScale));
+        const renderScale = useViewportBitmapRenderer
+          ? 1
+          : Math.min(1, MAX_RENDER_EDGE / Math.max(1, image.width, image.height));
+        const renderWidth = viewportAsset?.width
+          ?? Math.max(1, Math.round(image.width * renderScale));
+        const renderHeight = viewportAsset?.height
+          ?? Math.max(1, Math.round(image.height * renderScale));
+        const source = viewportAsset?.bitmap ?? originalAsset?.element;
         const canvas = canvasRef.current;
         const context = canvas?.getContext("2d", { alpha: true });
-        if (!canvas || !context) throw new Error("canvas renderer is unavailable");
+        if (!canvas || !context || !source) throw new Error("canvas renderer is unavailable");
         canvas.width = renderWidth;
         canvas.height = renderHeight;
         context.imageSmoothingEnabled = true;
         context.imageSmoothingQuality = "high";
         context.clearRect(0, 0, renderWidth, renderHeight);
-        context.drawImage(bitmap, 0, 0, renderWidth, renderHeight);
-        bitmap.close();
-        bitmap = null;
+        context.drawImage(source, 0, 0, renderWidth, renderHeight);
 
         window.clearTimeout(retryTimerRef.current);
         setLoadState({
           id: image.id,
-          attempt: currentLoadState.attempt,
+          attempt,
           loaded: true,
           failed: false,
         });
       } catch (error) {
-        if (disposed || controller.signal.aborted) return;
+        if (disposed) return;
         console.warn("Pixhelf could not render the original image", error);
         handleOriginalError();
       }
     };
 
-    void renderOriginal();
+    const scheduleRender = () => {
+      if (disposed || frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        renderOriginal();
+      });
+    };
+
+    if (viewportAsset?.status === "ready") renderOriginal();
+    else scheduleRender();
+    const pending = viewportAsset ?? originalAsset;
+    if (pending?.status === "loading") void pending.promise.then(scheduleRender);
     return () => {
       disposed = true;
-      controller.abort();
-      bitmap?.close();
+      if (frame) window.cancelAnimationFrame(frame);
     };
-  }, [fullSource, image.id, image.width, image.height, useBitmapRenderer]);
+  }, [
+    fullSource,
+    image.id,
+    image.width,
+    image.height,
+    useCanvasRenderer,
+    useSafeCanvasRenderer,
+    useViewportBitmapRenderer,
+    viewportRender.height,
+    viewportRender.width,
+  ]);
 
   const beginContact = (id: number, point: PointerPoint, pointerType: string) => {
     if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
+    if (pointerType !== "mouse" && pointersRef.current.size === 0) clearSwipeMotion();
     pointersRef.current.set(id, point);
     setDragging(true);
 
@@ -536,19 +1006,26 @@ export function ImageViewer({
       gestureStartRef.current = {
         point,
         transform: transformRef.current,
+        scrollTop: dialogRef.current?.scrollTop ?? 0,
         startedAt: performance.now(),
         pointerType,
       };
       gestureAxisRef.current = null;
+      gestureModeRef.current = null;
     } else if (pointersRef.current.size === 2) {
       const [first, second] = Array.from(pointersRef.current.values());
       pinchedRef.current = true;
+      gestureModeRef.current = "pinch";
       lastTapRef.current = null;
-      pinchStartRef.current = {
-        distance: Math.max(1, pointDistance(first, second)),
-        midpoint: pointMidpoint(first, second),
-        transform: transformRef.current,
-      };
+      if ((dialogRef.current?.scrollTop ?? scrollTopRef.current) <= VIEWER_SCROLL_EPSILON) {
+        pinchStartRef.current = {
+          distance: Math.max(1, pointDistance(first, second)),
+          midpoint: pointMidpoint(first, second),
+          transform: transformRef.current,
+        };
+      } else {
+        pinchStartRef.current = null;
+      }
     }
   };
 
@@ -583,6 +1060,7 @@ export function ImageViewer({
       }));
       return;
     }
+    if (pointersRef.current.size >= 2 || pinchedRef.current) return;
 
     const start = gestureStartRef.current;
     if (!start || pointersRef.current.size !== 1) return;
@@ -590,9 +1068,19 @@ export function ImageViewer({
     const deltaY = point.y - start.point.y;
     if (!gestureAxisRef.current && Math.hypot(deltaX, deltaY) > 7) {
       gestureAxisRef.current = Math.abs(deltaX) >= Math.abs(deltaY) ? "x" : "y";
+      gestureModeRef.current = start.transform.scale > MIN_SCALE
+        ? "pan"
+        : start.scrollTop > VIEWER_SCROLL_EPSILON
+          ? "page"
+          : gestureAxisRef.current === "x"
+            ? "navigate"
+            : deltaY < 0
+              ? "page"
+              : "dismiss";
     }
 
-    if (start.transform.scale > MIN_SCALE) {
+    if (gestureModeRef.current === "pan") {
+      forceViewerScroll(0);
       commitTransform(constrainTransform({
         ...start.transform,
         x: start.transform.x + deltaX,
@@ -602,17 +1090,31 @@ export function ImageViewer({
     }
 
     const surface = surfaceRef.current;
-    if (gestureAxisRef.current === "x") {
+    if (gestureModeRef.current === "navigate") {
+      const navigationAvailable = deltaX < 0 ? canNext : deltaX > 0 && canPrevious;
+      const maximumTravel = Math.max(1, (surface?.clientWidth ?? 360) * 0.94);
       commitTransform({
         scale: 1,
-        x: rubberBand(deltaX, Math.max(90, (surface?.clientWidth ?? 360) * 0.32)),
+        x: navigationAvailable
+          ? clamp(deltaX * 0.92, -maximumTravel, maximumTravel)
+          : rubberBand(deltaX, Math.max(72, maximumTravel * 0.22)) * 0.38,
         y: 0,
       });
-    } else if (gestureAxisRef.current === "y") {
+    } else if (gestureModeRef.current === "page") {
+      const viewer = dialogRef.current;
+      if (viewer) {
+        const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer.clientHeight;
+        viewer.scrollTop = clamp(start.scrollTop - deltaY, 0, detailsTop);
+        scrollTopRef.current = viewer.scrollTop;
+        syncScrollPage(viewer.scrollTop);
+        if (transformRef.current.x || transformRef.current.y) commitTransform(DEFAULT_TRANSFORM);
+        return;
+      }
+    } else if (gestureModeRef.current === "dismiss") {
       commitTransform({
         scale: 1,
         x: 0,
-        y: rubberBand(deltaY, Math.max(80, (surface?.clientHeight ?? 640) * 0.2)),
+        y: rubberBand(Math.max(0, deltaY), Math.max(80, (surface?.clientHeight ?? 640) * 0.2)),
       });
     }
   };
@@ -650,6 +1152,7 @@ export function ImageViewer({
         gestureStartRef.current = {
           point: remaining,
           transform: transformRef.current,
+          scrollTop: dialogRef.current?.scrollTop ?? 0,
           startedAt: performance.now(),
           pointerType,
         };
@@ -659,11 +1162,22 @@ export function ImageViewer({
 
     setDragging(false);
     const start = gestureStartRef.current;
+    const gestureMode = gestureModeRef.current;
     gestureStartRef.current = null;
     pinchStartRef.current = null;
+    gestureAxisRef.current = null;
+    gestureModeRef.current = null;
     const wasPinched = pinchedRef.current;
     pinchedRef.current = false;
     if (wasPinched) {
+      const viewer = dialogRef.current;
+      const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 0;
+      const currentScroll = viewer?.scrollTop ?? 0;
+      if (currentScroll > VIEWER_SCROLL_EPSILON && detailsTop > 0) {
+        if (currentScroll >= detailsTop * 0.18) scrollToDetails();
+        else scrollToImage();
+        return;
+      }
       commitTransform(constrainTransform(transformRef.current));
       return;
     }
@@ -688,25 +1202,35 @@ export function ImageViewer({
     const horizontalFlick = Math.abs(deltaX) > 30 && Math.abs(deltaX) / elapsed > 0.48;
     const verticalThreshold = Math.max(84, (surface?.clientHeight ?? 640) * 0.12);
     const verticalFlick = deltaY > 38 && deltaY / elapsed > 0.52;
+    const detailsFlick = deltaY < -38 && -deltaY / elapsed > 0.52;
 
     if (
-      gestureAxisRef.current === "x" &&
+      gestureMode === "navigate" &&
       Math.abs(deltaX) > Math.abs(deltaY) &&
       (Math.abs(deltaX) >= horizontalThreshold || horizontalFlick)
     ) {
       if (deltaX < 0 && canNext) {
-        commitTransform(DEFAULT_TRANSFORM);
-        onNavigate(1);
+        navigateWithSwipeMotion(1);
         return;
       }
       if (deltaX > 0 && canPrevious) {
-        commitTransform(DEFAULT_TRANSFORM);
-        onNavigate(-1);
+        navigateWithSwipeMotion(-1);
         return;
       }
     }
+    if (gestureMode === "page") {
+      const viewer = dialogRef.current;
+      const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 640;
+      const currentScroll = viewer?.scrollTop ?? 0;
+      if (detailsFlick || currentScroll >= detailsTop * 0.18) {
+        scrollToDetails();
+      } else {
+        scrollToImage();
+      }
+      return;
+    }
     if (
-      gestureAxisRef.current === "y" &&
+      gestureMode === "dismiss" &&
       deltaY > Math.abs(deltaX) &&
       (deltaY >= verticalThreshold || verticalFlick)
     ) {
@@ -725,8 +1249,19 @@ export function ImageViewer({
     gestureStartRef.current = null;
     pinchStartRef.current = null;
     gestureAxisRef.current = null;
+    gestureModeRef.current = null;
     pinchedRef.current = false;
     setDragging(false);
+    const viewer = dialogRef.current;
+    const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 0;
+    if ((viewer?.scrollTop ?? 0) > 1 && detailsTop > 0) {
+      if ((viewer?.scrollTop ?? 0) >= detailsTop * 0.18) {
+        scrollToDetails();
+      } else {
+        scrollToImage();
+      }
+      return;
+    }
     commitTransform(constrainTransform(transformRef.current));
   };
 
@@ -824,14 +1359,52 @@ export function ImageViewer({
     };
   }, []);
 
+  const handleViewerScroll = (event: JSX.TargetedEvent<HTMLDivElement, Event>) => {
+    const viewer = event.currentTarget;
+    const previousTop = scrollTopRef.current;
+    const nextTop = viewer.scrollTop;
+    if (transformRef.current.scale > MIN_SCALE && nextTop > VIEWER_SCROLL_EPSILON) {
+      forceViewerScroll(0);
+      return;
+    }
+    scrollTopRef.current = nextTop;
+    syncScrollPage(nextTop);
+    if (nextTop > VIEWER_SCROLL_EPSILON || previousTop > VIEWER_SCROLL_EPSILON) {
+      wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
+    }
+  };
+
   const handleWheel = (event: JSX.TargetedWheelEvent<HTMLDivElement>) => {
+    const now = performance.now();
+    const scrollTop = dialogRef.current?.scrollTop ?? scrollTopRef.current;
+    if (scrollTop > VIEWER_SCROLL_EPSILON) {
+      if (event.ctrlKey) event.preventDefault();
+      return;
+    }
+    const currentScale = transformRef.current.scale;
+    if (currentScale <= MIN_SCALE && !event.ctrlKey && event.deltaY > 0) {
+      if (now < wheelZoomBlockedUntilRef.current) event.preventDefault();
+      return;
+    }
+    if (now < wheelZoomBlockedUntilRef.current) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
-    const factor = Math.exp(-event.deltaY * 0.002);
-    zoomAt(transformRef.current.scale * factor, { x: event.clientX, y: event.clientY });
+    const deltaMultiplier = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? surfaceRef.current?.clientHeight ?? viewport.height
+        : 1;
+    const normalizedDelta = clamp(event.deltaY * deltaMultiplier, -160, 160);
+    const nextScale = currentScale * Math.exp(-normalizedDelta * 0.002);
+    if (currentScale > MIN_SCALE && nextScale <= MIN_SCALE) {
+      wheelZoomBlockedUntilRef.current = now + WHEEL_HANDOFF_DELAY_MS;
+    }
+    zoomAt(nextScale, { x: event.clientX, y: event.clientY });
   };
 
   const displayPosition = Math.min(total, activeIndex + 1);
-  const zoomPercent = Math.round(transform.scale * 100);
   const viewerStyle = {
     "--viewer-dismiss-progress": String(
       transform.scale === 1
@@ -839,12 +1412,17 @@ export function ImageViewer({
         : 0,
     ),
   } as CSSProperties;
-  const compactViewport = viewport.width <= 720;
-  const availableWidth = Math.max(1, viewport.width - (compactViewport ? 12 : 144));
-  const availableHeight = Math.max(1, viewport.height - (compactViewport ? 66 : 82));
-  const imageRatio = image.width / Math.max(1, image.height);
-  const mediaWidth = Math.min(availableWidth, availableHeight * imageRatio);
-  const mediaHeight = mediaWidth / imageRatio;
+  const mediaWidth = mediaDimensions.width;
+  const mediaHeight = mediaDimensions.height;
+  const fileExtension = image.name.includes(".")
+    ? image.name.split(".").pop()?.toLocaleUpperCase() ?? "图片"
+    : "图片";
+  const orientation = image.width === image.height
+    ? "方形"
+    : image.width > image.height
+      ? "横向"
+      : "竖向";
+  const megapixels = image.width * image.height / 1_000_000;
   const mediaStyle = {
     width: `${mediaWidth}px`,
     height: `${mediaHeight}px`,
@@ -857,29 +1435,50 @@ export function ImageViewer({
       className="image-viewer"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="image-viewer-title"
+      aria-label={`图片查看器：${image.name}`}
+      data-image-id={image.id}
+      data-image-name={image.name}
       data-full-loaded={currentLoadState.loaded}
       data-full-failed={currentLoadState.failed}
+      data-thumbnail-loaded={thumbnailLoaded}
+      data-thumbnail-failed={thumbnailFailed}
+      data-display-source={currentLoadState.loaded
+        ? !useViewportBitmapRenderer
+          || currentFullResolution.loaded && transform.scale > MIN_SCALE
+          ? "original"
+          : "viewport-bitmap"
+        : thumbnailLoaded
+          ? "thumbnail"
+          : "placeholder"}
+      data-native-original-requested={currentFullResolution.requested}
+      data-native-original-loaded={currentFullResolution.loaded}
+      data-native-original-active={
+        currentFullResolution.loaded && transform.scale > MIN_SCALE
+      }
       data-zoomed={transform.scale > MIN_SCALE}
       data-dragging={dragging}
-      data-renderer={useBitmapRenderer ? "bitmap" : "native"}
+      data-page={scrollPage}
+      data-renderer={useViewportBitmapRenderer
+        ? "viewport-bitmap"
+        : useSafeCanvasRenderer
+          ? "safe-canvas"
+          : "native"}
+      data-control-system="unified"
+      data-scroll-mode="continuous"
+      data-mouse-side-navigation="true"
+      data-mobile-swipe-motion="interruptible"
+      tabIndex={-1}
+      onScroll={handleViewerScroll}
       style={viewerStyle}
     >
-      <div className="viewer-backdrop" aria-hidden="true" />
+      <section className="viewer-stage" aria-label="图片浏览区域">
+        <div className="viewer-backdrop" aria-hidden="true" />
 
       <header className="viewer-header">
-        <div className="viewer-heading">
-          <strong id="image-viewer-title" title={image.name}>{image.name}</strong>
-          <span>
-            {image.width} × {image.height}
-            <i aria-hidden="true" />
-            {displayPosition} / {total}
-          </span>
-        </div>
         <div className="viewer-header-actions">
           <a
             className="viewer-control"
-            href={originalUrl(image)}
+            href={viewerOriginalUrl(image)}
             download={image.name}
             aria-label="下载原图"
             title="下载原图"
@@ -928,20 +1527,34 @@ export function ImageViewer({
         }}
       >
         <div className="viewer-media-center">
-          <div ref={mediaRef} className="viewer-media" style={mediaStyle}>
+          <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}>
             <img
+              key={`thumbnail-${image.id}`}
               className="viewer-thumbnail"
-              src={thumbnailUrl(image)}
+              src={viewerThumbnailUrl(image)}
               width={image.width}
               height={image.height}
               alt=""
               aria-hidden="true"
+              loading="eager"
+              decoding="async"
+              fetchPriority="high"
               draggable={false}
+              onLoad={() => setThumbnailState({
+                id: image.id,
+                loaded: true,
+                failed: false,
+              })}
+              onError={() => setThumbnailState({
+                id: image.id,
+                loaded: false,
+                failed: true,
+              })}
             />
-            {useBitmapRenderer ? (
+            {useCanvasRenderer ? (
               <canvas
                 ref={canvasRef}
-                key={fullSource}
+                key={`${fullSource}-${viewportRender.width}x${viewportRender.height}`}
                 className="viewer-original viewer-original-canvas"
                 role="img"
                 aria-label={image.name}
@@ -961,6 +1574,7 @@ export function ImageViewer({
                 draggable={false}
                 onLoad={() => {
                   window.clearTimeout(retryTimerRef.current);
+                  displayedOriginalsRef.current.add(fullSource);
                   setLoadState({
                     id: image.id,
                     attempt: currentLoadState.attempt,
@@ -969,6 +1583,36 @@ export function ImageViewer({
                   });
                 }}
                 onError={handleOriginalError}
+              />
+            )}
+            {useViewportBitmapRenderer && currentFullResolution.requested && (
+              <img
+                key={`native-original-${fullSource}`}
+                className="viewer-original viewer-native-original"
+                src={fullSource}
+                width={image.width}
+                height={image.height}
+                alt=""
+                aria-hidden="true"
+                loading="eager"
+                decoding="async"
+                fetchPriority="high"
+                draggable={false}
+                onLoad={() => {
+                  displayedOriginalsRef.current.add(fullSource);
+                  setFullResolutionState({
+                    id: image.id,
+                    requested: true,
+                    loaded: true,
+                    failed: false,
+                  });
+                }}
+                onError={() => setFullResolutionState({
+                  id: image.id,
+                  requested: true,
+                  loaded: false,
+                  failed: true,
+                })}
               />
             )}
           </div>
@@ -983,7 +1627,7 @@ export function ImageViewer({
         aria-label="上一张图片"
         title="上一张 (←)"
       >
-        <ChevronLeft size={27} />
+        <ChevronLeft size={23} strokeWidth={1.8} />
       </button>
       <button
         type="button"
@@ -995,42 +1639,19 @@ export function ImageViewer({
       >
         {waitingForNext
           ? <LoaderCircle className="spin" size={20} />
-          : <ChevronRight size={27} />}
+          : <ChevronRight size={23} strokeWidth={1.8} />}
       </button>
 
       <div className="viewer-bottom-bar">
-        <div className="viewer-zoom-controls" role="group" aria-label="缩放控制">
-          <button
-            type="button"
-            className="viewer-control"
-            onClick={() => zoomBy(-0.5)}
-            disabled={transform.scale <= MIN_SCALE}
-            aria-label="缩小"
-            title="缩小 (-)"
-          >
-            <Minus size={18} />
-          </button>
-          <button
-            type="button"
-            className="viewer-zoom-value"
-            onClick={() => commitTransform(DEFAULT_TRANSFORM)}
-            disabled={transform.scale <= MIN_SCALE}
-            aria-label={`当前缩放 ${zoomPercent}%，点击适应屏幕`}
-            title="适应屏幕 (0)"
-          >
-            {zoomPercent}%
-          </button>
-          <button
-            type="button"
-            className="viewer-control"
-            onClick={() => zoomBy(0.5)}
-            disabled={transform.scale >= MAX_SCALE}
-            aria-label="放大"
-            title="放大 (+)"
-          >
-            <Plus size={18} />
-          </button>
-        </div>
+        <button
+          type="button"
+          className="viewer-scroll-cue"
+          onClick={() => scrollToDetails(true)}
+          aria-label="向下滚动到图片详情"
+          title="查看图片详情"
+        >
+          <ChevronsDown size={38} strokeWidth={1.55} />
+        </button>
       </div>
 
       {currentLoadState.failed && (
@@ -1039,6 +1660,97 @@ export function ImageViewer({
           <span>原图加载失败，点击重试</span>
         </button>
       )}
+      </section>
+
+      <section
+        ref={detailsSectionRef}
+        className="viewer-details-page"
+        tabIndex={-1}
+        aria-labelledby="image-viewer-details-title"
+        data-details-image-name={image.name}
+      >
+        <div className="viewer-details-inner">
+          <header className="viewer-details-header">
+            <div className="viewer-details-heading">
+              <h2 id="image-viewer-details-title">图片详情</h2>
+              <span>{displayPosition} / {total}</span>
+            </div>
+            <div className="viewer-details-actions">
+              <button
+                type="button"
+                className="viewer-control viewer-details-return"
+                onClick={() => scrollToImage(true)}
+                aria-label="返回图片"
+                title="返回图片"
+              >
+                <ChevronUp size={20} strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="viewer-control viewer-details-close"
+                onClick={onClose}
+                aria-label="关闭查看器"
+                title="关闭 (Esc)"
+              >
+                <X size={20} />
+              </button>
+            </div>
+          </header>
+
+          <div className="viewer-details-content">
+            <article className="viewer-details-summary">
+              <img
+                key={`details-thumbnail-${image.id}`}
+                src={viewerThumbnailUrl(image)}
+                alt=""
+                aria-hidden="true"
+                loading="eager"
+                decoding="async"
+              />
+              <div>
+                <span className="viewer-details-kind">{orientation} · {fileExtension}</span>
+                <h3 title={image.name}>{image.name}</h3>
+                <p>{image.width.toLocaleString()} × {image.height.toLocaleString()} 像素</p>
+              </div>
+            </article>
+
+            <section className="viewer-details-section" aria-labelledby="viewer-file-info-title">
+              <h3 id="viewer-file-info-title">文件信息</h3>
+              <dl className="viewer-details-grid">
+                <div>
+                  <dt>分辨率</dt>
+                  <dd>{image.width.toLocaleString()} × {image.height.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>像素</dt>
+                  <dd>{megapixels >= 1 ? `${megapixels.toFixed(1)} MP` : `${Math.round(megapixels * 1000)} KP`}</dd>
+                </div>
+                <div>
+                  <dt>格式</dt>
+                  <dd>{fileExtension}</dd>
+                </div>
+                <div>
+                  <dt>图库位置</dt>
+                  <dd>{displayPosition} / {total}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <a
+              className="viewer-details-download"
+              href={viewerOriginalUrl(image)}
+              download={image.name}
+            >
+              <Download size={19} />
+              <span>
+                <strong>下载原图</strong>
+                <small>保留原始尺寸与格式</small>
+              </span>
+              <ChevronRight size={18} />
+            </a>
+          </div>
+        </div>
+      </section>
     </div>
   );
 

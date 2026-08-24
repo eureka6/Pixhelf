@@ -22,13 +22,18 @@ import {
   useState,
 } from "preact/hooks";
 import { ToolbarPopover } from "./ToolbarPopover";
-import { ImageViewer, preloadOriginalImage } from "./ImageViewer";
+import { ImageViewer } from "./ImageViewer";
 import { getGallery, getImages, getStatus, takeInitialBootstrap } from "./api";
 import type {
   GalleryImage,
   GallerySummary,
   ThumbnailStatus,
 } from "./types";
+import {
+  getDecodedViewerOriginal,
+  preloadOriginalImage,
+  prepareViewerImages,
+} from "./viewerAssets";
 
 const PAGE_SIZE = 60;
 const CARD_PREFETCH_MARGIN = "1200px 0px";
@@ -38,6 +43,9 @@ const SIDEBAR_STORAGE_KEY = "pixhelf.sidebar-collapsed";
 const GALLERY_POLL_INTERVAL_MS = 10_000;
 const IMAGE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const MOBILE_NAV_EXIT_MS = 240;
+const VIEWER_RETURN_SETTLE_MS = 32;
+const VIEWER_RETURN_TIMEOUT_MS = 480;
+const VIEWER_RETURN_ANIMATION_MS = 260;
 const COUNT_FORMATTER = new Intl.NumberFormat("zh-CN");
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
@@ -47,11 +55,278 @@ type ImagePageState = {
   nextOffset: number | null;
 };
 
+type ViewerAnchor = {
+  cardRatio: number;
+  viewportRatio: number;
+  fallbackScrollY: number;
+};
+
+type ViewerReturnRequest = ViewerAnchor & {
+  imageId: string;
+  sequence: number;
+};
+
+type MasonryViewportAnchor = ViewerAnchor & {
+  imageId: string;
+};
+
+type ViewerReturnFlight = {
+  layer: HTMLDivElement;
+  backdrop: HTMLDivElement;
+  media: HTMLElement;
+  animations: Animation[];
+};
+
 const EMPTY_IMAGE_PAGE: ImagePageState = {
   images: [],
   total: 0,
   nextOffset: null,
 };
+
+function clampValue(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function imageCardById(imageId: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    `.masonry .image-card[data-image-id="${CSS.escape(imageId)}"]`,
+  );
+}
+
+function visualViewportBounds(): { top: number; height: number } {
+  const viewport = window.visualViewport;
+  return {
+    top: viewport?.offsetTop ?? 0,
+    height: Math.max(1, viewport?.height ?? window.innerHeight),
+  };
+}
+
+function captureViewerAnchor(card: HTMLElement, pointerY?: number): ViewerAnchor {
+  const rect = card.getBoundingClientRect();
+  const viewport = visualViewportBounds();
+  const viewportBottom = viewport.top + viewport.height;
+  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+    ?? viewport.top;
+  const visibleTop = Math.max(rect.top, viewport.top, topbarBottom);
+  const visibleBottom = Math.min(rect.bottom, viewportBottom);
+  const visibleCenter = visibleBottom > visibleTop
+    ? (visibleTop + visibleBottom) / 2
+    : clampValue(rect.top + rect.height / 2, viewport.top, viewportBottom);
+  const requestedPoint = pointerY !== undefined && Number.isFinite(pointerY)
+    ? pointerY
+    : visibleCenter;
+  const anchorY = clampValue(
+    requestedPoint,
+    Math.min(visibleTop, visibleBottom),
+    Math.max(visibleTop, visibleBottom),
+  );
+  return {
+    cardRatio: rect.height > 0
+      ? clampValue((anchorY - rect.top) / rect.height, 0, 1)
+      : 0.5,
+    viewportRatio: clampValue((anchorY - viewport.top) / viewport.height, 0, 1),
+    fallbackScrollY: window.scrollY,
+  };
+}
+
+function captureMasonryViewportAnchor(masonry: HTMLElement): MasonryViewportAnchor | null {
+  if (window.scrollY <= 1) return null;
+  const viewport = visualViewportBounds();
+  const viewportBottom = viewport.top + viewport.height;
+  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+    ?? viewport.top;
+  const safeTop = Math.min(viewportBottom, Math.max(viewport.top, topbarBottom + 8));
+  const safeBottom = Math.max(safeTop, viewportBottom - 8);
+  const referenceY = safeTop + (safeBottom - safeTop) * .45;
+  const viewportCenterX = (window.visualViewport?.offsetLeft ?? 0)
+    + (window.visualViewport?.width ?? window.innerWidth) / 2;
+  const cards = [...masonry.querySelectorAll<HTMLElement>(".image-card")]
+    .map((card) => ({ card, rect: card.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.bottom > safeTop && rect.top < safeBottom);
+  if (!cards.length) return null;
+
+  const focusedCard = document.activeElement instanceof HTMLElement
+    ? document.activeElement.closest<HTMLElement>(".image-card")
+    : null;
+  const focused = focusedCard
+    ? cards.find(({ card }) => card === focusedCard)
+    : undefined;
+  const selected = focused ?? cards.reduce((best, candidate) => {
+    const verticalDistance = candidate.rect.top <= referenceY
+      && candidate.rect.bottom >= referenceY
+      ? 0
+      : Math.min(
+        Math.abs(candidate.rect.top - referenceY),
+        Math.abs(candidate.rect.bottom - referenceY),
+      );
+    const bestVerticalDistance = best.rect.top <= referenceY
+      && best.rect.bottom >= referenceY
+      ? 0
+      : Math.min(
+        Math.abs(best.rect.top - referenceY),
+        Math.abs(best.rect.bottom - referenceY),
+      );
+    if (verticalDistance !== bestVerticalDistance) {
+      return verticalDistance < bestVerticalDistance ? candidate : best;
+    }
+    const horizontalDistance = Math.abs(
+      candidate.rect.left + candidate.rect.width / 2 - viewportCenterX,
+    );
+    const bestHorizontalDistance = Math.abs(
+      best.rect.left + best.rect.width / 2 - viewportCenterX,
+    );
+    return horizontalDistance < bestHorizontalDistance ? candidate : best;
+  });
+  const visibleTop = Math.max(safeTop, selected.rect.top);
+  const visibleBottom = Math.min(safeBottom, selected.rect.bottom);
+  const anchorY = focused
+    ? (visibleTop + visibleBottom) / 2
+    : clampValue(referenceY, visibleTop, visibleBottom);
+  return {
+    imageId: selected.card.dataset.imageId ?? "",
+    cardRatio: selected.rect.height > 0
+      ? clampValue((anchorY - selected.rect.top) / selected.rect.height, 0, 1)
+      : .5,
+    viewportRatio: clampValue((anchorY - viewport.top) / viewport.height, 0, 1),
+    fallbackScrollY: window.scrollY,
+  };
+}
+
+function restoreMasonryViewportAnchor(
+  masonry: HTMLElement,
+  anchor: MasonryViewportAnchor,
+): void {
+  const card = masonry.querySelector<HTMLElement>(
+    `.image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+  );
+  if (!card) {
+    scrollWindowImmediately(anchor.fallbackScrollY);
+    return;
+  }
+  const rect = card.getBoundingClientRect();
+  const viewport = visualViewportBounds();
+  const viewportBottom = viewport.top + viewport.height;
+  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+    ?? viewport.top;
+  const safeTop = Math.min(viewportBottom, Math.max(viewport.top, topbarBottom + 8));
+  const safeBottom = Math.max(safeTop, viewportBottom - 8);
+  const desiredY = clampValue(
+    viewport.top + anchor.viewportRatio * viewport.height,
+    safeTop,
+    safeBottom,
+  );
+  const actualY = rect.top + rect.height * anchor.cardRatio;
+  const documentHeight = Math.max(
+    document.documentElement.scrollHeight,
+    document.body.scrollHeight,
+  );
+  const maximumScroll = Math.max(0, documentHeight - window.innerHeight);
+  scrollWindowImmediately(clampValue(
+    window.scrollY + actualY - desiredY,
+    0,
+    maximumScroll,
+  ));
+}
+
+function scrollWindowImmediately(top: number): void {
+  const root = document.documentElement;
+  const previousBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = "auto";
+  window.scrollTo({ top, left: window.scrollX, behavior: "auto" });
+  root.style.scrollBehavior = previousBehavior;
+}
+
+function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
+  if (!flight) return;
+  for (const animation of flight.animations) animation.cancel();
+  flight.layer.remove();
+}
+
+function createViewerReturnFlight(): ViewerReturnFlight | null {
+  const viewer = document.querySelector<HTMLElement>(".image-viewer");
+  const media = viewer?.querySelector<HTMLElement>(".viewer-media");
+  if (!viewer || !media) return null;
+
+  const viewportTop = window.visualViewport?.offsetTop ?? 0;
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const viewportBottom = viewportTop + viewportHeight;
+  const mediaRect = media.getBoundingClientRect();
+  const detailsPreview = viewer.querySelector<HTMLElement>(".viewer-details-summary img");
+  const detailsRect = detailsPreview?.getBoundingClientRect();
+  const mediaVisible = mediaRect.bottom > viewportTop && mediaRect.top < viewportBottom;
+  const detailsVisible = detailsRect
+    ? detailsRect.bottom > viewportTop && detailsRect.top < viewportBottom
+    : false;
+  const sourceRect = !mediaVisible && detailsVisible ? detailsRect! : mediaRect;
+  if (sourceRect.width <= 0 || sourceRect.height <= 0) return null;
+
+  const layer = document.createElement("div");
+  layer.className = "viewer-return-layer";
+  layer.dataset.phase = "settling";
+  layer.dataset.imageId = viewer.dataset.imageId ?? "";
+  layer.dataset.createdAt = String(performance.now());
+  const backdrop = document.createElement("div");
+  backdrop.className = "viewer-return-backdrop";
+  const clone = media.cloneNode(true) as HTMLElement;
+  clone.className = "viewer-media viewer-return-media";
+  clone.removeAttribute("ref");
+  clone.setAttribute("aria-hidden", "true");
+  Object.assign(clone.style, {
+    position: "fixed",
+    left: `${sourceRect.left}px`,
+    top: `${sourceRect.top}px`,
+    width: `${sourceRect.width}px`,
+    height: `${sourceRect.height}px`,
+    transform: "none",
+    transformOrigin: "top left",
+    transition: "none",
+    animation: "none",
+    opacity: "1",
+    borderRadius: "6px",
+    boxShadow: "0 12px 38px rgba(0, 0, 0, .28)",
+  });
+
+  const thumbnailSource = media.querySelector<HTMLImageElement>(".viewer-thumbnail");
+  const originalSource = media.querySelector<HTMLElement>(".viewer-original");
+  const originalUrl = originalSource instanceof HTMLImageElement
+    ? originalSource.currentSrc || originalSource.src
+    : originalSource?.dataset.originalUrl ?? "";
+  const decodedOriginal = originalUrl ? getDecodedViewerOriginal(originalUrl) : null;
+  const thumbnail = thumbnailSource?.cloneNode(false) as HTMLImageElement | undefined;
+  const original = viewer.dataset.fullLoaded === "true"
+    ? (decodedOriginal
+      ?? (originalSource instanceof HTMLImageElement && originalSource.complete
+        ? originalSource
+        : null))?.cloneNode(false) as HTMLImageElement | undefined
+    : undefined;
+  const visualLayers = [thumbnail, original].filter(
+    (visual): visual is HTMLImageElement => Boolean(visual),
+  );
+  clone.replaceChildren(...visualLayers);
+  visualLayers.forEach((visual, index) => {
+    visual.className = index === visualLayers.length - 1 && original
+      ? "viewer-return-visual viewer-return-original"
+      : "viewer-return-visual viewer-return-thumbnail";
+    visual.alt = "";
+    visual.setAttribute("aria-hidden", "true");
+    visual.draggable = false;
+    Object.assign(visual.style, {
+      position: "absolute",
+      inset: "0",
+      width: "100%",
+      height: "100%",
+      objectFit: "contain",
+      opacity: "1",
+      filter: "none",
+      transform: "none",
+      transition: "none",
+    });
+  });
+
+  layer.append(backdrop, clone);
+  document.body.append(layer);
+  return { layer, backdrop, media: clone, animations: [] };
+}
 
 function initialSidebarCollapsed(): boolean {
   try {
@@ -224,6 +499,7 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
+  const [viewerReturnRequest, setViewerReturnRequest] = useState<ViewerReturnRequest | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const compactLayout = useMediaQuery("(max-width: 720px)");
   const mobileNavMounted = useDelayedUnmount(mobileNavOpen, MOBILE_NAV_EXIT_MS);
@@ -235,11 +511,24 @@ function App() {
   const skipInitialImagesRef = useRef(Boolean(INITIAL_BOOTSTRAP));
   const loadMoreControllerRef = useRef<AbortController | null>(null);
   const loadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
+  const viewerImageIdRef = useRef<string | null>(null);
+  const viewerAnchorRef = useRef<ViewerAnchor | null>(null);
+  const viewerReturnSequenceRef = useRef(0);
+  const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const { images, total, nextOffset } = imagePage;
 
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [album, debouncedSearch, exploreSeed]);
+
+  useLayoutEffect(() => {
+    viewerImageIdRef.current = viewerImageId;
+  }, [viewerImageId]);
+
+  useEffect(() => () => {
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!mobileNavMounted) return;
@@ -462,29 +751,285 @@ function App() {
     ? images.findIndex((image) => image.id === viewerImageId)
     : -1;
 
+  const openViewer = useCallback((
+    imageId: string,
+    card: HTMLElement,
+    pointerY?: number,
+  ) => {
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+    viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
+    prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
+    setViewerReturnRequest(null);
+    viewerImageIdRef.current = imageId;
+    setViewerImageId(imageId);
+  }, [images]);
+
+  const closeViewer = useCallback(() => {
+    const currentImageId = viewerImageIdRef.current;
+    if (!currentImageId) return;
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = createViewerReturnFlight();
+    const anchor = viewerAnchorRef.current ?? {
+      cardRatio: 0.5,
+      viewportRatio: 0.5,
+      fallbackScrollY: window.scrollY,
+    };
+    viewerReturnSequenceRef.current += 1;
+    setViewerReturnRequest({
+      ...anchor,
+      imageId: currentImageId,
+      sequence: viewerReturnSequenceRef.current,
+    });
+    viewerImageIdRef.current = null;
+    setViewerImageId(null);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (viewerImageId || !viewerReturnRequest) return;
+    const request = viewerReturnRequest;
+    const requestFlight = viewerReturnFlightRef.current;
+    let frame = 0;
+    let settleTimer = 0;
+    let timeoutTimer = 0;
+    let stopped = false;
+    let animating = false;
+    let finished = false;
+    let animationGeneration = 0;
+    let animationTarget: HTMLElement | null = null;
+    let observedCard: HTMLElement | null = null;
+    let observedMasonry: HTMLElement | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let resizeObserverPrimed = false;
+
+    const observeLayout = (card: HTMLElement) => {
+      const masonry = card.closest<HTMLElement>(".masonry");
+      if (resizeObserver && card !== observedCard) {
+        if (observedCard) resizeObserver.unobserve(observedCard);
+        resizeObserver.observe(card);
+        observedCard = card;
+      }
+      if (resizeObserver && masonry && masonry !== observedMasonry) {
+        if (observedMasonry) resizeObserver.unobserve(observedMasonry);
+        resizeObserver.observe(masonry);
+        observedMasonry = masonry;
+      }
+    };
+
+    const alignToCard = (): HTMLElement | null => {
+      const card = imageCardById(request.imageId);
+      if (!card) return null;
+      observeLayout(card);
+
+      const rect = card.getBoundingClientRect();
+      const viewport = visualViewportBounds();
+      const viewportBottom = viewport.top + viewport.height;
+      const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+        ?? viewport.top;
+      const safeTop = Math.min(
+        viewportBottom,
+        Math.max(viewport.top, topbarBottom + 8),
+      );
+      const safeBottom = Math.max(safeTop, viewportBottom - 8);
+      const desiredViewportY = clampValue(
+        viewport.top + request.viewportRatio * viewport.height,
+        safeTop,
+        safeBottom,
+      );
+      const cardAnchorY = rect.top + rect.height * request.cardRatio;
+      const documentHeight = Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+      );
+      const maximumScroll = Math.max(0, documentHeight - window.innerHeight);
+      const targetScroll = clampValue(
+        window.scrollY + cardAnchorY - desiredViewportY,
+        0,
+        maximumScroll,
+      );
+      if (Math.abs(targetScroll - window.scrollY) > 0.5) {
+        scrollWindowImmediately(targetScroll);
+      }
+      return card;
+    };
+
+    const finalize = (card: HTMLElement | null) => {
+      if (finished) return;
+      finished = true;
+      stopped = true;
+      disposeViewerReturnFlight(requestFlight);
+      if (viewerReturnFlightRef.current === requestFlight) viewerReturnFlightRef.current = null;
+      if (card?.isConnected) card.focus({ preventScroll: true });
+      setViewerReturnRequest((current) => {
+        if (current?.sequence !== request.sequence) return current;
+        viewerAnchorRef.current = null;
+        return null;
+      });
+    };
+
+    const pauseAnimationForLayout = () => {
+      const flight = requestFlight;
+      if (!animating || !flight) return;
+      const mediaRect = flight.media.getBoundingClientRect();
+      const backdropOpacity = window.getComputedStyle(flight.backdrop).opacity;
+      animationGeneration += 1;
+      for (const animation of flight.animations) animation.cancel();
+      flight.animations.length = 0;
+      Object.assign(flight.media.style, {
+        left: `${mediaRect.left}px`,
+        top: `${mediaRect.top}px`,
+        width: `${mediaRect.width}px`,
+        height: `${mediaRect.height}px`,
+        transform: "none",
+      });
+      flight.backdrop.style.opacity = backdropOpacity;
+      if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
+      animationTarget = null;
+      animating = false;
+      flight.layer.dataset.phase = "settling";
+      flight.layer.dataset.retargets = String(
+        Number.parseInt(flight.layer.dataset.retargets ?? "0", 10) + 1,
+      );
+    };
+
+    const complete = () => {
+      if (stopped || animating) return;
+      const card = alignToCard();
+      if (!card) {
+        const maximumScroll = Math.max(
+          0,
+          Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
+            - window.innerHeight,
+        );
+        scrollWindowImmediately(clampValue(request.fallbackScrollY, 0, maximumScroll));
+      }
+
+      const flight = requestFlight;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (!flight || reducedMotion || typeof flight.media.animate !== "function") {
+        finalize(card);
+        return;
+      }
+
+      animating = true;
+      const generation = ++animationGeneration;
+      flight.layer.dataset.phase = card ? "flying" : "fading";
+      flight.layer.dataset.flyingAt = String(performance.now());
+      flight.layer.dataset.duration = String(VIEWER_RETURN_ANIMATION_MS);
+      const animations: Animation[] = [];
+      if (card) {
+        const sourceRect = flight.media.getBoundingClientRect();
+        const targetRect = card.getBoundingClientRect();
+        const scaleX = targetRect.width / Math.max(1, sourceRect.width);
+        const scaleY = targetRect.height / Math.max(1, sourceRect.height);
+        card.dataset.viewerReturnTarget = "true";
+        animationTarget = card;
+        animations.push(flight.media.animate([
+          { transform: "translate3d(0, 0, 0) scale(1, 1)" },
+          {
+            transform: `translate3d(${targetRect.left - sourceRect.left}px, ${targetRect.top - sourceRect.top}px, 0) scale(${scaleX}, ${scaleY})`,
+          },
+        ], {
+          duration: VIEWER_RETURN_ANIMATION_MS,
+          easing: "cubic-bezier(.22, 1, .36, 1)",
+          fill: "forwards",
+        }));
+      } else {
+        animations.push(flight.media.animate([
+          { opacity: 1, transform: "scale(1)" },
+          { opacity: 0, transform: "scale(.98)" },
+        ], {
+          duration: 120,
+          easing: "ease-out",
+          fill: "forwards",
+        }));
+      }
+      animations.push(flight.backdrop.animate([
+        { opacity: Number.parseFloat(window.getComputedStyle(flight.backdrop).opacity) || 0 },
+        { opacity: 0 },
+      ], {
+        duration: card ? 165 : 120,
+        easing: "cubic-bezier(.2, .8, .2, 1)",
+        fill: "forwards",
+      }));
+      flight.animations.push(...animations);
+      void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+        if (
+          viewerReturnFlightRef.current !== flight ||
+          generation !== animationGeneration
+        ) return;
+        if (card) delete card.dataset.viewerReturnTarget;
+        finalize(card);
+      });
+    };
+
+    const schedule = () => {
+      if (stopped) return;
+      if (animating) pauseAnimationForLayout();
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        alignToCard();
+        window.clearTimeout(settleTimer);
+        settleTimer = window.setTimeout(complete, VIEWER_RETURN_SETTLE_MS);
+      });
+    };
+
+    resizeObserver = new ResizeObserver(() => {
+      if (!resizeObserverPrimed) {
+        resizeObserverPrimed = true;
+        return;
+      }
+      schedule();
+    });
+    const mutationObserver = new MutationObserver(schedule);
+    const masonry = document.querySelector(".masonry");
+    if (masonry) mutationObserver.observe(masonry, { childList: true });
+    window.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("resize", schedule);
+    schedule();
+    timeoutTimer = window.setTimeout(complete, VIEWER_RETURN_TIMEOUT_MS);
+
+    return () => {
+      stopped = true;
+      finished = true;
+      if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
+      if (frame) window.cancelAnimationFrame(frame);
+      window.clearTimeout(settleTimer);
+      window.clearTimeout(timeoutTimer);
+      resizeObserver?.disconnect();
+      mutationObserver.disconnect();
+      window.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("resize", schedule);
+    };
+  }, [viewerImageId, viewerReturnRequest]);
+
   useEffect(() => {
     if (!viewerImageId || viewerIndex < 0 || nextOffset === null) return;
     if (viewerIndex >= images.length - 5) void loadMore();
   }, [images.length, loadMore, nextOffset, viewerImageId, viewerIndex]);
 
   const navigateViewer = useCallback((direction: -1 | 1) => {
-    if (!viewerImageId) return;
-    const currentIndex = images.findIndex((image) => image.id === viewerImageId);
+    const currentImageId = viewerImageIdRef.current;
+    if (!currentImageId) return;
+    const currentIndex = images.findIndex((image) => image.id === currentImageId);
     if (currentIndex < 0) return;
     const target = images[currentIndex + direction];
     if (target) {
+      viewerImageIdRef.current = target.id;
       setViewerImageId(target.id);
       return;
     }
     if (direction < 0 || nextOffset === null) return;
 
-    const startingId = viewerImageId;
+    const startingId = currentImageId;
     void loadMore().then((incoming) => {
       const next = incoming[0];
-      if (!next) return;
-      setViewerImageId((current) => current === startingId ? next.id : current);
+      if (!next || viewerImageIdRef.current !== startingId) return;
+      viewerImageIdRef.current = next.id;
+      setViewerImageId(next.id);
     });
-  }, [images, loadMore, nextOffset, viewerImageId]);
+  }, [images, loadMore, nextOffset]);
 
   const galleryPath = `/${album.replace(/^\/+/, "")}`;
   const chooseAlbum = (path: string) => {
@@ -516,6 +1061,8 @@ function App() {
       className="app-shell"
       data-sidebar-collapsed={sidebarCollapsed}
       data-mobile-navigation-open={mobileNavOpen}
+      data-viewer-returning={Boolean(viewerReturnRequest)}
+      data-viewer-return-image-id={viewerReturnRequest?.imageId}
     >
       <Header
         search={search}
@@ -582,7 +1129,8 @@ function App() {
           <MasonryGallery
             images={images}
             initialColumnCount={compactLayout ? 2 : 5}
-            onOpen={setViewerImageId}
+            preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
+            onOpen={openViewer}
           />
         ) : (
           <div className="empty-state">
@@ -609,7 +1157,7 @@ function App() {
           hasMore={nextOffset !== null}
           loadingMore={loadingMore}
           onNavigate={navigateViewer}
-          onClose={() => setViewerImageId(null)}
+          onClose={closeViewer}
         />
       )}
     </div>
@@ -940,12 +1488,16 @@ type MasonryMetrics = {
 function useMasonryMetrics(
   ref: RefObject<HTMLDivElement | null>,
   initialColumnCount: number,
+  onBeforeChange?: () => void,
 ): MasonryMetrics {
   const [metrics, setMetrics] = useState<MasonryMetrics>({
     width: 0,
     columnCount: initialColumnCount,
     gap: 6,
   });
+  const metricsRef = useRef(metrics);
+  const beforeChangeRef = useRef(onBeforeChange);
+  beforeChangeRef.current = onBeforeChange;
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
@@ -961,13 +1513,16 @@ function useMasonryMetrics(
       const next = Math.floor((width + gap) / (minimumCardWidth + gap));
       const roundedWidth = Math.round(width * 100) / 100;
       const columnCount = Math.min(6, Math.max(2, next));
-      setMetrics((current) => (
+      const current = metricsRef.current;
+      if (
         current.width === roundedWidth
         && current.columnCount === columnCount
         && current.gap === gap
-          ? current
-          : { width: roundedWidth, columnCount, gap }
-      ));
+      ) return;
+      if (current.width > 0) beforeChangeRef.current?.();
+      const nextMetrics = { width: roundedWidth, columnCount, gap };
+      metricsRef.current = nextMetrics;
+      setMetrics(nextMetrics);
     };
     const schedule = (width: number) => {
       pendingWidth = width;
@@ -989,18 +1544,90 @@ function useMasonryMetrics(
   return metrics;
 }
 
-function MasonryGallery({
+const MasonryGallery = memo(function MasonryGallery({
   images,
   initialColumnCount,
+  preserveViewport,
   onOpen,
 }: {
   images: GalleryImage[];
   initialColumnCount: number;
-  onOpen: (id: string) => void;
+  preserveViewport: boolean;
+  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const resizeAnchorRef = useRef<MasonryViewportAnchor | null>(null);
+  const stableViewportAnchorRef = useRef<MasonryViewportAnchor | null>(null);
+  const resizeGuardUntilRef = useRef(0);
   const [activeNameId, setActiveNameId] = useState<string | null>(null);
-  const { width, columnCount, gap } = useMasonryMetrics(ref, initialColumnCount);
+  const captureResizeAnchor = useCallback(() => {
+    const masonry = ref.current;
+    resizeAnchorRef.current = preserveViewport && masonry
+      ? stableViewportAnchorRef.current ?? captureMasonryViewportAnchor(masonry)
+      : null;
+  }, [preserveViewport]);
+  const { width, columnCount, gap } = useMasonryMetrics(
+    ref,
+    initialColumnCount,
+    captureResizeAnchor,
+  );
+
+  useLayoutEffect(() => {
+    const anchor = resizeAnchorRef.current;
+    const masonry = ref.current;
+    resizeAnchorRef.current = null;
+    if (anchor && masonry && preserveViewport) {
+      restoreMasonryViewportAnchor(masonry, anchor);
+    }
+    stableViewportAnchorRef.current = preserveViewport && masonry
+      ? captureMasonryViewportAnchor(masonry)
+      : null;
+  }, [columnCount, gap, images, preserveViewport, width]);
+
+  useEffect(() => {
+    const masonry = ref.current;
+    if (!masonry || !preserveViewport) {
+      stableViewportAnchorRef.current = null;
+      return;
+    }
+    let frame = 0;
+    const rememberViewportAnchor = () => {
+      frame = 0;
+      if (
+        resizeAnchorRef.current
+        || performance.now() < resizeGuardUntilRef.current
+      ) return;
+      stableViewportAnchorRef.current = captureMasonryViewportAnchor(masonry);
+    };
+    const scheduleViewportAnchor = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(rememberViewportAnchor);
+    };
+    const rememberFocusedAnchor = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      rememberViewportAnchor();
+    };
+    const guardViewportResize = () => {
+      resizeGuardUntilRef.current = performance.now() + 120;
+      if (frame) {
+        window.cancelAnimationFrame(frame);
+        frame = 0;
+      }
+    };
+
+    rememberViewportAnchor();
+    window.addEventListener("scroll", scheduleViewportAnchor, { passive: true });
+    window.addEventListener("resize", guardViewportResize);
+    window.visualViewport?.addEventListener("resize", guardViewportResize);
+    masonry.addEventListener("focusin", rememberFocusedAnchor);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", scheduleViewportAnchor);
+      window.removeEventListener("resize", guardViewportResize);
+      window.visualViewport?.removeEventListener("resize", guardViewportResize);
+      masonry.removeEventListener("focusin", rememberFocusedAnchor);
+    };
+  }, [preserveViewport]);
 
   const showName = useCallback((id: string) => setActiveNameId(id), []);
 
@@ -1054,7 +1681,7 @@ function MasonryGallery({
       ))}
     </div>
   );
-}
+});
 
 const ImageCard = memo(function ImageCard({
   image,
@@ -1071,7 +1698,7 @@ const ImageCard = memo(function ImageCard({
   highPriority: boolean;
   nameVisible: boolean;
   onNameTouch: (id: string) => void;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
 }) {
   const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
   const [loaded, setLoaded] = useState(alreadyReady);
@@ -1153,11 +1780,15 @@ const ImageCard = memo(function ImageCard({
         if (event.pointerType !== "mouse") onNameTouch(image.id);
       }}
       onFocus={() => preloadOriginalImage(image)}
-      onClick={() => onOpen(image.id)}
+      onClick={(event) => onOpen(
+        image.id,
+        event.currentTarget,
+        event.detail > 0 ? event.clientY : undefined,
+      )}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        onOpen(image.id);
+        onOpen(image.id, event.currentTarget);
       }}
       role="button"
       tabIndex={0}

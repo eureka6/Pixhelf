@@ -36,12 +36,29 @@ export function Check(props: IconProps) {
   return <Icon {...props}><path d="M20 6 9 17l-5-5" /></Icon>;
 }
 
+export function ChevronsDown(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m3.5 7.75 8.5 5.5 8.5-5.5" opacity=".42" />
+      <path d="m3.5 12.25 8.5 5.5 8.5-5.5" />
+    </Icon>
+  );
+}
+
 export function ChevronLeft(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
 }
 
 export function ChevronRight(props: IconProps) {
   return <Icon {...props}><path d="m9 18 6-6-6-6" /></Icon>;
+}
+
+export function ChevronDown(props: IconProps) {
+  return <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
+}
+
+export function ChevronUp(props: IconProps) {
+  return <Icon {...props}><path d="m18 15-6-6-6 6" /></Icon>;
 }
 
 export function Dices(props: IconProps) {

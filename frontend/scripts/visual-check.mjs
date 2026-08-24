@@ -4,6 +4,8 @@ const executablePath =
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ??
   "/root/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
 const baseUrl = process.env.PIXHELF_URL ?? "http://127.0.0.1:3002";
+const requestedTarget = process.env.PIXHELF_VISUAL_TARGET;
+const viewerReturnOnly = process.env.PIXHELF_VIEWER_RETURN_ONLY === "1";
 
 const browser = await chromium.launch({
   executablePath,
@@ -14,10 +16,11 @@ const browser = await chromium.launch({
 const results = [];
 
 try {
-  for (const target of [
+  const targets = [
     { name: "desktop", width: 1440, height: 1000 },
     { name: "mobile", width: 390, height: 844 },
-  ]) {
+  ].filter((target) => !requestedTarget || target.name === requestedTarget);
+  for (const target of targets) {
     const page = await browser.newPage({
       viewport: { width: target.width, height: target.height },
       deviceScaleFactor: target.name === "mobile" ? 3 : 1,
@@ -31,14 +34,15 @@ try {
 
     await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector("[data-image-id]", { timeout: 60_000 });
-    await page.waitForFunction(() => {
+    const minimumVisibleImages = target.name === "mobile" ? 4 : 8;
+    await page.waitForFunction((minimumVisible) => {
       const visible = [...document.querySelectorAll("[data-image-id] img")].filter((image) => {
         const rect = image.getBoundingClientRect();
         return rect.bottom > 0 && rect.top < innerHeight;
       });
-      return visible.length >= 8 &&
+      return visible.length >= minimumVisible &&
         visible.every((image) => image.complete && image.naturalWidth > 0);
-    }, undefined, { timeout: 60_000 });
+    }, minimumVisibleImages, { timeout: 60_000 });
     await page.waitForTimeout(250);
     await page.screenshot({ path: `/tmp/pixhelf-${target.name}.png` });
 
@@ -143,6 +147,32 @@ try {
           .length;
       });
 
+      const resizeAnchor = await page.evaluate(() => {
+        const cards = [...document.querySelectorAll(".masonry .image-card")];
+        const card = cards[Math.min(24, cards.length - 1)];
+        if (!(card instanceof HTMLElement)) return null;
+        card.scrollIntoView({ block: "center", behavior: "instant" });
+        card.focus({ preventScroll: true });
+        const rect = card.getBoundingClientRect();
+        const viewportTop = visualViewport?.offsetTop ?? 0;
+        const viewportHeight = visualViewport?.height ?? innerHeight;
+        const viewportBottom = viewportTop + viewportHeight;
+        const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+          ?? viewportTop;
+        const safeTop = Math.min(viewportBottom, Math.max(viewportTop, topbarBottom + 8));
+        const safeBottom = Math.max(safeTop, viewportBottom - 8);
+        const visibleTop = Math.max(safeTop, rect.top);
+        const visibleBottom = Math.min(safeBottom, rect.bottom);
+        const anchorY = (visibleTop + visibleBottom) / 2;
+        return {
+          imageId: card.dataset.imageId ?? "",
+          cardRatio: (anchorY - rect.top) / Math.max(1, rect.height),
+          viewportRatio: (anchorY - viewportTop) / Math.max(1, viewportHeight),
+        };
+      });
+      if (!resizeAnchor) throw new Error("masonry resize anchor could not be captured");
+      const resizeAnchorDeltas = [];
+
       for (const size of [
         { width: 680, columns: 3 },
         { width: 520, columns: 2 },
@@ -153,7 +183,78 @@ try {
         await page.waitForFunction((columns) =>
           document.querySelector(".masonry")?.getAttribute("data-columns") === String(columns)
         , size.columns);
-        await page.waitForTimeout(100);
+        try {
+          await page.waitForFunction((anchor) => {
+            const card = document.querySelector(
+              `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+            );
+            if (!(card instanceof HTMLElement)) return false;
+            const rect = card.getBoundingClientRect();
+            const viewportTop = visualViewport?.offsetTop ?? 0;
+            const viewportHeight = visualViewport?.height ?? innerHeight;
+            const viewportBottom = viewportTop + viewportHeight;
+            const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+              ?? viewportTop;
+            const safeTop = Math.min(viewportBottom, Math.max(viewportTop, topbarBottom + 8));
+            const safeBottom = Math.max(safeTop, viewportBottom - 8);
+            const expectedY = Math.min(
+              safeBottom,
+              Math.max(safeTop, viewportTop + anchor.viewportRatio * viewportHeight),
+            );
+            const actualY = rect.top + rect.height * anchor.cardRatio;
+            return Math.abs(actualY - expectedY) <= 2;
+          }, resizeAnchor, { timeout: 4000 });
+        } catch (error) {
+          const actual = await page.evaluate((anchor) => {
+            const card = document.querySelector(
+              `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+            );
+            if (!(card instanceof HTMLElement)) return { missing: true };
+            const rect = card.getBoundingClientRect();
+            const viewportTop = visualViewport?.offsetTop ?? 0;
+            const viewportHeight = visualViewport?.height ?? innerHeight;
+            const viewportBottom = viewportTop + viewportHeight;
+            const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+              ?? viewportTop;
+            const safeTop = Math.min(viewportBottom, Math.max(viewportTop, topbarBottom + 8));
+            const safeBottom = Math.max(safeTop, viewportBottom - 8);
+            const expectedY = Math.min(
+              safeBottom,
+              Math.max(safeTop, viewportTop + anchor.viewportRatio * viewportHeight),
+            );
+            const actualY = rect.top + rect.height * anchor.cardRatio;
+            return {
+              actualY,
+              columns: document.querySelector(".masonry")?.getAttribute("data-columns"),
+              delta: Math.abs(actualY - expectedY),
+              expectedY,
+              scrollY,
+            };
+          }, resizeAnchor);
+          throw new Error(
+            `masonry resize anchor drifted at ${size.width}px: ${JSON.stringify(actual)}`,
+            { cause: error },
+          );
+        }
+        resizeAnchorDeltas.push(await page.evaluate((anchor) => {
+          const card = document.querySelector(
+            `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+          );
+          if (!(card instanceof HTMLElement)) return Infinity;
+          const rect = card.getBoundingClientRect();
+          const viewportTop = visualViewport?.offsetTop ?? 0;
+          const viewportHeight = visualViewport?.height ?? innerHeight;
+          const viewportBottom = viewportTop + viewportHeight;
+          const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+            ?? viewportTop;
+          const safeTop = Math.min(viewportBottom, Math.max(viewportTop, topbarBottom + 8));
+          const safeBottom = Math.max(safeTop, viewportBottom - 8);
+          const expectedY = Math.min(
+            safeBottom,
+            Math.max(safeTop, viewportTop + anchor.viewportRatio * viewportHeight),
+          );
+          return Math.abs(rect.top + rect.height * anchor.cardRatio - expectedY);
+        }, resizeAnchor));
       }
 
       await page.waitForFunction(() => {
@@ -199,6 +300,13 @@ try {
           ),
         };
       });
+      Object.assign(resizeStability, {
+        anchorId: resizeAnchor.imageId,
+        anchorDeltas: resizeAnchorDeltas,
+        anchorFocused: await page.evaluate((imageId) =>
+          document.activeElement?.getAttribute("data-image-id") === imageId
+        , resizeAnchor.imageId),
+      });
     }
 
     const firstViewerTitle = await page.locator("[data-image-id]").first().getAttribute("title");
@@ -206,6 +314,38 @@ try {
     await page.waitForSelector(".image-viewer");
     const viewerChrome = await page.evaluate(() => ({
       fullscreenButtons: document.querySelectorAll(".viewer-fullscreen").length,
+      detailsPages: document.querySelectorAll(".viewer-details-page").length,
+      scrollCues: document.querySelectorAll(".viewer-scroll-cue").length,
+      zoomControls: document.querySelectorAll(
+        ".viewer-zoom-controls, .viewer-zoom-value",
+      ).length,
+      scrollCueArrowOnly: (() => {
+        const cue = document.querySelector(".viewer-scroll-cue");
+        return cue?.textContent?.trim() === ""
+          && cue.children.length === 1
+          && cue.firstElementChild?.tagName === "svg"
+          && cue.querySelectorAll("path").length === 2;
+      })(),
+      scrollCuePresentation: (() => {
+        const cue = document.querySelector(".viewer-scroll-cue");
+        const media = document.querySelector(".viewer-media");
+        if (!cue || !media) return null;
+        const style = getComputedStyle(cue);
+        const cueBounds = cue.getBoundingClientRect();
+        const mediaBounds = media.getBoundingClientRect();
+        return {
+          borderless: Number.parseFloat(style.borderTopWidth) === 0,
+          transparent: style.backgroundColor === "rgba(0, 0, 0, 0)",
+          width: cueBounds.width,
+          clearsMedia: cueBounds.top >= mediaBounds.bottom - 1,
+        };
+      })(),
+      headingModules: document.querySelectorAll(".viewer-heading").length,
+      unifiedControls: document.querySelector(".image-viewer")
+        ?.getAttribute("data-control-system") === "unified",
+      drawerArtifacts: document.querySelectorAll(
+        ".viewer-details-sheet, .viewer-details-scrim",
+      ).length,
       gestureHelp: document.querySelectorAll(".viewer-gesture-help").length,
       loadingStatus: document.querySelectorAll(".viewer-load-status").length,
       loadingCopyVisible: document.body.textContent?.includes("正在加载原图") ?? false,
@@ -213,6 +353,12 @@ try {
     await page.waitForFunction(() =>
       document.querySelector(".image-viewer")?.getAttribute("data-full-loaded") === "true"
     , undefined, { timeout: 60_000 });
+    if (target.name === "mobile") {
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")
+          ?.getAttribute("data-native-original-loaded") === "true"
+      , undefined, { timeout: 60_000 });
+    }
     await page.waitForFunction(() => {
       const originalPaths = performance.getEntriesByType("resource")
         .map((entry) => new URL(entry.name).pathname)
@@ -225,17 +371,37 @@ try {
     const viewer = await page.evaluate(() => {
       const overlay = document.querySelector(".image-viewer");
       const original = document.querySelector(".viewer-original");
+      const nativeOriginal = document.querySelector(".viewer-native-original");
       const media = document.querySelector(".viewer-media")?.getBoundingClientRect();
+      const stage = document.querySelector(".viewer-stage")?.getBoundingClientRect();
+      const details = document.querySelector(".viewer-details-page")?.getBoundingClientRect();
       const resourcePaths = performance.getEntriesByType("resource")
         .map((entry) => new URL(entry.name).pathname);
       const originalSource = original instanceof HTMLImageElement
         ? original.currentSrc || original.src
         : original?.getAttribute("data-original-url") ?? "";
       return {
-        title: document.querySelector(".viewer-heading strong")?.textContent ?? "",
+        title: overlay?.getAttribute("data-image-name") ?? "",
         fullLoaded: overlay?.getAttribute("data-full-loaded"),
+        displaySource: overlay?.getAttribute("data-display-source") ?? "",
+        nativeOriginalLoaded: overlay?.getAttribute("data-native-original-loaded") ?? "false",
+        nativeOriginalActive: overlay?.getAttribute("data-native-original-active") ?? "false",
+        nativeOriginalCount: document.querySelectorAll(".viewer-native-original").length,
+        nativeOriginalPath: nativeOriginal instanceof HTMLImageElement
+          ? new URL(nativeOriginal.currentSrc || nativeOriginal.src, location.href).pathname
+          : "",
+        nativeOriginalPixels: nativeOriginal instanceof HTMLImageElement
+          ? [nativeOriginal.naturalWidth, nativeOriginal.naturalHeight]
+          : [0, 0],
+        nativeOriginalVisible: nativeOriginal
+          ? Number.parseFloat(getComputedStyle(nativeOriginal).opacity)
+          : 0,
+        mediaWillChange: document.querySelector(".viewer-media")
+          ? getComputedStyle(document.querySelector(".viewer-media")).willChange
+          : "",
         originalPath: originalSource ? new URL(originalSource, location.href).pathname : "",
         renderer: overlay?.getAttribute("data-renderer"),
+        scrollMode: overlay?.getAttribute("data-scroll-mode"),
         renderedPixels: original instanceof HTMLCanvasElement
           ? [original.width, original.height]
           : [original?.clientWidth ?? 0, original?.clientHeight ?? 0],
@@ -249,10 +415,205 @@ try {
           ? media.left >= -1 && media.top >= -1 && media.right <= innerWidth + 1 &&
             media.bottom <= innerHeight + 1
           : false,
-        position: document.querySelector(".viewer-heading span")?.textContent ?? "",
+        continuousLayout: overlay && stage && details
+          ? Math.abs(stage.top) < 1 && Math.abs(stage.height - innerHeight) < 1 &&
+            Math.abs(details.top - stage.bottom) < 1 &&
+            details.height >= innerHeight - 1 &&
+            overlay.scrollHeight >= innerHeight * 2 - 1
+          : false,
+        position: document.querySelector(".viewer-details-heading span")?.textContent ?? "",
       };
     });
     Object.assign(viewer, viewerChrome);
+    const sideButtonStart = await page.evaluate(() => {
+      const activeId = document.querySelector(".image-viewer")?.getAttribute("data-image-id") ?? "";
+      const ids = [...document.querySelectorAll(".masonry .image-card")]
+        .map((card) => card.getAttribute("data-image-id") ?? "");
+      const index = ids.indexOf(activeId);
+      return {
+        activeId,
+        nextId: ids[index + 1] ?? "",
+        historyLength: history.length,
+        href: location.href,
+      };
+    });
+    const dispatchViewerSideButton = (button) => page.locator(".image-viewer").evaluate(
+      (viewerElement, sideButton) => {
+        const mask = sideButton === 3 ? 8 : 16;
+        const downPrevented = !viewerElement.dispatchEvent(new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: sideButton,
+          buttons: mask,
+          pointerId: 71,
+          pointerType: "mouse",
+        }));
+        const upPrevented = !viewerElement.dispatchEvent(new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          button: sideButton,
+          buttons: 0,
+          pointerId: 71,
+          pointerType: "mouse",
+        }));
+        const auxiliaryPrevented = !viewerElement.dispatchEvent(new MouseEvent("auxclick", {
+          bubbles: true,
+          cancelable: true,
+          button: sideButton,
+        }));
+        return { downPrevented, upPrevented, auxiliaryPrevented };
+      },
+      button,
+    );
+    const sideForwardEvents = await dispatchViewerSideButton(4);
+    await page.waitForFunction((imageId) =>
+      document.querySelector(".image-viewer")?.getAttribute("data-image-id") === imageId
+    , sideButtonStart.nextId);
+    const sideBackEvents = await dispatchViewerSideButton(3);
+    await page.waitForFunction((imageId) =>
+      document.querySelector(".image-viewer")?.getAttribute("data-image-id") === imageId
+    , sideButtonStart.activeId);
+    const sideButtonNavigation = await page.evaluate(({ start, forward, back }) => ({
+      forward,
+      back,
+      returnedId: document.querySelector(".image-viewer")?.getAttribute("data-image-id") ?? "",
+      enabled: document.querySelector(".image-viewer")
+        ?.getAttribute("data-mouse-side-navigation") === "true",
+      historyPreserved: history.length === start.historyLength && location.href === start.href,
+    }), { start: sideButtonStart, forward: sideForwardEvents, back: sideBackEvents });
+    if (
+      !sideButtonStart.nextId ||
+      sideButtonNavigation.returnedId !== sideButtonStart.activeId ||
+      !sideButtonNavigation.enabled ||
+      !sideButtonNavigation.historyPreserved ||
+      !Object.values(sideButtonNavigation.forward).every(Boolean) ||
+      !Object.values(sideButtonNavigation.back).every(Boolean)
+    ) {
+      throw new Error(`viewer side-button navigation failed: ${JSON.stringify(sideButtonNavigation)}`);
+    }
+    Object.assign(viewer, { sideButtonNavigation });
+    if (target.name === "desktop") {
+      await page.locator(".viewer-next").click();
+    } else {
+      await page.keyboard.press("ArrowRight");
+    }
+    await page.waitForFunction((imageId) =>
+      document.querySelector(".image-viewer")?.getAttribute("data-image-id") === imageId
+    , sideButtonStart.nextId);
+    const switchPerformance = await page.evaluate(async (expectedId) => {
+      const start = performance.now();
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "ArrowLeft",
+        bubbles: true,
+        cancelable: true,
+      }));
+      const dispatchDuration = performance.now() - start;
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const firstFrameDuration = performance.now() - start;
+      const overlay = document.querySelector(".image-viewer");
+      const media = document.querySelector(".viewer-media");
+      return {
+        currentId: overlay?.getAttribute("data-image-id") ?? "",
+        dispatchDuration,
+        firstFrameDuration,
+        firstFrameSource: overlay?.getAttribute("data-display-source") ?? "",
+        focusedOnViewer: document.activeElement === overlay,
+        visibleControlFocusRings: document.querySelectorAll(
+          ".image-viewer .viewer-control:focus-visible, "
+          + ".image-viewer .viewer-nav:focus-visible, "
+          + ".image-viewer .viewer-scroll-cue:focus-visible",
+        ).length,
+        mediaAnimations: media?.getAnimations().length ?? -1,
+        expectedId,
+      };
+    }, sideButtonStart.activeId);
+    if (
+      switchPerformance.currentId !== switchPerformance.expectedId ||
+      switchPerformance.dispatchDuration > 80 ||
+      switchPerformance.firstFrameDuration > 100 ||
+      switchPerformance.firstFrameSource !== (
+        target.name === "mobile" ? "viewport-bitmap" : "original"
+      ) ||
+      !switchPerformance.focusedOnViewer ||
+      switchPerformance.visibleControlFocusRings !== 0 ||
+      switchPerformance.mediaAnimations !== 0
+    ) {
+      throw new Error(`viewer switch responsiveness failed: ${JSON.stringify(switchPerformance)}`);
+    }
+    Object.assign(viewer, { switchPerformance });
+    const rapidSwitch = await page.evaluate(async () => {
+      const overlay = document.querySelector(".image-viewer");
+      const ids = [...document.querySelectorAll(".masonry .image-card")]
+        .map((card) => card.getAttribute("data-image-id") ?? "");
+      const startId = overlay?.getAttribute("data-image-id") ?? "";
+      const startIndex = ids.indexOf(startId);
+      const steps = Math.min(6, Math.max(0, ids.length - startIndex - 1));
+      const expectedId = ids[startIndex + steps] ?? startId;
+      const previousMedia = document.querySelector(".viewer-media");
+      for (let index = 0; index < steps; index += 1) {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        }));
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const currentOverlay = document.querySelector(".image-viewer");
+      const currentId = currentOverlay?.getAttribute("data-image-id") ?? "";
+      const thumbnail = document.querySelector(".viewer-thumbnail");
+      const original = document.querySelector(".viewer-original");
+      const thumbnailPath = thumbnail instanceof HTMLImageElement
+        ? new URL(thumbnail.currentSrc || thumbnail.src, location.href).pathname
+        : "";
+      const originalSource = original instanceof HTMLImageElement
+        ? original.currentSrc || original.src
+        : original?.getAttribute("data-original-url") ?? "";
+      const originalPath = originalSource
+        ? new URL(originalSource, location.href).pathname
+        : "";
+      return {
+        steps,
+        startId,
+        expectedId,
+        currentId,
+        mediaReplaced: previousMedia !== document.querySelector(".viewer-media"),
+        mediaCount: document.querySelectorAll(".viewer-media").length,
+        thumbnailMatches: thumbnailPath.includes(`/api/images/${encodeURIComponent(currentId)}/thumbnail`),
+        originalMatches: originalPath.includes(`/api/images/${encodeURIComponent(currentId)}/original`),
+        immediateSource: currentOverlay?.getAttribute("data-display-source") ?? "",
+        mediaAnimations: document.querySelector(".viewer-media")?.getAnimations().length ?? -1,
+      };
+    });
+    await page.waitForFunction(() =>
+      document.querySelector(".image-viewer")?.getAttribute("data-display-source") !== "placeholder"
+    , undefined, { timeout: 10_000 });
+    rapidSwitch.readySource = await page.locator(".image-viewer").getAttribute("data-display-source");
+    await page.waitForFunction(() =>
+      document.querySelector(".image-viewer")?.getAttribute("data-full-loaded") === "true"
+    , undefined, { timeout: 60_000 });
+    if (target.name === "mobile") {
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")
+          ?.getAttribute("data-native-original-loaded") === "true"
+      , undefined, { timeout: 60_000 });
+    }
+    rapidSwitch.upgradedSource = await page.locator(".image-viewer").getAttribute("data-display-source");
+    Object.assign(viewer, { rapidSwitch });
+    if (
+      rapidSwitch.steps !== 6 ||
+      rapidSwitch.currentId !== rapidSwitch.expectedId ||
+      !rapidSwitch.mediaReplaced ||
+      rapidSwitch.mediaCount !== 1 ||
+      !rapidSwitch.thumbnailMatches ||
+      !rapidSwitch.originalMatches ||
+      rapidSwitch.mediaAnimations !== 0 ||
+      rapidSwitch.readySource === "placeholder" ||
+      rapidSwitch.upgradedSource !== (
+        target.name === "mobile" ? "viewport-bitmap" : "original"
+      )
+    ) {
+      throw new Error(`viewer rapid-switch pipeline failed: ${JSON.stringify(rapidSwitch)}`);
+    }
     await page.locator(".viewer-fullscreen").click();
     await page.waitForFunction(() =>
       document.fullscreenElement?.classList.contains("image-viewer")
@@ -265,20 +626,96 @@ try {
     await page.locator(".viewer-fullscreen").click();
     await page.waitForFunction(() => document.fullscreenElement === null);
     viewer.fullscreenExited = true;
-    await page.locator(".viewer-zoom-controls .viewer-control").last().click();
+    await page.keyboard.press("=");
     await page.waitForFunction(() =>
       document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "true"
     );
-    viewer.zoomed = await page.locator(".viewer-zoom-value").textContent();
+    viewer.zoomed = await page.locator(".image-viewer").getAttribute("data-zoomed");
     await page.waitForTimeout(260);
     viewer.zoomScale = await page.locator(".viewer-media").evaluate((media) =>
       new DOMMatrix(getComputedStyle(media).transform).a
     );
+    Object.assign(viewer, await page.locator(".image-viewer").evaluate((overlay) => ({
+      zoomKeptImagePage: overlay.scrollTop < 1 && overlay.dataset.page === "image",
+      zoomLockedPageScroll: getComputedStyle(overlay).overflowY === "hidden",
+    })));
+    if (target.name === "desktop") {
+      await page.mouse.move(target.width / 2, target.height / 2);
+      await page.mouse.wheel(0, 1_000);
+      await page.mouse.wheel(0, 1_000);
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "false"
+      );
+      await page.mouse.wheel(0, 1_000);
+      await page.waitForTimeout(80);
+      viewer.zoomWheelHandoffLocked = await page.locator(".image-viewer").evaluate((overlay) =>
+        overlay.scrollTop < 1 && overlay.dataset.page === "image"
+      );
+    }
+    const keyboardStartName = await page.locator(".image-viewer").getAttribute("data-image-name");
     await page.keyboard.press("ArrowRight");
     await page.waitForFunction((title) =>
-      document.querySelector(".viewer-heading strong")?.textContent !== title
-    , firstViewerTitle);
-    viewer.keyboardNavigation = await page.locator(".viewer-heading strong").textContent();
+      document.querySelector(".image-viewer")?.getAttribute("data-image-name") !== title
+    , keyboardStartName);
+    viewer.keyboardNavigation = await page.locator(".image-viewer").getAttribute("data-image-name");
+    const keyboardFocus = await page.evaluate(() => {
+      const overlay = document.querySelector(".image-viewer");
+      return {
+        parkedOnViewer: document.activeElement === overlay,
+        visibleControlFocusRings: document.querySelectorAll(
+          ".image-viewer .viewer-control:focus-visible, "
+          + ".image-viewer .viewer-nav:focus-visible, "
+          + ".image-viewer .viewer-scroll-cue:focus-visible",
+        ).length,
+      };
+    });
+    if (!keyboardFocus.parkedOnViewer || keyboardFocus.visibleControlFocusRings !== 0) {
+      throw new Error(`viewer keyboard focus was not parked: ${JSON.stringify(keyboardFocus)}`);
+    }
+    Object.assign(viewer, { keyboardFocus });
+    if (target.name === "desktop") {
+      await page.waitForFunction(() =>
+        document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "false"
+      );
+      await page.mouse.move(target.width / 2, target.height / 2);
+      await page.mouse.wheel(0, target.height * 1.15);
+      await page.waitForFunction(() =>
+        (document.querySelector(".image-viewer")?.scrollTop ?? 0) > innerHeight * 0.5
+      );
+      await page.waitForTimeout(320);
+      await page.screenshot({ path: "/tmp/pixhelf-viewer-details-desktop.png" });
+      Object.assign(viewer, await page.evaluate(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const stage = document.querySelector(".viewer-stage")?.getBoundingClientRect();
+        const details = document.querySelector(".viewer-details-page");
+        const detailsRect = details?.getBoundingClientRect();
+        return {
+          detailsReachedByWheel: (overlay?.scrollTop ?? 0) > innerHeight * 0.5,
+          pageAfterDetails: overlay?.getAttribute("data-page") ?? "",
+          detailsName: details?.getAttribute("data-details-image-name") ?? "",
+          detailsHeading: document.querySelector(".viewer-details-heading h2")?.textContent ?? "",
+          stageScrolledAway: stage ? stage.top < -innerHeight * 0.5 : false,
+          detailsVisible: detailsRect
+            ? detailsRect.top < innerHeight * 0.5 && detailsRect.bottom > innerHeight * 0.5
+            : false,
+          drawerArtifactsAfterScroll: document.querySelectorAll(
+            ".viewer-details-sheet, .viewer-details-scrim",
+          ).length,
+        };
+      }));
+      await page.locator(".viewer-details-return").click();
+      await page.waitForFunction(() =>
+        (document.querySelector(".image-viewer")?.scrollTop ?? 1) < 1
+      );
+      viewer.returnedToImage = true;
+      await page.mouse.wheel(0, -target.height);
+      await page.waitForTimeout(80);
+      Object.assign(viewer, await page.locator(".image-viewer").evaluate((overlay) => ({
+        pageAfterReturn: overlay.dataset.page ?? "",
+        returnWheelHandoffLocked:
+          overlay.scrollTop < 1 && overlay.getAttribute("data-zoomed") === "false",
+      })));
+    }
     if (target.name === "mobile") {
       const cdp = await page.context().newCDPSession(page);
       const dispatchTouch = (type, touchPoints) => cdp.send("Input.dispatchTouchEvent", {
@@ -309,10 +746,30 @@ try {
         document.querySelector(".image-viewer")?.getAttribute("data-zoomed") === "true"
       );
       viewer.pinchZoomed = true;
+      await page.waitForFunction(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const original = document.querySelector(".viewer-native-original");
+        return overlay?.getAttribute("data-native-original-active") === "true"
+          && overlay.getAttribute("data-display-source") === "original"
+          && original
+          && Number.parseFloat(getComputedStyle(original).opacity) >= .99;
+      }, undefined, { timeout: 60_000 });
       await page.waitForTimeout(40);
       viewer.pinchScale = await page.locator(".viewer-media").evaluate((media) =>
         new DOMMatrix(getComputedStyle(media).transform).a
       );
+      viewer.pinchNativeOriginal = await page.evaluate(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const media = document.querySelector(".viewer-media");
+        const original = document.querySelector(".viewer-native-original");
+        return {
+          active: overlay?.getAttribute("data-native-original-active") ?? "false",
+          displaySource: overlay?.getAttribute("data-display-source") ?? "",
+          visible: original ? Number.parseFloat(getComputedStyle(original).opacity) : 0,
+          settledWillChange: media ? getComputedStyle(media).willChange : "",
+        };
+      });
+      await page.screenshot({ path: "/tmp/pixhelf-viewer-zoom-mobile.png" });
 
       await page.touchscreen.tap(195, 420);
       await page.waitForTimeout(70);
@@ -325,17 +782,121 @@ try {
       viewer.doubleTapScale = await page.locator(".viewer-media").evaluate((media) =>
         new DOMMatrix(getComputedStyle(media).transform).a
       );
+      viewer.nativeOriginalAfterReset = await page.evaluate(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const media = document.querySelector(".viewer-media");
+        const original = document.querySelector(".viewer-native-original");
+        return {
+          active: overlay?.getAttribute("data-native-original-active") ?? "false",
+          displaySource: overlay?.getAttribute("data-display-source") ?? "",
+          visible: original ? Number.parseFloat(getComputedStyle(original).opacity) : 0,
+          settledWillChange: media ? getComputedStyle(media).willChange : "",
+        };
+      });
 
-      const titleBeforeSwipe = await page.locator(".viewer-heading strong").textContent();
+      const titleBeforeSwipe = await page.locator(".image-viewer").getAttribute("data-image-name");
       await dispatchTouch("touchStart", [{ id: 31, x: 320, y: 420 }]);
       await page.waitForTimeout(32);
       await dispatchTouch("touchMove", [{ id: 31, x: 90, y: 420 }]);
       await page.waitForTimeout(32);
+      viewer.swipeDragTracking = await page.locator(".viewer-media").evaluate((media) =>
+        new DOMMatrix(getComputedStyle(media).transform).e
+      );
+      viewer.swipeDragWillChange = await page.locator(".viewer-media").evaluate((media) =>
+        getComputedStyle(media).willChange
+      );
       await dispatchTouch("touchEnd", []);
+      viewer.swipeMotion = await page.evaluate(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const media = document.querySelector(".viewer-media");
+        const outgoing = document.querySelector(".viewer-swipe-outgoing");
+        return {
+          mode: overlay?.getAttribute("data-mobile-swipe-motion") ?? "",
+          direction: overlay?.getAttribute("data-swipe-direction") ?? "",
+          snapshot: overlay?.getAttribute("data-swipe-snapshot") ?? "",
+          releaseCostMs: Number.parseFloat(
+            overlay?.getAttribute("data-swipe-release-cost-ms") ?? "Infinity",
+          ),
+          incomingAnimations: media?.getAnimations().length ?? 0,
+          outgoingAnimations: outgoing?.getAnimations().length ?? 0,
+          outgoingIgnoresInput: outgoing
+            ? getComputedStyle(outgoing).pointerEvents === "none"
+            : false,
+        };
+      });
       await page.waitForFunction((title) =>
-        document.querySelector(".viewer-heading strong")?.textContent !== title
+        document.querySelector(".image-viewer")?.getAttribute("data-image-name") !== title
       , titleBeforeSwipe);
-      viewer.swipeNavigation = await page.locator(".viewer-heading strong").textContent();
+      viewer.swipeNavigation = await page.locator(".image-viewer").getAttribute("data-image-name");
+      await page.waitForFunction(() =>
+        !document.querySelector(".viewer-swipe-outgoing")
+          && !document.querySelector(".image-viewer")?.hasAttribute("data-swipe-direction")
+      );
+      viewer.swipeMotionCleaned = true;
+
+      await dispatchTouch("touchStart", [{ id: 35, x: 195, y: 500 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 35, x: 195, y: 350 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 35, x: 195, y: 630 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchEnd", []);
+      await page.waitForFunction(() =>
+        (document.querySelector(".image-viewer")?.scrollTop ?? 1) < 1
+      );
+      viewer.reversedPageGestureStayedOpen = await page.locator(".image-viewer").evaluate(
+        (overlay) => overlay.isConnected && overlay.dataset.page === "image",
+      );
+
+      await dispatchTouch("touchStart", [{ id: 36, x: 195, y: 690 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 36, x: 195, y: 510 }]);
+      await page.waitForTimeout(32);
+      viewer.detailsFollowedTouch = await page.locator(".image-viewer").evaluate((overlay) =>
+        overlay.scrollTop > 100 &&
+          overlay.scrollTop < overlay.clientHeight * 0.5 &&
+          overlay.dataset.page === "transition"
+      );
+      const titleDuringPageGesture = await page.locator(".image-viewer")
+        .getAttribute("data-image-name");
+      await dispatchTouch("touchMove", [{ id: 36, x: 60, y: 510 }]);
+      await page.waitForTimeout(32);
+      viewer.pageGestureIgnoredHorizontal =
+        await page.locator(".image-viewer").getAttribute("data-image-name")
+          === titleDuringPageGesture;
+      await dispatchTouch("touchMove", [{ id: 36, x: 195, y: 360 }]);
+      await page.waitForTimeout(32);
+      await dispatchTouch("touchEnd", []);
+      await page.waitForFunction(() =>
+        (document.querySelector(".image-viewer")?.scrollTop ?? 0) > innerHeight * 0.5
+      );
+      await page.waitForTimeout(320);
+      await page.screenshot({ path: "/tmp/pixhelf-viewer-details-mobile.png" });
+      Object.assign(viewer, await page.evaluate(() => {
+        const overlay = document.querySelector(".image-viewer");
+        const stage = document.querySelector(".viewer-stage")?.getBoundingClientRect();
+        const details = document.querySelector(".viewer-details-page");
+        const detailsRect = details?.getBoundingClientRect();
+        return {
+          detailsReachedBySwipe: (overlay?.scrollTop ?? 0) > innerHeight * 0.5,
+          pageAfterDetails: overlay?.getAttribute("data-page") ?? "",
+          detailsName: details?.getAttribute("data-details-image-name") ?? "",
+          detailsHeading: document.querySelector(".viewer-details-heading h2")?.textContent ?? "",
+          stageScrolledAway: stage ? stage.top < -innerHeight * 0.5 : false,
+          detailsVisible: detailsRect
+            ? detailsRect.top < innerHeight * 0.5 && detailsRect.bottom > innerHeight * 0.5
+            : false,
+          drawerArtifactsAfterScroll: document.querySelectorAll(
+            ".viewer-details-sheet, .viewer-details-scrim",
+          ).length,
+        };
+      }));
+      await page.locator(".viewer-details-return").click();
+      await page.waitForFunction(() =>
+        (document.querySelector(".image-viewer")?.scrollTop ?? 1) < 1
+      );
+      viewer.returnedToImage = true;
+      viewer.pageAfterReturn = await page.locator(".image-viewer").getAttribute("data-page");
 
       await dispatchTouch("touchStart", [{ id: 41, x: 195, y: 210 }]);
       await page.waitForTimeout(32);
@@ -346,9 +907,216 @@ try {
     } else {
       await page.keyboard.press("Escape");
     }
+    await page.waitForSelector(".viewer-return-layer", { timeout: 5_000 });
+    viewer.returnAnimationCreated = await page.locator(".viewer-return-layer").evaluate((layer) => ({
+      imageId: layer.getAttribute("data-image-id") ?? "",
+      phase: layer.getAttribute("data-phase") ?? "",
+      mediaCount: layer.querySelectorAll(".viewer-return-media").length,
+      canvasHasPixels: [...layer.querySelectorAll("canvas")]
+        .every((canvas) => canvas.width > 0 && canvas.height > 0),
+      maxCanvasEdge: Math.max(0, ...[...layer.querySelectorAll("canvas")]
+        .flatMap((canvas) => [canvas.width, canvas.height])),
+      visualReady: [...layer.querySelectorAll(".viewer-return-visual")]
+        .some((visual) => visual.complete && visual.naturalWidth > 0),
+    }));
     await page.waitForSelector(".image-viewer", { state: "detached" });
+    await page.waitForFunction(() =>
+      document.querySelector(".viewer-return-layer")?.getAttribute("data-phase") === "flying"
+    , undefined, { timeout: 5_000 });
+    viewer.returnAnimationFlying = await page.locator(".viewer-return-layer").evaluate((layer) => {
+      const media = layer.querySelector(".viewer-return-media");
+      const target = document.querySelector('[data-viewer-return-target="true"]');
+      const animation = media?.getAnimations()[0];
+      const keyframes = animation?.effect instanceof KeyframeEffect
+        ? animation.effect.getKeyframes()
+        : [];
+      const animatedProperties = [...new Set(keyframes.flatMap((keyframe) =>
+        Object.keys(keyframe).filter((property) =>
+          !["offset", "computedOffset", "easing", "composite"].includes(property)
+        )
+      ))].sort();
+      return {
+        animations: media?.getAnimations().length ?? 0,
+        targetId: target?.getAttribute("data-image-id") ?? "",
+        startLatency: Number(layer.getAttribute("data-flying-at") ?? 0)
+          - Number(layer.getAttribute("data-created-at") ?? 0),
+        duration: Number(layer.getAttribute("data-duration") ?? 0),
+        animatedProperties,
+      };
+    });
+    const animationViewport = page.viewportSize();
+    if (animationViewport) {
+      await page.setViewportSize({
+        width: animationViewport.width + (target.name === "desktop" ? -18 : 10),
+        height: animationViewport.height,
+      });
+      await page.waitForFunction(() =>
+        Number(document.querySelector(".viewer-return-layer")?.getAttribute("data-retargets") ?? 0) > 0
+      );
+      await page.waitForFunction(() =>
+        document.querySelector(".viewer-return-layer")?.getAttribute("data-phase") === "flying"
+      );
+      viewer.returnAnimationRetargeted = await page.locator(".viewer-return-layer").evaluate(
+        (layer) => ({
+          count: Number(layer.getAttribute("data-retargets") ?? 0),
+          animations: layer.querySelector(".viewer-return-media")?.getAnimations().length ?? 0,
+        }),
+      );
+    }
+    await page.waitForTimeout(90);
+    await page.screenshot({ path: `/tmp/pixhelf-viewer-return-${target.name}.png` });
     viewer.closed = await page.locator(".image-viewer").count();
     viewer.rootRestored = await page.locator("#root").evaluate((root) => !root.inert);
+    await page.waitForFunction(() =>
+      document.querySelector(".app-shell")?.getAttribute("data-viewer-returning") === "false"
+    );
+    viewer.returnAnchorSettled = true;
+    viewer.returnAnimationCleared = await page.locator(".viewer-return-layer").count() === 0;
+    if (
+      viewer.returnAnimationCreated.mediaCount !== 1 ||
+      !viewer.returnAnimationCreated.canvasHasPixels ||
+      viewer.returnAnimationCreated.maxCanvasEdge > 1_440 ||
+      !viewer.returnAnimationCreated.visualReady ||
+      viewer.returnAnimationFlying.animations < 1 ||
+      viewer.returnAnimationFlying.targetId !== viewer.returnAnimationCreated.imageId ||
+      viewer.returnAnimationFlying.startLatency > 180 ||
+      viewer.returnAnimationFlying.duration > 280 ||
+      viewer.returnAnimationFlying.animatedProperties.join(",") !== "transform" ||
+      viewer.returnAnimationRetargeted?.count < 1 ||
+      viewer.returnAnimationRetargeted?.animations < 1 ||
+      !viewer.returnAnimationCleared
+    ) {
+      throw new Error(`viewer return animation failed: ${JSON.stringify({
+        created: viewer.returnAnimationCreated,
+        flying: viewer.returnAnimationFlying,
+        cleared: viewer.returnAnimationCleared,
+      })}`);
+    }
+
+    const returnProbeStart = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll(".masonry .image-card")];
+      const card = cards.at(-1);
+      if (!(card instanceof HTMLElement)) return null;
+      card.scrollIntoView({ block: "center", behavior: "instant" });
+      const rect = card.getBoundingClientRect();
+      const viewportTop = visualViewport?.offsetTop ?? 0;
+      const viewportHeight = visualViewport?.height ?? innerHeight;
+      const viewportBottom = viewportTop + viewportHeight;
+      const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+        ?? viewportTop;
+      const visibleTop = Math.max(rect.top, viewportTop, topbarBottom);
+      const visibleBottom = Math.min(rect.bottom, viewportBottom);
+      const anchorY = visibleBottom > visibleTop
+        ? (visibleTop + visibleBottom) / 2
+        : Math.min(viewportBottom, Math.max(viewportTop, rect.top + rect.height / 2));
+      const result = {
+        imageId: card.dataset.imageId ?? "",
+        beforeCount: cards.length,
+        beforeMasonryWidth: document.querySelector(".masonry")?.getBoundingClientRect().width ?? 0,
+        cardRatio: rect.height > 0 ? (anchorY - rect.top) / rect.height : 0.5,
+        viewportRatio: (anchorY - viewportTop) / Math.max(1, viewportHeight),
+      };
+      card.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: rect.left + rect.width / 2,
+        clientY: anchorY,
+        view: window,
+      }));
+      return result;
+    });
+    if (!returnProbeStart) throw new Error("viewer return probe could not find a card");
+    await page.waitForSelector(".image-viewer");
+    const returnViewerStartId = await page.locator(".image-viewer").getAttribute("data-image-id");
+    await page.keyboard.press("ArrowRight");
+    const resizedWidth = target.name === "desktop" ? 920 : 430;
+    await page.setViewportSize({ width: resizedWidth, height: target.height });
+    await page.waitForFunction((previousWidth) => {
+      const width = document.querySelector(".masonry")?.getBoundingClientRect().width ?? 0;
+      return Math.abs(width - previousWidth) > 20;
+    }, returnProbeStart.beforeMasonryWidth);
+    await page.waitForFunction(([startId, beforeCount]) =>
+      document.querySelector(".image-viewer")?.getAttribute("data-image-id") !== startId &&
+      document.querySelectorAll(".masonry .image-card").length > beforeCount
+    , [returnViewerStartId, returnProbeStart.beforeCount], { timeout: 60_000 });
+    const returnTargetId = await page.locator(".image-viewer").getAttribute("data-image-id");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".image-viewer", { state: "detached" });
+    await page.waitForFunction((imageId) => {
+      const shell = document.querySelector(".app-shell");
+      const active = document.activeElement;
+      return shell?.getAttribute("data-viewer-returning") === "false" &&
+        active instanceof HTMLElement && active.dataset.imageId === imageId;
+    }, returnTargetId);
+    const returnRestoration = await page.evaluate(({ start, targetId }) => {
+      const card = document.querySelector(
+        `.masonry .image-card[data-image-id="${CSS.escape(targetId)}"]`,
+      );
+      if (!(card instanceof HTMLElement)) return null;
+      const rect = card.getBoundingClientRect();
+      const viewportTop = visualViewport?.offsetTop ?? 0;
+      const viewportHeight = visualViewport?.height ?? innerHeight;
+      const viewportBottom = viewportTop + viewportHeight;
+      const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
+        ?? viewportTop;
+      const safeTop = Math.min(viewportBottom, Math.max(viewportTop, topbarBottom + 8));
+      const safeBottom = Math.max(safeTop, viewportBottom - 8);
+      const expectedAnchorY = Math.min(
+        safeBottom,
+        Math.max(safeTop, viewportTop + start.viewportRatio * viewportHeight),
+      );
+      const actualAnchorY = rect.top + rect.height * start.cardRatio;
+      return {
+        openedId: start.imageId,
+        targetId,
+        cardsBefore: start.beforeCount,
+        cardsAfter: document.querySelectorAll(".masonry .image-card").length,
+        currentId: document.activeElement?.getAttribute("data-image-id") ?? "",
+        visible: rect.bottom > topbarBottom && rect.top < viewportBottom,
+        anchorDelta: Math.abs(actualAnchorY - expectedAnchorY),
+        returning: document.querySelector(".app-shell")
+          ?.getAttribute("data-viewer-returning"),
+      };
+    }, { start: returnProbeStart, targetId: returnTargetId });
+    if (
+      !returnRestoration ||
+      returnRestoration.openedId === returnRestoration.targetId ||
+      returnRestoration.targetId !== returnRestoration.currentId ||
+      returnRestoration.cardsAfter <= returnRestoration.cardsBefore ||
+      !returnRestoration.visible ||
+      returnRestoration.anchorDelta > 2 ||
+      returnRestoration.returning !== "false"
+    ) {
+      throw new Error(`viewer return restoration failed: ${JSON.stringify(returnRestoration)}`);
+    }
+    if (viewerReturnOnly) {
+      const result = {
+        name: target.name,
+        resizeStability,
+        sideButtonNavigation: viewer.sideButtonNavigation,
+        switchPerformance: viewer.switchPerformance,
+        rapidSwitch: viewer.rapidSwitch,
+        returnAnimation: {
+          created: viewer.returnAnimationCreated,
+          flying: viewer.returnAnimationFlying,
+          retargeted: viewer.returnAnimationRetargeted,
+          cleared: viewer.returnAnimationCleared,
+        },
+        returnRestoration,
+        browserErrors,
+      };
+      if (browserErrors.length) {
+        throw new Error(`viewer return browser errors: ${JSON.stringify(browserErrors)}`);
+      }
+      results.push(result);
+      console.log(JSON.stringify(result));
+      await page.close();
+      continue;
+    }
+    await page.setViewportSize({ width: target.width, height: target.height });
+    await page.waitForTimeout(120);
+    await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
 
     const searchToggleBefore = await page.locator(".search-toggle").boundingBox();
     await page.locator(".search-toggle").click();
@@ -463,12 +1231,18 @@ try {
       const url = new URL(request.url());
       return url.pathname === "/api/images" &&
         url.searchParams.get("sort") === "name-asc" &&
-        url.searchParams.get("offset") === "0";
+        url.searchParams.get("offset") === "0" &&
+        !url.searchParams.has("album") &&
+        !url.searchParams.has("search");
     });
     await page.locator("a.brand").click();
     const homeResponse = await (await homeRequest).response();
     await homeResponse?.finished();
-    await page.waitForFunction(() => !document.querySelector(".skeleton-grid"));
+    await page.waitForFunction(() =>
+      document.querySelector(".explore-toggle")?.getAttribute("aria-pressed") === "false" &&
+      document.querySelector(".desktop-sidebar .album-link")?.classList.contains("active") &&
+      document.querySelector("#gallery-search-field input")?.value === ""
+    , undefined, { timeout: 60_000 });
     const homeNavigation = await page.evaluate(() => ({
       href: document.querySelector("a.brand")?.getAttribute("href"),
       galleryPath: document.querySelector(
@@ -748,6 +1522,7 @@ try {
       resizeStability,
       dialogsAfterImageClick,
       viewer,
+      returnRestoration,
       searchDisclosure,
       exploration,
       homeNavigation,
@@ -770,11 +1545,23 @@ try {
       viewer.title !== firstViewerTitle ||
       viewer.fullLoaded !== "true" ||
       !viewer.originalPath.endsWith("/original") ||
-      viewer.renderer !== "bitmap" ||
-      viewer.renderedPixels.some((size) => size <= 0 || size > 4096) ||
+      !["native", "safe-canvas", "viewport-bitmap"].includes(viewer.renderer) ||
+      viewer.renderedPixels.some((size) => size <= 0) ||
+      (viewer.renderer === "safe-canvas" && viewer.renderedPixels.some((size) => size > 4096)) ||
+      (viewer.renderer === "viewport-bitmap" && viewer.renderedPixels.some((size) => size > 2048)) ||
+      (target.name === "mobile" && viewer.renderer !== "viewport-bitmap") ||
       viewer.prefetchedOriginals < 2 ||
       viewer.previewRequests !== 0 ||
       viewer.fullscreenButtons !== 1 ||
+      viewer.detailsPages !== 1 ||
+      viewer.scrollCues !== 1 ||
+      viewer.headingModules !== 0 ||
+      !viewer.unifiedControls ||
+      viewer.zoomControls !== 0 ||
+      !viewer.scrollCueArrowOnly ||
+      viewer.drawerArtifacts !== 0 ||
+      viewer.scrollMode !== "continuous" ||
+      !viewer.continuousLayout ||
       viewer.gestureHelp !== 0 ||
       viewer.loadingStatus !== 0 ||
       viewer.loadingCopyVisible ||
@@ -785,21 +1572,97 @@ try {
       !viewer.closeFocused ||
       !viewer.mediaContained ||
       !viewer.position.includes("/") ||
-      viewer.zoomed !== "150%" ||
+      viewer.zoomed !== "true" ||
       Math.abs(viewer.zoomScale - 1.5) > 0.02 ||
+      !viewer.zoomKeptImagePage ||
+      !viewer.zoomLockedPageScroll ||
       !viewer.keyboardNavigation ||
       viewer.keyboardNavigation === firstViewerTitle ||
+      !viewer.keyboardFocus?.parkedOnViewer ||
+      viewer.keyboardFocus.visibleControlFocusRings !== 0 ||
+      !viewer.switchPerformance?.focusedOnViewer ||
+      viewer.switchPerformance.visibleControlFocusRings !== 0 ||
+      viewer.switchPerformance.firstFrameSource !== (
+        target.name === "mobile" ? "viewport-bitmap" : "original"
+      ) ||
+      viewer.switchPerformance.mediaAnimations !== 0 ||
+      viewer.switchPerformance.dispatchDuration > 80 ||
+      viewer.switchPerformance.firstFrameDuration > 100 ||
+      !viewerChrome.scrollCuePresentation?.borderless ||
+      !viewerChrome.scrollCuePresentation?.transparent ||
+      viewerChrome.scrollCuePresentation.width < 88 ||
+      !viewerChrome.scrollCuePresentation?.clearsMedia ||
+      (target.name === "desktop" && (
+        !viewer.detailsReachedByWheel ||
+        viewer.detailsName !== viewer.keyboardNavigation ||
+        !viewer.zoomWheelHandoffLocked ||
+        viewer.pageAfterDetails !== "details" ||
+        viewer.detailsHeading !== "图片详情" ||
+        !viewer.stageScrolledAway ||
+        !viewer.detailsVisible ||
+        viewer.drawerArtifactsAfterScroll !== 0 ||
+        !viewer.returnedToImage ||
+        viewer.pageAfterReturn !== "image" ||
+        !viewer.returnWheelHandoffLocked
+      )) ||
       (target.name === "mobile" && (
+        viewer.nativeOriginalLoaded !== "true" ||
+        viewer.nativeOriginalActive !== "false" ||
+        viewer.nativeOriginalCount !== 1 ||
+        !viewer.nativeOriginalPath.endsWith("/original") ||
+        viewer.nativeOriginalVisible > .01 ||
+        viewer.nativeOriginalPixels.some((size, index) => size <= viewer.renderedPixels[index]) ||
+        viewer.displaySource !== "viewport-bitmap" ||
+        viewer.mediaWillChange !== "auto" ||
         !viewer.pinchZoomed ||
         viewer.pinchScale < 1.5 ||
+        viewer.pinchNativeOriginal?.active !== "true" ||
+        viewer.pinchNativeOriginal.displaySource !== "original" ||
+        viewer.pinchNativeOriginal.visible < .99 ||
+        viewer.pinchNativeOriginal.settledWillChange !== "auto" ||
         !viewer.doubleTapReset ||
         Math.abs(viewer.doubleTapScale - 1) > 0.02 ||
+        viewer.nativeOriginalAfterReset?.active !== "false" ||
+        viewer.nativeOriginalAfterReset.displaySource !== "viewport-bitmap" ||
+        viewer.nativeOriginalAfterReset.visible > .01 ||
+        viewer.nativeOriginalAfterReset.settledWillChange !== "auto" ||
         !viewer.swipeNavigation ||
         viewer.swipeNavigation === viewer.keyboardNavigation ||
+        viewer.swipeDragTracking > -190 ||
+        viewer.swipeDragTracking < -225 ||
+        viewer.swipeDragWillChange !== "transform" ||
+        viewer.swipeMotion?.mode !== "interruptible" ||
+        viewer.swipeMotion.direction !== "next" ||
+        viewer.swipeMotion.snapshot !== "prepared" ||
+        viewer.swipeMotion.releaseCostMs > 12 ||
+        viewer.swipeMotion.incomingAnimations < 1 ||
+        viewer.swipeMotion.outgoingAnimations < 1 ||
+        !viewer.swipeMotion.outgoingIgnoresInput ||
+        !viewer.swipeMotionCleaned ||
+        !viewer.reversedPageGestureStayedOpen ||
+        !viewer.pageGestureIgnoredHorizontal ||
+        !viewer.detailsFollowedTouch ||
+        !viewer.detailsReachedBySwipe ||
+        viewer.pageAfterDetails !== "details" ||
+        viewer.detailsName !== viewer.swipeNavigation ||
+        viewer.detailsHeading !== "图片详情" ||
+        !viewer.stageScrolledAway ||
+        !viewer.detailsVisible ||
+        viewer.drawerArtifactsAfterScroll !== 0 ||
+        !viewer.returnedToImage ||
+        viewer.pageAfterReturn !== "image" ||
         !viewer.closedByGesture
       )) ||
       viewer.closed !== 0 ||
       !viewer.rootRestored ||
+      !viewer.returnAnchorSettled ||
+      !returnRestoration ||
+      returnRestoration.openedId === returnRestoration.targetId ||
+      returnRestoration.targetId !== returnRestoration.currentId ||
+      returnRestoration.cardsAfter <= returnRestoration.cardsBefore ||
+      !returnRestoration.visible ||
+      returnRestoration.anchorDelta > 2 ||
+      returnRestoration.returning !== "false" ||
       searchDisclosure.expanded !== "true" ||
       !searchDisclosure.focused ||
       searchDisclosure.panelRole !== "group" ||
@@ -845,7 +1708,10 @@ try {
         resizeStability.skeletonSeen ||
         resizeStability.imagePageRequests !== 0 ||
         resizeStability.brokenVisibleImages !== 0 ||
-        resizeStability.columns !== 5
+        resizeStability.columns !== 5 ||
+        !resizeStability.anchorFocused ||
+        resizeStability.anchorDeltas.length !== 4 ||
+        resizeStability.anchorDeltas.some((delta) => !Number.isFinite(delta) || delta > 2)
       )) ||
       !layout.galleryPath.startsWith("/") ||
       !layout.galleryCount.endsWith("张图片") ||
