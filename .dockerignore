@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!dist/
+!dist/pixhelf-amd64-linux
+!dist/pixhelf-arm64-linux

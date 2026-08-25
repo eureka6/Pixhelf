@@ -1,0 +1,12 @@
+services:
+  pixhelf:
+    image: git.pixhelf.com/adminroot/pixhelf:${PIXHELF_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${PIXHELF_PORT:-3002}:3002"
+    volumes:
+      - "${PIXHELF_GALLERY:-./pic}:/data/pic:ro"
+      - pixhelf-cache:/data/.pixhelf-cache
+
+volumes:
+  pixhelf-cache:

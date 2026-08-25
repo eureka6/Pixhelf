@@ -37,6 +37,32 @@ cargo build --release
 两个 Release 产物都是无扩展名的独立可执行文件，下载后需要执行
 `chmod +x pixhelf-amd64-linux` 或 `chmod +x pixhelf-arm64-linux`。
 
+## Docker
+
+每个版本同时发布 `linux/amd64` 和 `linux/arm64` 镜像。Docker 会自动选择与宿主机匹配的架构：
+
+```bash
+mkdir -p pic
+docker compose up -d
+```
+
+默认读取当前目录的 `./pic`，监听宿主机的 `3002` 端口，并使用命名卷保存缩略图缓存。
+可以通过环境变量指定版本、图库目录和端口：
+
+```bash
+PIXHELF_TAG=0.1.8 \
+PIXHELF_GALLERY=/srv/photos \
+PIXHELF_PORT=8080 \
+docker compose up -d
+```
+
+镜像地址为 `git.pixhelf.com/adminroot/pixhelf`。发布工作流优先使用 Actions Secret
+`REGISTRY_TOKEN` 和 `REGISTRY_USERNAME` 登录 Forgejo Container Registry；未配置时会尝试使用
+当前工作流的临时令牌和触发用户。
+
+推送 `master` 或在 Forgejo Actions 页面手动运行 `Build and release` 工作流时，会完整构建两种
+架构并验证多架构 OCI 镜像，但不会推送镜像或创建 Release；只有推送 `v*` 标签才会正式发布。
+
 ## 参数
 
 ```text

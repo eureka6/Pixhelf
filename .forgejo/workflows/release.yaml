@@ -2,9 +2,12 @@ name: Build and release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -101,14 +104,159 @@ jobs:
 
           dist/pixhelf-amd64-linux --help >/dev/null
 
+      - name: Stage release inputs
+        if: forgejo.event_name != 'pull_request'
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: release-inputs
+          path: |
+            dist/
+            .dockerignore
+            Dockerfile
+            compose.yml
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: forgejo.event_name != 'pull_request'
+    runs-on: docker
+    container:
+      image: docker.io/library/docker:29-cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+    steps:
+      - name: Install action runtime
+        run: apk add --no-cache ca-certificates curl nodejs
+
+      - name: Download release inputs
+        uses: https://data.forgejo.org/actions/download-artifact@v3
+        with:
+          name: release-inputs
+          path: .
+
       - name: Prepare release metadata
-        if: startsWith(forgejo.ref, 'refs/tags/v')
         run: |
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME}}"
-          printf 'RELEASE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
+          set -eu
+          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
+          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
+          event="${FORGEJO_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
+          revision="${FORGEJO_SHA:-${GITHUB_SHA:-unknown}}"
+          server="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY}}"
+          registry="${server#http://}"
+          registry="${registry#https://}"
+          registry="${registry%%/*}"
+          image="$(printf '%s/%s' "$registry" "$repository" | tr '[:upper:]' '[:lower:]')"
+
+          case "${event}:${ref}" in
+            push:refs/tags/v*)
+              release_tag="$ref_name"
+              version="${release_tag#v}"
+              is_release=true
+              ;;
+            *)
+              release_tag=""
+              version="validation-$(printf '%.12s' "$revision")"
+              is_release=false
+              ;;
+          esac
+
+          test -n "$version"
+          test -s dist/pixhelf-amd64-linux
+          test -s dist/pixhelf-arm64-linux
+          test -f Dockerfile
+          test -f compose.yml
+
+          printf 'IS_RELEASE=%s\n' "$is_release" >> "$GITHUB_ENV"
+          printf 'RELEASE_TAG=%s\n' "$release_tag" >> "$GITHUB_ENV"
+          printf 'IMAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
+          printf 'REGISTRY=%s\n' "$registry" >> "$GITHUB_ENV"
+          printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+          printf 'SOURCE_URL=%s/%s\n' "$server" "$repository" >> "$GITHUB_ENV"
+
+      - name: Log in to Forgejo Container Registry
+        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          token="${REGISTRY_TOKEN:-${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}}"
+          username="${REGISTRY_USERNAME:-${FORGEJO_ACTOR:-${GITHUB_ACTOR:-}}}"
+          test -n "$token"
+          test -n "$username"
+          printf '%s' "$token" \
+            | docker login "$REGISTRY" --username "$username" --password-stdin
+
+      - name: Build and push multi-platform image
+        run: |
+          set -eu
+          builder="pixhelf-${FORGEJO_RUN_ID:-${GITHUB_RUN_ID:-release}}"
+
+          cleanup() {
+            docker buildx rm --force "$builder" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cleanup
+
+          docker version
+          docker buildx version
+          docker buildx create \
+            --name "$builder" \
+            --driver docker-container \
+            --use
+          docker buildx inspect --bootstrap
+
+          if [ "$IS_RELEASE" = true ]; then
+            set -- \
+              --tag "${IMAGE}:${IMAGE_VERSION}" \
+              --tag "${IMAGE}:${RELEASE_TAG}"
+            case "$IMAGE_VERSION" in
+              *-*) ;;
+              *) set -- "$@" --tag "${IMAGE}:latest" ;;
+            esac
+
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg "VERSION=${IMAGE_VERSION}" \
+              --build-arg "REVISION=${REVISION}" \
+              --build-arg "SOURCE_URL=${SOURCE_URL}" \
+              "$@" \
+              --push \
+              .
+
+            docker buildx imagetools inspect "${IMAGE}:${IMAGE_VERSION}"
+          else
+            output=/tmp/pixhelf-image.oci.tar
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg "VERSION=${IMAGE_VERSION}" \
+              --build-arg "REVISION=${REVISION}" \
+              --build-arg "SOURCE_URL=${SOURCE_URL}" \
+              --tag pixhelf:validation \
+              --output "type=oci,dest=${output}" \
+              .
+
+            test -s "$output"
+            tar -xOf "$output" index.json \
+              | node -e '
+                  let input = "";
+                  process.stdin.on("data", (chunk) => input += chunk);
+                  process.stdin.on("end", () => {
+                    const platforms = JSON.parse(input).manifests
+                      .map((manifest) => `${manifest.platform?.os}/${manifest.platform?.architecture}`);
+                    for (const expected of ["linux/amd64", "linux/arm64"]) {
+                      if (!platforms.includes(expected)) {
+                        throw new Error(`missing OCI platform: ${expected}`);
+                      }
+                    }
+                    console.log(`validated OCI platforms: ${platforms.join(", ")}`);
+                  });'
+          fi
 
       - name: Create Forgejo release and upload assets
-        if: startsWith(forgejo.ref, 'refs/tags/v')
+        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           set -eu
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -185,9 +333,8 @@ jobs:
 
           delete_asset pixhelf-amd64
           delete_asset pixhelf-arm64
-          delete_asset compose.yml
 
-          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux; do
+          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux compose.yml; do
             asset_name="$(basename "$asset")"
             delete_asset "$asset_name"
             curl --silent --show-error --fail \
