@@ -186,7 +186,7 @@ jobs:
           delete_asset pixhelf-amd64
           delete_asset pixhelf-arm64
 
-          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux; do
+          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux compose.yml; do
             asset_name="$(basename "$asset")"
             delete_asset "$asset_name"
             curl --silent --show-error --fail \
@@ -197,3 +197,46 @@ jobs:
               "${api}/repos/${repository}/releases/${release_id}/assets?name=${asset_name}"
             printf '\n'
           done
+
+      - name: Install container publishing tool
+        if: startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          crane_version=0.21.9
+          crane_archive="go-containerregistry_Linux_x86_64.tar.gz"
+          crane_sha256=5c16d8ddb971cb1d5e6ed8b1e743da8224414eeba2c2762d8f1a61b2f095699e
+          crane_url="https://github.com/google/go-containerregistry/releases/download/v${crane_version}/${crane_archive}"
+
+          curl --location --silent --show-error --fail \
+            --output "/tmp/${crane_archive}" \
+            "$crane_url"
+          printf '%s  %s\n' "$crane_sha256" "/tmp/${crane_archive}" \
+            | sha256sum --check
+          tar -xzf "/tmp/${crane_archive}" -C /usr/local/bin crane
+          crane version
+
+      - name: Publish multi-platform Alpine container
+        if: startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
+          actor="${FORGEJO_ACTOR:-${GITHUB_ACTOR}}"
+          server="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL}}"
+          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY}}"
+          registry="${server#*://}"
+          registry="${registry%%/*}"
+          image_path="$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')"
+          image_repository="${registry}/${image_path}"
+          test -n "$token"
+
+          export DOCKER_CONFIG=/tmp/pixhelf-container-auth
+          install -d -m 0700 "$DOCKER_CONFIG"
+          printf '%s' "$token" \
+            | crane auth login "$registry" --username "$actor" --password-stdin
+
+          export RELEASE_TAG
+          export IMAGE_REPOSITORY="$image_repository"
+          export SOURCE_URL="${server}/${repository}"
+          export REVISION
+          REVISION="$(git rev-parse HEAD)"
+          .forgejo/scripts/publish-container.sh

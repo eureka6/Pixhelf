@@ -37,6 +37,33 @@ cargo build --release
 两个 Release 产物都是无扩展名的独立可执行文件，下载后需要执行
 `chmod +x pixhelf-amd64-linux` 或 `chmod +x pixhelf-arm64-linux`。
 
+## Docker Compose
+
+发布工作流还会将同一批 AMD64、ARM64 二进制分别装入 `alpine:latest`，并发布为
+`git.pixhelf.com/adminroot/pixhelf` 多架构镜像。最简安装方式：
+
+```bash
+curl -LO https://git.pixhelf.com/adminroot/pixhelf/raw/branch/master/compose.yml
+mkdir -p pic
+docker compose up -d
+```
+
+打开 `http://localhost:3002`。`compose.yml` 默认只读挂载当前目录的 `./pic`，并用
+Docker volume 保存缩略图缓存。更新时执行：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+默认使用 `latest`，也可以固定版本：
+
+```bash
+PIXHELF_IMAGE=git.pixhelf.com/adminroot/pixhelf:0.1.7 docker compose up -d
+```
+
+容器以 UID/GID `65532:65532` 运行，因此图库目录和图片需要对该用户可读。
+
 ## 参数
 
 ```text
