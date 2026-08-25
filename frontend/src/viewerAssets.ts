@@ -5,6 +5,7 @@ const ORIGINAL_CACHE_LIMIT = 4;
 const VIEWPORT_RENDER_CACHE_LIMIT = 4;
 const THUMBNAIL_PRELOAD_DISTANCE = 10;
 const ORIGINAL_PRELOAD_DISTANCE = 2;
+const ASSET_LOAD_TIMEOUT_MS = 30_000;
 
 type AssetPriority = "high" | "low";
 
@@ -117,9 +118,11 @@ function loadImageAsset(
     lastUsed: ++assetClock,
   };
   let settled = false;
+  let timeout = 0;
   const settle = (status: Exclude<ViewerAssetStatus, "loading">) => {
     if (settled) return;
     settled = true;
+    window.clearTimeout(timeout);
     asset.status = status;
     asset.lastUsed = ++assetClock;
     resolveAsset();
@@ -136,6 +139,11 @@ function loadImageAsset(
   element.addEventListener("error", () => settle("failed"), { once: true });
   cache.set(url, asset);
   element.src = url;
+  timeout = window.setTimeout(() => {
+    if (settled) return;
+    element.removeAttribute("src");
+    settle("failed");
+  }, ASSET_LOAD_TIMEOUT_MS);
   pruneCache(cache, limit, url);
   return asset;
 }
@@ -237,6 +245,7 @@ function startNextViewportRenderJob(): void {
   activeViewportRenderJob = job;
   void (async () => {
     const { asset, attempt, controller, image, key, resolve } = job;
+    const timeout = window.setTimeout(() => controller.abort(), ASSET_LOAD_TIMEOUT_MS);
     try {
       const requestOptions: RequestInit & { priority: "high" | "low" } = {
         cache: attempt ? "reload" : "force-cache",
@@ -246,6 +255,9 @@ function startNextViewportRenderJob(): void {
       };
       const response = await fetch(viewerOriginalUrl(image, attempt), requestOptions);
       if (!response.ok) throw new Error(`original request failed: ${response.status}`);
+      if (!response.headers.get("content-type")?.startsWith("image/")) {
+        throw new Error("original response is not an image");
+      }
       const blob = await response.blob();
       if (!blob.size) throw new Error("original response is empty");
       const bitmap = await createImageBitmap(blob, {
@@ -263,6 +275,7 @@ function startNextViewportRenderJob(): void {
     } catch {
       asset.status = "failed";
     } finally {
+      window.clearTimeout(timeout);
       if (job.cancelled) {
         asset.bitmap?.close();
         asset.bitmap = null;

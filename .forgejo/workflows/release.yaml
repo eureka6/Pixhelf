@@ -188,9 +188,12 @@ jobs:
         if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           set -eu
-          token="${REGISTRY_TOKEN:-${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}}"
+          token="${REGISTRY_TOKEN:-}"
           username="${REGISTRY_USERNAME:-${FORGEJO_ACTOR:-${GITHUB_ACTOR:-}}}"
-          test -n "$token"
+          if [ -z "$token" ]; then
+            echo 'REGISTRY_TOKEN must contain a Forgejo token with write:package access' >&2
+            exit 1
+          fi
           test -n "$username"
           printf '%s' "$token" \
             | crane auth login "$REGISTRY" --username "$username" --password-stdin

@@ -14,6 +14,7 @@ use tower::ServiceExt;
 use tower_http::{
     compression::{CompressionLayer, CompressionLevel},
     services::ServeFile,
+    set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
 use tracing::error;
@@ -36,11 +37,13 @@ const APP_CSS: &[u8] = include_bytes!(concat!(
     "/frontend/dist/assets/app.css"
 ));
 const ASSET_VERSION: &str = env!("PIXHELF_ASSET_VERSION");
-const BOOTSTRAP_PAGE_SIZE: usize = 60;
+const DEFAULT_PAGE_SIZE: usize = 60;
+const MAX_PAGE_SIZE: usize = 200;
+const MAX_QUERY_VALUE_BYTES: usize = 4096;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub index: Arc<RwLock<GalleryIndex>>,
+    pub index: Arc<RwLock<Arc<GalleryIndex>>>,
     pub thumbnails: Arc<ThumbnailManager>,
 }
 
@@ -56,7 +59,60 @@ struct ImagesQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug)]
+struct ImageRequest {
+    album: Option<String>,
+    search: Option<String>,
+    sort: ImageSort,
+    seed: String,
+    offset: usize,
+    limit: usize,
+}
+
+impl ImagesQuery {
+    fn normalize(self) -> Result<ImageRequest, StatusCode> {
+        if [&self.album, &self.search, &self.seed]
+            .into_iter()
+            .flatten()
+            .any(|value| value.len() > MAX_QUERY_VALUE_BYTES)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        Ok(ImageRequest {
+            album: self.album.filter(|album| !album.is_empty()),
+            search: self
+                .search
+                .as_deref()
+                .map(str::trim)
+                .filter(|search| !search.is_empty())
+                .map(str::to_lowercase),
+            sort: self.sort,
+            seed: self.seed.unwrap_or_default(),
+            offset: self.offset.unwrap_or(0),
+            limit: self
+                .limit
+                .unwrap_or(DEFAULT_PAGE_SIZE)
+                .clamp(1, MAX_PAGE_SIZE),
+        })
+    }
+}
+
+impl Default for ImageRequest {
+    fn default() -> Self {
+        Self {
+            album: None,
+            search: None,
+            sort: ImageSort::default(),
+            seed: String::new(),
+            offset: 0,
+            limit: DEFAULT_PAGE_SIZE,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[repr(u8)]
 #[serde(rename_all = "kebab-case")]
 enum ImageSort {
     #[default]
@@ -123,6 +179,18 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/{version}/app.css", get(app_css))
         .fallback(frontend)
         .layer(CompressionLayer::new().quality(CompressionLevel::Precise(5)))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -138,9 +206,11 @@ async fn gallery_summary(State(state): State<AppState>, headers: HeaderMap) -> R
         return not_modified(&etag, "private, no-cache");
     }
 
-    let mut response = Json(summary_from_index(&index)).into_response();
-    let _ = add_cache_headers(&mut response, &etag, "private, no-cache");
-    response
+    with_cache_headers(
+        Json(summary_from_index(&index)).into_response(),
+        &etag,
+        "private, no-cache",
+    )
 }
 
 fn summary_from_index(index: &GalleryIndex) -> GallerySummary {
@@ -156,27 +226,28 @@ async fn images(
     Query(query): Query<ImagesQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let query = match query.normalize() {
+        Ok(query) => query,
+        Err(status) => return status.into_response(),
+    };
     let index = state.index.read().await;
     let etag = images_etag(&index.revision, &query);
     if is_not_modified(&headers, &etag) {
         return not_modified(&etag, "private, no-cache");
     }
 
-    let mut response = Json(image_page(&index, &query)).into_response();
-    let _ = add_cache_headers(&mut response, &etag, "private, no-cache");
-    response
+    with_cache_headers(
+        Json(image_page(&index, &query)).into_response(),
+        &etag,
+        "private, no-cache",
+    )
 }
 
-fn image_page(index: &GalleryIndex, query: &ImagesQuery) -> ImagesResponse {
-    let search = query
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|search| !search.is_empty())
-        .map(str::to_lowercase);
-    let album = query.album.as_deref().filter(|album| !album.is_empty());
-    let requested_offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(60).clamp(1, 200);
+fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {
+    let album = query.album.as_deref();
+    let search = query.search.as_deref();
+    let requested_offset = query.offset;
+    let limit = query.limit;
 
     match query.sort {
         ImageSort::NameAsc if album.is_none() && search.is_none() => {
@@ -188,14 +259,14 @@ fn image_page(index: &GalleryIndex, query: &ImagesQuery) -> ImagesResponse {
         ImageSort::NameAsc => page_from_ordered_records(
             index.images.iter().map(Arc::as_ref),
             album,
-            search.as_deref(),
+            search,
             requested_offset,
             limit,
         ),
         ImageSort::NameDesc => page_from_ordered_records(
             index.images.iter().rev().map(Arc::as_ref),
             album,
-            search.as_deref(),
+            search,
             requested_offset,
             limit,
         ),
@@ -204,15 +275,13 @@ fn image_page(index: &GalleryIndex, query: &ImagesQuery) -> ImagesResponse {
                 .images
                 .iter()
                 .map(Arc::as_ref)
-                .filter(|record| record_matches(record, album, search.as_deref()))
+                .filter(|record| record_matches(record, album, search))
                 .collect();
 
             match query.sort {
                 ImageSort::Newest => matches.sort_by_key(|record| Reverse(record.modified_ms)),
                 ImageSort::Explore => {
-                    let seed_key =
-                        *blake3::hash(query.seed.as_deref().unwrap_or_default().as_bytes())
-                            .as_bytes();
+                    let seed_key = *blake3::hash(query.seed.as_bytes()).as_bytes();
                     matches.sort_by_cached_key(|record| exploration_rank(&seed_key, &record.id));
                 }
                 ImageSort::NameAsc | ImageSort::NameDesc => unreachable!(),
@@ -336,20 +405,27 @@ async fn original(
     request: Request,
 ) -> Result<Response, StatusCode> {
     // Resolve the opaque id through the index instead of accepting a filesystem path
-    // from the request. Cloning the path also avoids holding the read lock while the
-    // file is streamed to a slow client.
-    let path = {
+    // from the request. Cloning the record releases the read lock before filesystem I/O.
+    let image = {
         let index = state.index.read().await;
-        index
-            .images
-            .iter()
-            .find(|image| image.id == id)
-            .map(|image| image.path.clone())
-            .ok_or(StatusCode::NOT_FOUND)?
+        index.image(&id).cloned().ok_or(StatusCode::NOT_FOUND)?
     };
+    let metadata = match tokio::fs::metadata(&image.path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(error) => {
+            error!(path = %image.path.display(), %error, "cannot inspect original image");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    if !image.matches_metadata(&metadata) {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     serve_file(
-        path,
+        image.path.clone(),
         request,
         &format!("\"original-{id}\""),
         "public, max-age=31536000, immutable",
@@ -363,15 +439,8 @@ async fn serve_file(
     etag: &str,
     cache_control: &'static str,
 ) -> Result<Response, StatusCode> {
-    if request
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        == Some(etag)
-    {
-        let mut response = StatusCode::NOT_MODIFIED.into_response();
-        add_cache_headers(&mut response, etag, cache_control)?;
-        return Ok(response);
+    if is_not_modified(request.headers(), etag) {
+        return Ok(not_modified(etag, cache_control));
     }
 
     let response = ServeFile::new(path)
@@ -379,36 +448,34 @@ async fn serve_file(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let (parts, body) = response.into_parts();
-    let mut response = Response::from_parts(parts, Body::new(body));
-    add_cache_headers(&mut response, etag, cache_control)?;
-    Ok(response)
+    Ok(with_cache_headers(
+        Response::from_parts(parts, Body::new(body)),
+        etag,
+        cache_control,
+    ))
 }
 
-fn add_cache_headers(
-    response: &mut Response,
-    etag: &str,
-    cache_control: &'static str,
-) -> Result<(), StatusCode> {
+fn with_cache_headers(mut response: Response, etag: &str, cache_control: &'static str) -> Response {
+    let etag = match HeaderValue::from_str(etag) {
+        Ok(etag) => etag,
+        Err(error) => {
+            error!(%error, "cannot create ETag response header");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control),
     );
-    response.headers_mut().insert(
-        header::ETAG,
-        HeaderValue::from_str(etag).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    );
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    Ok(())
+    response.headers_mut().insert(header::ETAG, etag);
+    response
 }
 
 fn revision_etag(kind: &str, revision: &str) -> String {
     format!("\"{kind}-{revision}\"")
 }
 
-fn images_etag(revision: &str, query: &ImagesQuery) -> String {
+fn images_etag(revision: &str, query: &ImageRequest) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pixhelf-images-query-v1\0");
     hasher.update(query.album.as_deref().unwrap_or_default().as_bytes());
@@ -416,9 +483,9 @@ fn images_etag(revision: &str, query: &ImagesQuery) -> String {
     hasher.update(query.search.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     hasher.update(&[query.sort as u8]);
-    hasher.update(query.seed.as_deref().unwrap_or_default().as_bytes());
-    hasher.update(&query.offset.unwrap_or_default().to_le_bytes());
-    hasher.update(&query.limit.unwrap_or(60).to_le_bytes());
+    hasher.update(query.seed.as_bytes());
+    hasher.update(&query.offset.to_le_bytes());
+    hasher.update(&query.limit.to_le_bytes());
     let query_hash = hasher.finalize().to_hex();
     format!("\"images-{revision}-{}\"", &query_hash[..16])
 }
@@ -431,14 +498,16 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
             values
                 .split(',')
                 .map(str::trim)
-                .any(|value| value == etag || value == "*")
+                .any(|value| value == "*" || value.strip_prefix("W/").unwrap_or(value) == etag)
         })
 }
 
 fn not_modified(etag: &str, cache_control: &'static str) -> Response {
-    let mut response = StatusCode::NOT_MODIFIED.into_response();
-    let _ = add_cache_headers(&mut response, etag, cache_control);
-    response
+    with_cache_headers(
+        StatusCode::NOT_MODIFIED.into_response(),
+        etag,
+        cache_control,
+    )
 }
 
 async fn app_js(Path(version): Path<String>, headers: HeaderMap) -> Response {
@@ -480,8 +549,7 @@ fn embedded_asset(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    let _ = add_cache_headers(&mut response, &etag, "public, max-age=31536000, immutable");
-    response
+    with_cache_headers(response, &etag, "public, max-age=31536000, immutable")
 }
 
 async fn frontend(State(state): State<AppState>, request: Request) -> Response {
@@ -501,13 +569,7 @@ async fn frontend(State(state): State<AppState>, request: Request) -> Response {
         return not_modified(&etag, "private, no-cache");
     }
     let summary = summary_from_index(&index);
-    let images = image_page(
-        &index,
-        &ImagesQuery {
-            limit: Some(BOOTSTRAP_PAGE_SIZE),
-            ..ImagesQuery::default()
-        },
-    );
+    let images = image_page(&index, &ImageRequest::default());
 
     let preload = images.items.first().map_or_else(String::new, |image| {
         let url = format!("/api/images/{}/thumbnail", image.id);
@@ -554,8 +616,7 @@ async fn frontend(State(state): State<AppState>, request: Request) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    let _ = add_cache_headers(&mut response, &etag, "private, no-cache");
-    response
+    with_cache_headers(response, &etag, "private, no-cache")
 }
 
 fn escape_script_json(json: String) -> String {
@@ -574,7 +635,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let thumbnails = ThumbnailManager::new(temp.path().to_owned()).unwrap();
         router(AppState {
-            index: Arc::new(RwLock::new(GalleryIndex::default())),
+            index: Arc::new(RwLock::new(Arc::new(GalleryIndex::default()))),
             thumbnails,
         })
     }
@@ -628,6 +689,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalizes_image_queries_once() {
+        let query = ImagesQuery {
+            album: Some("album".into()),
+            search: Some("  PHOTO  ".into()),
+            offset: Some(usize::MAX),
+            limit: Some(usize::MAX),
+            ..ImagesQuery::default()
+        }
+        .normalize()
+        .unwrap();
+
+        assert_eq!(query.album.as_deref(), Some("album"));
+        assert_eq!(query.search.as_deref(), Some("photo"));
+        assert_eq!(query.offset, usize::MAX);
+        assert_eq!(query.limit, MAX_PAGE_SIZE);
+
+        let oversized = ImagesQuery {
+            search: Some("x".repeat(MAX_QUERY_VALUE_BYTES + 1)),
+            ..ImagesQuery::default()
+        };
+        assert_eq!(oversized.normalize().unwrap_err(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn rejects_unknown_sort_modes() {
         assert_eq!(
@@ -658,7 +743,14 @@ mod tests {
             request("/api/images/missing/original").await.status(),
             StatusCode::NOT_FOUND
         );
-        assert_eq!(request("/missing").await.status(), StatusCode::NOT_FOUND);
+        let response = request("/missing").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
     }
 
     #[tokio::test]
@@ -674,7 +766,7 @@ mod tests {
         let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
         thumbnails.reconcile(&index.images);
         let app = router(AppState {
-            index: Arc::new(RwLock::new(index)),
+            index: Arc::new(RwLock::new(Arc::new(index))),
             thumbnails,
         });
 
@@ -697,6 +789,35 @@ mod tests {
             .await
             .unwrap();
         assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_image_ids_do_not_serve_replaced_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        let image_path = gallery.join("image.png");
+        image::RgbImage::new(20, 10).save(&image_path).unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let id = index.images[0].id.clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+        std::fs::write(&image_path, "replacement with a different size").unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{id}/original"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -752,5 +873,17 @@ mod tests {
             response.headers()[header::CACHE_CONTROL],
             "private, no-cache"
         );
+
+        let weak_response = empty_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/gallery")
+                    .header(header::IF_NONE_MATCH, "W/\"gallery-\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(weak_response.status(), StatusCode::NOT_MODIFIED);
     }
 }

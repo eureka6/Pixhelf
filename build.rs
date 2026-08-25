@@ -9,6 +9,7 @@ fn main() {
         "frontend/package.json",
         "frontend/package-lock.json",
         "frontend/tsconfig.json",
+        "frontend/tsconfig.app.json",
         "frontend/vite.config.ts",
         "frontend/src",
     ] {
@@ -34,7 +35,11 @@ fn main() {
 
 fn asset_version(frontend_dir: &std::path::Path) -> String {
     let mut hash = 0xcbf29ce484222325u64;
-    for relative in ["dist/assets/app.js", "dist/assets/app.css"] {
+    for relative in [
+        "dist/index.html",
+        "dist/assets/app.js",
+        "dist/assets/app.css",
+    ] {
         let path = frontend_dir.join(relative);
         let content = fs::read(&path)
             .unwrap_or_else(|error| panic!("cannot read built asset {}: {error}", path.display()));

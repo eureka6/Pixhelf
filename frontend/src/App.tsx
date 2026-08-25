@@ -33,6 +33,7 @@ import {
   getDecodedViewerOriginal,
   preloadOriginalImage,
   prepareViewerImages,
+  viewerThumbnailUrl,
 } from "./viewerAssets";
 
 const PAGE_SIZE = 60;
@@ -46,6 +47,7 @@ const MOBILE_NAV_EXIT_MS = 240;
 const VIEWER_RETURN_SETTLE_MS = 32;
 const VIEWER_RETURN_TIMEOUT_MS = 480;
 const VIEWER_RETURN_ANIMATION_MS = 260;
+const READY_THUMBNAIL_CACHE_LIMIT = 2048;
 const COUNT_FORMATTER = new Intl.NumberFormat("zh-CN");
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
@@ -445,6 +447,15 @@ function createExploreSeed(): string {
 const CARD_LOAD_CALLBACKS = new WeakMap<Element, () => void>();
 const READY_THUMBNAIL_IDS = new Set<string>();
 let cardLoadObserver: IntersectionObserver | null = null;
+
+function rememberReadyThumbnail(id: string): void {
+  READY_THUMBNAIL_IDS.delete(id);
+  READY_THUMBNAIL_IDS.add(id);
+  if (READY_THUMBNAIL_IDS.size > READY_THUMBNAIL_CACHE_LIMIT) {
+    const oldest = READY_THUMBNAIL_IDS.values().next().value;
+    if (oldest !== undefined) READY_THUMBNAIL_IDS.delete(oldest);
+  }
+}
 
 function observeCardLoad(element: Element, load: () => void): () => void {
   if (!("IntersectionObserver" in window)) {
@@ -1575,13 +1586,18 @@ const MasonryGallery = memo(function MasonryGallery({
   useLayoutEffect(() => {
     const anchor = resizeAnchorRef.current;
     const masonry = ref.current;
+    let correctionFrame = 0;
     resizeAnchorRef.current = null;
     if (anchor && masonry && preserveViewport) {
       restoreMasonryViewportAnchor(masonry, anchor);
+      correctionFrame = window.requestAnimationFrame(() => {
+        restoreMasonryViewportAnchor(masonry, anchor);
+      });
     }
     stableViewportAnchorRef.current = preserveViewport && masonry
       ? captureMasonryViewportAnchor(masonry)
       : null;
+    return () => window.cancelAnimationFrame(correctionFrame);
   }, [columnCount, gap, images, preserveViewport, width]);
 
   useEffect(() => {
@@ -1722,13 +1738,13 @@ const ImageCard = memo(function ImageCard({
     return observeCardLoad(card, () => setLoadRequested(true));
   }, [eager, loadRequested]);
 
-  const thumbnailUrl = `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
+  const thumbnailUrl = viewerThumbnailUrl(image);
   const retryQuery = attempt ? `retry=${attempt}` : "";
   const imageUrl = retryQuery ? `${thumbnailUrl}?${retryQuery}` : thumbnailUrl;
 
   const markLoaded = useCallback(() => {
     window.clearTimeout(retryTimerRef.current);
-    READY_THUMBNAIL_IDS.add(image.id);
+    rememberReadyThumbnail(image.id);
     setLoaded(true);
     setFailed(false);
     setRetrying(false);

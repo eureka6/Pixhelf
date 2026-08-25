@@ -1,5 +1,7 @@
 import type {
+  Album,
   BootstrapData,
+  GalleryImage,
   GallerySummary,
   ImagesPage,
   SortMode,
@@ -8,7 +10,77 @@ import type {
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
-async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+type JsonObject = Record<string, unknown>;
+type JsonValidator<T> = (value: unknown) => value is T;
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value > 0;
+}
+
+function isAlbum(value: unknown): value is Album {
+  return isObject(value)
+    && typeof value.path === "string"
+    && typeof value.name === "string"
+    && isNonNegativeInteger(value.count);
+}
+
+function isGalleryImage(value: unknown): value is GalleryImage {
+  return isObject(value)
+    && typeof value.id === "string"
+    && typeof value.name === "string"
+    && isPositiveInteger(value.width)
+    && isPositiveInteger(value.height);
+}
+
+function isGallerySummary(value: unknown): value is GallerySummary {
+  return isObject(value)
+    && isNonNegativeInteger(value.total)
+    && Array.isArray(value.albums)
+    && value.albums.every(isAlbum)
+    && typeof value.revision === "string";
+}
+
+function isImagesPage(value: unknown): value is ImagesPage {
+  return isObject(value)
+    && Array.isArray(value.items)
+    && value.items.every(isGalleryImage)
+    && isNonNegativeInteger(value.total)
+    && isNonNegativeInteger(value.offset)
+    && isPositiveInteger(value.limit)
+    && (value.nextOffset === null || isNonNegativeInteger(value.nextOffset));
+}
+
+function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
+  return isObject(value)
+    && isNonNegativeInteger(value.total)
+    && isNonNegativeInteger(value.ready)
+    && isNonNegativeInteger(value.queued)
+    && isNonNegativeInteger(value.processing)
+    && isNonNegativeInteger(value.failed)
+    && typeof value.initialBatchReady === "boolean"
+    && typeof value.backgroundComplete === "boolean";
+}
+
+function isBootstrapData(value: unknown): value is BootstrapData {
+  return isObject(value)
+    && isGallerySummary(value.summary)
+    && isThumbnailStatus(value.status)
+    && isImagesPage(value.images);
+}
+
+async function getJson<T>(
+  url: string,
+  validate: JsonValidator<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
   const abortFromCaller = () => controller.abort(signal?.reason);
@@ -35,12 +107,15 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     if (!response.headers.get("content-type")?.includes("application/json")) {
       throw new Error("服务器返回了无效数据");
     }
+    let payload: unknown;
     try {
-      return (await response.json()) as T;
+      payload = await response.json();
     } catch (error) {
       if (controller.signal.aborted) throw error;
       throw new Error("服务器返回了无效数据", { cause: error });
     }
+    if (!validate(payload)) throw new Error("服务器返回了无效数据");
+    return payload;
   } catch (error) {
     if (timedOut) throw new Error("请求超时，请稍后重试", { cause: error });
     throw error;
@@ -57,7 +132,8 @@ export function takeInitialBootstrap(): BootstrapData | null {
   try {
     const source = element.textContent?.trim();
     if (!source || source.startsWith("__PIXHELF_")) return null;
-    return JSON.parse(source) as BootstrapData;
+    const payload: unknown = JSON.parse(source);
+    return isBootstrapData(payload) ? payload : null;
   } catch {
     return null;
   } finally {
@@ -66,11 +142,11 @@ export function takeInitialBootstrap(): BootstrapData | null {
 }
 
 export function getGallery(signal?: AbortSignal): Promise<GallerySummary> {
-  return getJson<GallerySummary>("/api/gallery", signal);
+  return getJson("/api/gallery", isGallerySummary, signal);
 }
 
 export function getStatus(signal?: AbortSignal): Promise<ThumbnailStatus> {
-  return getJson<ThumbnailStatus>("/api/status", signal);
+  return getJson("/api/status", isThumbnailStatus, signal);
 }
 
 export function getImages(
@@ -92,5 +168,5 @@ export function getImages(
   if (options.album) params.set("album", options.album);
   if (options.search) params.set("search", options.search);
   if (options.seed) params.set("seed", options.seed);
-  return getJson<ImagesPage>(`/api/images?${params}`, signal);
+  return getJson(`/api/images?${params}`, isImagesPage, signal);
 }

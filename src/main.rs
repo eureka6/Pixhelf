@@ -3,11 +3,11 @@ mod gallery;
 mod thumbs;
 mod web;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use config::Config;
-use gallery::scan_gallery;
+use gallery::{GalleryIndex, scan_gallery};
 use thumbs::ThumbnailManager;
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{error, info, warn};
@@ -26,10 +26,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env_and_args()?;
     info!(gallery = %config.gallery_dir.display(), "scanning gallery");
-    let gallery_dir = config.gallery_dir.clone();
-    let index = tokio::task::spawn_blocking(move || scan_gallery(&gallery_dir, None))
-        .await
-        .context("gallery scan task stopped")??;
+    let index = scan_gallery_async(config.gallery_dir.clone(), None).await?;
     if index.images.is_empty() {
         warn!(
             gallery = %config.gallery_dir.display(),
@@ -48,7 +45,7 @@ async fn main() -> Result<()> {
         .take(config.initial_batch)
         .map(|record| record.id.clone())
         .collect();
-    let index = Arc::new(RwLock::new(index));
+    let index = Arc::new(RwLock::new(Arc::new(index)));
     let thumbnails = ThumbnailManager::new(config.cache_dir.clone())?;
     {
         let current = index.read().await;
@@ -86,36 +83,38 @@ async fn main() -> Result<()> {
 async fn rescan_gallery(state: AppState, config: Config) {
     loop {
         tokio::time::sleep(config.scan_interval).await;
-        let previous = state.index.read().await.clone();
+        let previous = {
+            let index = state.index.read().await;
+            Arc::clone(&index)
+        };
+        let old_count = previous.images.len();
         let root = config.gallery_dir.clone();
-        let scan = tokio::task::spawn_blocking(move || {
-            let updated = scan_gallery(&root, Some(&previous));
-            (previous, updated)
-        })
-        .await;
-
-        let (previous, updated) = match scan {
-            Ok((previous, Ok(updated))) => (previous, updated),
-            Ok((_, Err(error))) => {
+        let updated = match scan_gallery_async(root, Some(Arc::clone(&previous))).await {
+            Ok(updated) => updated,
+            Err(error) => {
                 error!(%error, "gallery rescan failed");
                 continue;
             }
-            Err(error) => {
-                error!(%error, "gallery rescan task stopped");
-                continue;
-            }
         };
-        if previous.same_revision(&updated) {
+        if previous.revision == updated.revision {
             continue;
         }
 
-        let old_count = previous.images.len();
         let new_count = updated.images.len();
         state.thumbnails.reconcile(&updated.images);
-        *state.index.write().await = updated;
+        *state.index.write().await = Arc::new(updated);
         state.thumbnails.cleanup_stale().await;
         info!(old_count, new_count, "gallery changes indexed");
     }
+}
+
+async fn scan_gallery_async(
+    root: PathBuf,
+    previous: Option<Arc<GalleryIndex>>,
+) -> Result<GalleryIndex> {
+    tokio::task::spawn_blocking(move || scan_gallery(&root, previous.as_deref()))
+        .await
+        .context("gallery scan task stopped")?
 }
 
 async fn shutdown_signal() {

@@ -6,7 +6,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use image::{ImageDecoder, ImageReader, metadata::Orientation};
 use serde::Serialize;
 use tracing::warn;
@@ -27,6 +27,46 @@ pub struct ImageRecord {
     pub(crate) modified_ns: u128,
 }
 
+impl ImageRecord {
+    pub(crate) fn matches_metadata(&self, metadata: &fs::Metadata) -> bool {
+        let fingerprint = FileFingerprint::from_metadata(metadata);
+        metadata.is_file()
+            && self.size == fingerprint.size
+            && self.modified_ns == fingerprint.modified_ns
+    }
+
+    pub(crate) fn ensure_source_is_current(&self) -> Result<()> {
+        let metadata = fs::metadata(&self.path)
+            .with_context(|| format!("cannot inspect {}", self.path.display()))?;
+        if !self.matches_metadata(&metadata) {
+            bail!("source image changed since the gallery scan");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FileFingerprint {
+    size: u64,
+    modified_ms: u64,
+    modified_ns: u128,
+}
+
+impl FileFingerprint {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        let modified = metadata
+            .modified()
+            .unwrap_or(UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            size: metadata.len(),
+            modified_ms: modified.as_millis().min(u128::from(u64::MAX)) as u64,
+            modified_ns: modified.as_nanos(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Album {
@@ -35,16 +75,20 @@ pub struct Album {
     pub count: usize,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct GalleryIndex {
     pub images: Vec<Arc<ImageRecord>>,
     pub albums: Vec<Album>,
     pub revision: String,
+    images_by_id: Vec<Arc<ImageRecord>>,
 }
 
 impl GalleryIndex {
-    pub fn same_revision(&self, other: &Self) -> bool {
-        self.revision == other.revision
+    pub fn image(&self, id: &str) -> Option<&Arc<ImageRecord>> {
+        self.images_by_id
+            .binary_search_by(|image| image.id.as_str().cmp(id))
+            .ok()
+            .map(|index| &self.images_by_id[index])
     }
 }
 
@@ -94,17 +138,11 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
                 continue;
             }
         };
-        let modified = metadata
-            .modified()
-            .unwrap_or(UNIX_EPOCH)
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let modified_ns = modified.as_nanos();
-        let size = metadata.len();
+        let fingerprint = FileFingerprint::from_metadata(&metadata);
 
         if let Some(existing) = existing
-            && existing.size == size
-            && existing.modified_ns == modified_ns
+            && existing.size == fingerprint.size
+            && existing.modified_ns == fingerprint.modified_ns
         {
             images.push(Arc::clone(existing));
             continue;
@@ -130,7 +168,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             .and_then(|name| name.to_str())
             .unwrap_or(&relative_path)
             .to_owned();
-        let id = image_id(&relative_path, size, modified_ns);
+        let id = image_id(&relative_path, fingerprint.size, fingerprint.modified_ns);
         let search_key = relative_path.to_lowercase();
 
         images.push(Arc::new(ImageRecord {
@@ -142,9 +180,9 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             album,
             width,
             height,
-            size,
-            modified_ms: modified.as_millis().min(u64::MAX as u128) as u64,
-            modified_ns,
+            size: fingerprint.size,
+            modified_ms: fingerprint.modified_ms,
+            modified_ns: fingerprint.modified_ns,
         }));
     }
 
@@ -170,10 +208,13 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             count,
         })
         .collect();
+    let mut images_by_id = images.clone();
+    images_by_id.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     Ok(GalleryIndex {
         images,
         albums,
         revision,
+        images_by_id,
     })
 }
 
@@ -268,6 +309,26 @@ mod tests {
         assert_eq!(index.images[0].album, "album");
         assert_eq!((index.images[0].width, index.images[0].height), (20, 10));
         assert_eq!(index.albums[0].count, 1);
+        assert_eq!(
+            index
+                .image(&index.images[0].id)
+                .map(|image| image.name.as_str()),
+            Some("image.png")
+        );
+        assert!(index.image("missing").is_none());
+    }
+
+    #[test]
+    fn detects_sources_changed_after_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.png");
+        image::RgbImage::new(20, 10).save(&path).unwrap();
+        let index = scan_gallery(temp.path(), None).unwrap();
+        let record = &index.images[0];
+
+        assert!(record.ensure_source_is_current().is_ok());
+        fs::write(&path, "replacement with a different size").unwrap();
+        assert!(record.ensure_source_is_current().is_err());
     }
 
     #[test]

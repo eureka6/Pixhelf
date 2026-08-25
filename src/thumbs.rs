@@ -27,7 +27,6 @@ use crate::gallery::ImageRecord;
 const THUMBNAIL_EDGE: u32 = 720;
 const WEBP_QUALITY: f32 = 82.0;
 const CACHE_VERSION: &str = "720-webp-q82-v1";
-const THUMBNAIL_FILTER: FilterType = FilterType::Triangle;
 const LEGACY_VIEWER_CACHE_VERSION: &str = "viewer-3200-webp-q88-fast-v1";
 const MAX_ATTEMPTS: u8 = 3;
 
@@ -501,24 +500,7 @@ fn shard_path(root: &Path, id: &str) -> PathBuf {
 }
 
 fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
-    generate_image_cache(
-        record,
-        output,
-        THUMBNAIL_EDGE,
-        THUMBNAIL_FILTER,
-        WEBP_QUALITY,
-        "thumbnail",
-    )
-}
-
-fn generate_image_cache(
-    record: &ImageRecord,
-    output: &Path,
-    max_edge: u32,
-    filter: FilterType,
-    quality: f32,
-    label: &str,
-) -> Result<()> {
+    record.ensure_source_is_current()?;
     let reader = ImageReader::open(&record.path)
         .with_context(|| format!("cannot open {}", record.path.display()))?
         .with_guessed_format()?;
@@ -527,13 +509,22 @@ fn generate_image_cache(
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
     let (width, height) = image.dimensions();
-    let image = if width.max(height) > max_edge {
-        image.resize(max_edge, max_edge, filter)
+    let image = if width.max(height) > THUMBNAIL_EDGE {
+        image.resize(THUMBNAIL_EDGE, THUMBNAIL_EDGE, FilterType::Triangle)
     } else {
         image
     };
-    write_webp(&image, output, quality)
-        .with_context(|| format!("cannot store {label}: {}", output.display()))
+    write_webp(&image, output, WEBP_QUALITY)
+        .with_context(|| format!("cannot store thumbnail: {}", output.display()))?;
+    if let Err(error) = record.ensure_source_is_current() {
+        if let Err(remove_error) = fs::remove_file(output)
+            && remove_error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(path = %output.display(), %remove_error, "cannot remove stale thumbnail");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
@@ -712,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_thumbnail_can_be_retried() {
+    async fn changed_source_requires_a_fresh_gallery_record() {
         let temp = tempfile::tempdir().unwrap();
         let gallery = temp.path().join("gallery");
         fs::create_dir(&gallery).unwrap();
@@ -724,14 +715,19 @@ mod tests {
         let manager = ThumbnailManager::new(temp.path().join("cache")).unwrap();
         manager.reconcile(&index.images);
         manager.start_workers(1);
-        let id = &index.images[0].id;
+        let old_id = index.images[0].id.clone();
         assert!(matches!(
-            manager.ensure_ready(id).await,
+            manager.ensure_ready(&old_id).await,
             Err(ThumbnailError::Generation(_))
         ));
 
         image::RgbImage::new(20, 10).save(&image_path).unwrap();
-        let thumbnail = manager.ensure_ready(id).await.unwrap();
+        let updated = scan_gallery(&gallery, Some(&index)).unwrap();
+        let new_id = updated.images[0].id.clone();
+        assert_ne!(new_id, old_id);
+        manager.reconcile(&updated.images);
+
+        let thumbnail = manager.ensure_ready(&new_id).await.unwrap();
         assert!(valid_cache_file(&thumbnail));
     }
 
