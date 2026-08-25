@@ -15,12 +15,14 @@ import {
 } from "./icons";
 import type { GalleryImage } from "./types";
 import {
+  canPreloadViewerNeighbors,
   getViewerOriginalAsset,
   getViewerOriginalStatus,
+  getReadyViewerViewportRenderAsset,
   getViewerThumbnailStatus,
   getViewerViewportRenderAsset,
-  getViewerViewportRenderStatus,
   prepareViewerImages,
+  supportsViewerViewportBitmaps,
   viewerOriginalUrl,
   viewerThumbnailUrl,
 } from "./viewerAssets";
@@ -36,7 +38,13 @@ const MAX_NATIVE_IMAGE_EDGE = 12_288;
 const MOBILE_VIEWPORT_RENDER_EDGE = 2048;
 const MOBILE_SWIPE_MOTION_MS = 170;
 const MOBILE_SWIPE_CLEANUP_MS = MOBILE_SWIPE_MOTION_MS + 50;
-const MOBILE_ORIGINAL_UPGRADE_DELAY_MS = MOBILE_SWIPE_CLEANUP_MS + 40;
+const MOBILE_RENDER_SETTLE_MS = MOBILE_SWIPE_CLEANUP_MS + 16;
+const MOBILE_NEIGHBOR_PRELOAD_DELAY_MS = 120;
+const TOUCH_SWIPE_MIN_DISTANCE_PX = 36;
+const TOUCH_SWIPE_MAX_DISTANCE_PX = 56;
+const TOUCH_SWIPE_DISTANCE_RATIO = 0.08;
+const TOUCH_SWIPE_FLICK_MIN_DISTANCE_PX = 20;
+const TOUCH_SWIPE_FLICK_VELOCITY = 0.32;
 
 type ViewerTransform = {
   scale: number;
@@ -67,11 +75,23 @@ type PinchStart = {
   transform: ViewerTransform;
 };
 
-type OriginalLoadState = {
+type ViewerSourcePresentation = "direct" | "upgrade";
+
+type ViewerSourceStrategy = "viewport-upgrade" | "bounded-canvas" | "direct-original";
+
+type ViewerSourceState = {
   id: string;
   attempt: number;
   loaded: boolean;
   failed: boolean;
+  presentation: ViewerSourcePresentation;
+};
+
+type ViewerDisplayState = {
+  sourceLoaded: boolean;
+  thumbnailLoaded: boolean;
+  viewportBitmapRenderer: boolean;
+  nativeOriginalActive: boolean;
 };
 
 type ThumbnailLoadState = {
@@ -97,11 +117,24 @@ type ViewportSize = {
   height: number;
 };
 
+type GestureGeometry = {
+  surfaceWidth: number;
+  surfaceHeight: number;
+  mediaWidth: number;
+  mediaHeight: number;
+  surfaceBounds: DOMRect;
+};
+
 type GestureHandlers = {
   begin: (id: number, point: PointerPoint, pointerType: string) => void;
   move: (id: number, point: PointerPoint) => void;
   finish: (id: number, point: PointerPoint, pointerType: string) => void;
   cancel: () => void;
+};
+
+type IdleScheduler = Window & {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
 };
 
 const DEFAULT_TRANSFORM: ViewerTransform = { scale: 1, x: 0, y: 0 };
@@ -194,6 +227,76 @@ function viewportRenderDimensions(
   };
 }
 
+function selectViewerSourceStrategy(
+  image: GalleryImage,
+  renderSize: ViewportSize,
+  viewportBitmapsSupported: boolean,
+): ViewerSourceStrategy {
+  const sourceFitsViewport = image.width <= renderSize.width
+    && image.height <= renderSize.height;
+  if (viewportBitmapsSupported && !sourceFitsViewport) return "viewport-upgrade";
+  if (Math.max(image.width, image.height) > MAX_NATIVE_IMAGE_EDGE) return "bounded-canvas";
+  return "direct-original";
+}
+
+function isDirectOriginalReady(
+  image: GalleryImage,
+  strategy: ViewerSourceStrategy,
+  displayedSources: ReadonlySet<string>,
+): boolean {
+  return strategy === "direct-original" && (
+    displayedSources.has(viewerOriginalUrl(image))
+    || getViewerOriginalStatus(image) === "ready"
+  );
+}
+
+function initialViewerSourceState(id: string, ready: boolean): ViewerSourceState {
+  return {
+    id,
+    attempt: 0,
+    loaded: ready,
+    failed: false,
+    presentation: ready ? "direct" : "upgrade",
+  };
+}
+
+function pendingViewerSourceState(
+  id: string,
+  attempt: number,
+  failed = false,
+): ViewerSourceState {
+  return { id, attempt, loaded: false, failed, presentation: "upgrade" };
+}
+
+function resolveViewerDisplaySource({
+  sourceLoaded,
+  thumbnailLoaded,
+  viewportBitmapRenderer,
+  nativeOriginalActive,
+}: ViewerDisplayState): "original" | "viewport-bitmap" | "thumbnail" | "placeholder" {
+  if (nativeOriginalActive) return "original";
+  if (sourceLoaded) return viewportBitmapRenderer ? "viewport-bitmap" : "original";
+  return thumbnailLoaded ? "thumbnail" : "placeholder";
+}
+
+function drawViewerCanvas(
+  canvas: HTMLCanvasElement,
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+  sourceKey: string,
+): void {
+  const context = canvas.getContext("2d", { alpha: true });
+  if (!context) throw new Error("canvas renderer is unavailable");
+  canvas.width = width;
+  canvas.height = height;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.clearRect(0, 0, width, height);
+  context.drawImage(source, 0, 0, width, height);
+  canvas.dataset.renderedSource = sourceKey;
+}
+
 export function ImageViewer({
   images,
   activeIndex,
@@ -214,12 +317,17 @@ export function ImageViewer({
   const image = images[activeIndex]!;
   const viewport = useViewportSize();
   const compactViewport = viewport.width <= 720;
-  const useViewportBitmapRenderer = compactViewport && typeof createImageBitmap === "function";
-  const useSafeCanvasRenderer = !useViewportBitmapRenderer
-    && Math.max(image.width, image.height) > MAX_NATIVE_IMAGE_EDGE;
-  const useCanvasRenderer = useViewportBitmapRenderer || useSafeCanvasRenderer;
   const mediaDimensions = viewerMediaDimensions(image, viewport);
   const viewportRender = viewportRenderDimensions(image, viewport);
+  const viewportBitmapCapable = supportsViewerViewportBitmaps();
+  const sourceStrategy = selectViewerSourceStrategy(
+    image,
+    viewportRender,
+    viewportBitmapCapable,
+  );
+  const useViewportBitmapRenderer = sourceStrategy === "viewport-upgrade";
+  const useSafeCanvasRenderer = sourceStrategy === "bounded-canvas";
+  const useCanvasRenderer = sourceStrategy !== "direct-original";
   const canPrevious = activeIndex > 0;
   const canNext = activeIndex < images.length - 1 || hasMore;
   const waitingForNext = loadingMore && activeIndex === images.length - 1;
@@ -232,6 +340,7 @@ export function ImageViewer({
   const pointersRef = useRef(new Map<number, PointerPoint>());
   const gestureStartRef = useRef<GestureStart | null>(null);
   const pinchStartRef = useRef<PinchStart | null>(null);
+  const gestureGeometryRef = useRef<GestureGeometry | null>(null);
   const gestureAxisRef = useRef<"x" | "y" | null>(null);
   const gestureModeRef = useRef<GestureMode | null>(null);
   const pinchedRef = useRef(false);
@@ -239,10 +348,13 @@ export function ImageViewer({
   const lastTouchAtRef = useRef(0);
   const gestureHandlersRef = useRef<GestureHandlers | null>(null);
   const retryTimerRef = useRef(0);
+  const sourceUpgradeTimerRef = useRef(0);
   const scrollTopRef = useRef(0);
   const scrollPageRef = useRef<ViewerPage>("image");
   const wheelZoomBlockedUntilRef = useRef(0);
   const displayedOriginalsRef = useRef(new Set<string>());
+  const transformFrameRef = useRef(0);
+  const pendingTransformRef = useRef<ViewerTransform | null>(null);
   const swipeCleanupTimerRef = useRef(0);
   const swipeOutgoingRef = useRef<HTMLElement | null>(null);
   const preparedSwipeSnapshotRef = useRef<PreparedSwipeSnapshot | null>(null);
@@ -261,42 +373,23 @@ export function ImageViewer({
     loaded: getViewerThumbnailStatus(image) === "ready",
     failed: false,
   });
-  const initialOriginalSource = viewerOriginalUrl(image);
-  const initialOriginalReady = useViewportBitmapRenderer
-    ? getViewerViewportRenderStatus(
-      image,
-      viewportRender.width,
-      viewportRender.height,
-    ) === "ready"
-    : !useSafeCanvasRenderer && (
-      displayedOriginalsRef.current.has(initialOriginalSource)
-      || getViewerOriginalStatus(image) === "ready"
-    );
-  const [loadState, setLoadState] = useState<OriginalLoadState>({
-    id: image.id,
-    attempt: 0,
-    loaded: initialOriginalReady,
-    failed: false,
-  });
+  const directOriginalReady = isDirectOriginalReady(
+    image,
+    sourceStrategy,
+    displayedOriginalsRef.current,
+  );
+  const [loadState, setLoadState] = useState<ViewerSourceState>(
+    initialViewerSourceState(image.id, directOriginalReady),
+  );
   const [fullResolutionState, setFullResolutionState] = useState<FullResolutionState>({
     id: image.id,
     requested: false,
     loaded: false,
     failed: false,
   });
-  const fallbackOriginalReady = useViewportBitmapRenderer
-    ? getViewerViewportRenderStatus(
-      image,
-      viewportRender.width,
-      viewportRender.height,
-    ) === "ready"
-    : !useSafeCanvasRenderer && (
-      displayedOriginalsRef.current.has(initialOriginalSource)
-      || getViewerOriginalStatus(image) === "ready"
-    );
   const currentLoadState = loadState.id === image.id
     ? loadState
-    : { id: image.id, attempt: 0, loaded: fallbackOriginalReady, failed: false };
+    : initialViewerSourceState(image.id, directOriginalReady);
   const currentFullResolution = fullResolutionState.id === image.id
     ? fullResolutionState
     : { id: image.id, requested: false, loaded: false, failed: false };
@@ -306,8 +399,103 @@ export function ImageViewer({
   const thumbnailFailed = thumbnailState.id === image.id && thumbnailState.failed;
   const fullSource = viewerOriginalUrl(image, currentLoadState.attempt);
 
-  const commitTransform = (next: ViewerTransform) => {
+  const viewerIsBusy = (includeSwipe = true) => pointersRef.current.size > 0
+    || (includeSwipe && Boolean(dialogRef.current?.hasAttribute("data-swipe-direction")));
+
+  const markOriginalReady = (
+    imageId: string,
+    attempt: number,
+    presentation: ViewerSourcePresentation = "upgrade",
+  ) => {
+    window.clearTimeout(sourceUpgradeTimerRef.current);
+    const commit = () => {
+      sourceUpgradeTimerRef.current = 0;
+      if (dialogRef.current?.dataset.imageId !== imageId) return;
+      if (presentation === "upgrade" && viewerIsBusy()) {
+        sourceUpgradeTimerRef.current = window.setTimeout(commit, 48);
+        return;
+      }
+      setLoadState((current) => {
+        if (current.id === imageId && current.attempt !== attempt) return current;
+        if (
+          current.id === imageId
+          && current.loaded
+          && (current.presentation === "direct" || presentation === "upgrade")
+        ) return current;
+        return {
+          id: imageId,
+          attempt,
+          loaded: true,
+          failed: false,
+          presentation,
+        };
+      });
+    };
+    commit();
+  };
+
+  const applyTransformToDom = (next: ViewerTransform) => {
+    const media = mediaRef.current;
+    if (media) {
+      media.style.transform = `translate3d(${next.x}px, ${next.y}px, 0) scale(${next.scale})`;
+    }
+    const viewer = dialogRef.current;
+    if (!viewer) return;
+    const surfaceHeight = gestureGeometryRef.current?.surfaceHeight
+      ?? surfaceRef.current?.clientHeight
+      ?? 640;
+    const dismissProgress = next.scale === MIN_SCALE
+      ? clamp(Math.max(0, next.y) / Math.max(1, surfaceHeight), 0, 0.45)
+      : 0;
+    viewer.style.setProperty("--viewer-dismiss-progress", String(dismissProgress));
+    const zoomed = next.scale > MIN_SCALE;
+    viewer.dataset.zoomed = String(zoomed);
+    if (useViewportBitmapRenderer) {
+      const nativeActive = zoomed && viewer.dataset.nativeOriginalLoaded === "true";
+      viewer.dataset.nativeOriginalActive = String(nativeActive);
+      viewer.dataset.displaySource = resolveViewerDisplaySource({
+        sourceLoaded: viewer.dataset.fullLoaded === "true",
+        thumbnailLoaded: viewer.dataset.thumbnailLoaded === "true",
+        viewportBitmapRenderer: true,
+        nativeOriginalActive: nativeActive,
+      });
+    }
+  };
+
+  const cancelTransformFrame = () => {
+    if (transformFrameRef.current) {
+      window.cancelAnimationFrame(transformFrameRef.current);
+      transformFrameRef.current = 0;
+    }
+    pendingTransformRef.current = null;
+  };
+
+  const flushStagedTransform = () => {
+    if (transformFrameRef.current) {
+      window.cancelAnimationFrame(transformFrameRef.current);
+      transformFrameRef.current = 0;
+    }
+    const pending = pendingTransformRef.current;
+    pendingTransformRef.current = null;
+    if (pending) applyTransformToDom(pending);
+  };
+
+  const stageTransform = (next: ViewerTransform) => {
     transformRef.current = next;
+    pendingTransformRef.current = next;
+    if (transformFrameRef.current) return;
+    transformFrameRef.current = window.requestAnimationFrame(() => {
+      transformFrameRef.current = 0;
+      const pending = pendingTransformRef.current;
+      pendingTransformRef.current = null;
+      if (pending) applyTransformToDom(pending);
+    });
+  };
+
+  const commitTransform = (next: ViewerTransform) => {
+    cancelTransformFrame();
+    transformRef.current = next;
+    applyTransformToDom(next);
     setTransform(next);
   };
 
@@ -335,15 +523,27 @@ export function ImageViewer({
     syncScrollPage(viewer.scrollTop);
   };
 
-  const constrainTransform = (next: ViewerTransform): ViewerTransform => {
+  const constrainTransform = (
+    next: ViewerTransform,
+    geometry = gestureGeometryRef.current,
+  ): ViewerTransform => {
     const scale = clamp(next.scale, MIN_SCALE, MAX_SCALE);
     if (scale <= MIN_SCALE) return DEFAULT_TRANSFORM;
 
     const surface = surfaceRef.current;
     const media = mediaRef.current;
-    if (!surface || !media) return { scale, x: next.x, y: next.y };
-    const maximumX = Math.max(0, (media.offsetWidth * scale - surface.clientWidth) / 2);
-    const maximumY = Math.max(0, (media.offsetHeight * scale - surface.clientHeight) / 2);
+    const surfaceWidth = geometry?.surfaceWidth ?? surface?.clientWidth;
+    const surfaceHeight = geometry?.surfaceHeight ?? surface?.clientHeight;
+    const mediaWidth = geometry?.mediaWidth ?? media?.offsetWidth;
+    const mediaHeight = geometry?.mediaHeight ?? media?.offsetHeight;
+    if (
+      surfaceWidth === undefined
+      || surfaceHeight === undefined
+      || mediaWidth === undefined
+      || mediaHeight === undefined
+    ) return { scale, x: next.x, y: next.y };
+    const maximumX = Math.max(0, (mediaWidth * scale - surfaceWidth) / 2);
+    const maximumY = Math.max(0, (mediaHeight * scale - surfaceHeight) / 2);
     return {
       scale,
       x: clamp(next.x, -maximumX, maximumX),
@@ -531,9 +731,12 @@ export function ImageViewer({
 
   useLayoutEffect(() => {
     window.clearTimeout(retryTimerRef.current);
+    window.clearTimeout(sourceUpgradeTimerRef.current);
+    sourceUpgradeTimerRef.current = 0;
     pointersRef.current.clear();
     gestureStartRef.current = null;
     pinchStartRef.current = null;
+    gestureGeometryRef.current = null;
     gestureAxisRef.current = null;
     gestureModeRef.current = null;
     pinchedRef.current = false;
@@ -547,21 +750,12 @@ export function ImageViewer({
       loaded: getViewerThumbnailStatus(image) === "ready",
       failed: false,
     });
-    setLoadState({
-      id: image.id,
-      attempt: 0,
-      loaded: useViewportBitmapRenderer
-        ? getViewerViewportRenderStatus(
-          image,
-          viewportRender.width,
-          viewportRender.height,
-        ) === "ready"
-        : !useSafeCanvasRenderer && (
-          displayedOriginalsRef.current.has(viewerOriginalUrl(image))
-          || getViewerOriginalStatus(image) === "ready"
-        ),
-      failed: false,
-    });
+    const originalReady = isDirectOriginalReady(
+      image,
+      sourceStrategy,
+      displayedOriginalsRef.current,
+    );
+    setLoadState(initialViewerSourceState(image.id, originalReady));
     setFullResolutionState({
       id: image.id,
       requested: false,
@@ -570,8 +764,7 @@ export function ImageViewer({
     });
   }, [
     image.id,
-    useSafeCanvasRenderer,
-    useViewportBitmapRenderer,
+    sourceStrategy,
     viewportRender.height,
     viewportRender.width,
   ]);
@@ -768,25 +961,75 @@ export function ImageViewer({
   }, [canNext, canPrevious, onNavigate]);
 
   useEffect(() => {
-    prepareViewerImages(images, activeIndex);
-    if (!useViewportBitmapRenderer) return;
-    for (const offset of [0, 1, -1]) {
-      const candidate = images[activeIndex + offset];
-      if (!candidate) continue;
-      if (offset !== 0 && getViewerOriginalStatus(candidate) === "idle") continue;
-      const render = viewportRenderDimensions(candidate, viewport);
-      getViewerViewportRenderAsset(
-        candidate,
-        render.width,
-        render.height,
+    prepareViewerImages(images, activeIndex, {
+      preloadOriginals: !viewportBitmapCapable,
+    });
+    if (!viewportBitmapCapable) return;
+    let disposed = false;
+    let delayTimer = 0;
+    let idleHandle = 0;
+    const activeAsset = useViewportBitmapRenderer
+      ? getViewerViewportRenderAsset(
+        image,
+        viewportRender.width,
+        viewportRender.height,
         0,
-        offset === 0 ? "high" : "low",
-      );
-    }
+        "high",
+      )
+      : getViewerOriginalAsset(image, 0, "high");
+    const idleScheduler = window as IdleScheduler;
+    const preloadNeighbors = async () => {
+      if (disposed || !canPreloadViewerNeighbors()) return;
+      // Forward navigation is the common path. Prepare one neighbor at a time, using
+      // its original only when it is already no larger than the target render size.
+      for (const offset of [1, -1]) {
+        if (disposed) return;
+        const candidate = images[activeIndex + offset];
+        if (!candidate) continue;
+        const render = viewportRenderDimensions(candidate, viewport);
+        const strategy = selectViewerSourceStrategy(
+          candidate,
+          render,
+          viewportBitmapCapable,
+        );
+        const asset = strategy === "viewport-upgrade"
+          ? getViewerViewportRenderAsset(
+            candidate,
+            render.width,
+            render.height,
+            0,
+            "low",
+          )
+          : getViewerOriginalAsset(candidate, 0, "low");
+        if (asset.status === "loading") await asset.promise;
+      }
+    };
+    const scheduleNeighbors = () => {
+      if (disposed) return;
+      delayTimer = window.setTimeout(() => {
+        if (idleScheduler.requestIdleCallback) {
+          idleHandle = idleScheduler.requestIdleCallback(
+            () => void preloadNeighbors(),
+            { timeout: 600 },
+          );
+        } else {
+          void preloadNeighbors();
+        }
+      }, MOBILE_NEIGHBOR_PRELOAD_DELAY_MS);
+    };
+    if (activeAsset.status === "loading") void activeAsset.promise.then(scheduleNeighbors);
+    else scheduleNeighbors();
+    return () => {
+      disposed = true;
+      window.clearTimeout(delayTimer);
+      if (idleHandle) idleScheduler.cancelIdleCallback?.(idleHandle);
+    };
   }, [
     activeIndex,
+    image,
     images,
     useViewportBitmapRenderer,
+    viewportBitmapCapable,
     viewport.height,
     viewport.width,
   ]);
@@ -794,45 +1037,14 @@ export function ImageViewer({
   useEffect(() => {
     if (
       !useViewportBitmapRenderer
-      || !currentLoadState.loaded
       || currentFullResolution.requested
-      || dragging
+      || transform.scale <= MIN_SCALE
     ) return;
-    let disposed = false;
-    let delayTimer = 0;
-    let idleHandle = 0;
-    let frame = 0;
-    const requestUpgrade = () => {
-      if (disposed) return;
-      setFullResolutionState((current) => current.id === image.id
-        ? { ...current, requested: true, failed: false }
-        : { id: image.id, requested: true, loaded: false, failed: false });
-    };
-    const idleScheduler = window as unknown as {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    if (transform.scale > MIN_SCALE) {
-      frame = window.requestAnimationFrame(requestUpgrade);
-    } else {
-      delayTimer = window.setTimeout(() => {
-        if (idleScheduler.requestIdleCallback) {
-          idleHandle = idleScheduler.requestIdleCallback(requestUpgrade, { timeout: 360 });
-        } else {
-          frame = window.requestAnimationFrame(requestUpgrade);
-        }
-      }, MOBILE_ORIGINAL_UPGRADE_DELAY_MS);
-    }
-    return () => {
-      disposed = true;
-      window.clearTimeout(delayTimer);
-      if (frame) window.cancelAnimationFrame(frame);
-      if (idleHandle) idleScheduler.cancelIdleCallback?.(idleHandle);
-    };
+    setFullResolutionState((current) => current.id === image.id
+      ? { ...current, requested: true, failed: false }
+      : { id: image.id, requested: true, loaded: false, failed: false });
   }, [
     currentFullResolution.requested,
-    currentLoadState.loaded,
-    dragging,
     image.id,
     transform.scale,
     useViewportBitmapRenderer,
@@ -852,10 +1064,7 @@ export function ImageViewer({
       prepared = prepareSwipeSnapshot();
       if (prepared) preparedSwipeSnapshotRef.current = prepared;
     };
-    const idleScheduler = window as unknown as {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
+    const idleScheduler = window as IdleScheduler;
     if (idleScheduler.requestIdleCallback) {
       idleHandle = idleScheduler.requestIdleCallback(prepare, { timeout: 180 });
     } else {
@@ -879,41 +1088,74 @@ export function ImageViewer({
 
   useEffect(() => () => {
     window.clearTimeout(retryTimerRef.current);
+    window.clearTimeout(sourceUpgradeTimerRef.current);
     window.clearTimeout(swipeCleanupTimerRef.current);
+    cancelTransformFrame();
     swipeOutgoingRef.current?.remove();
     preparedSwipeSnapshotRef.current = null;
   }, []);
 
   const handleOriginalError = () => {
-    if (currentLoadState.attempt === 0) {
+    const { attempt } = currentLoadState;
+    if (dialogRef.current?.dataset.imageId !== image.id) return;
+    if (attempt === 0) {
       window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = window.setTimeout(() => {
-        setLoadState({ id: image.id, attempt: 1, loaded: false, failed: false });
+        if (dialogRef.current?.dataset.imageId !== image.id) return;
+        setLoadState((current) => current.id === image.id && current.attempt !== attempt
+          ? current
+          : pendingViewerSourceState(image.id, attempt + 1));
       }, 900);
       return;
     }
-    setLoadState({
-      id: image.id,
-      attempt: currentLoadState.attempt,
-      loaded: false,
-      failed: true,
-    });
+    setLoadState((current) => current.id === image.id && current.attempt !== attempt
+      ? current
+      : pendingViewerSourceState(image.id, attempt, true));
   };
 
   const retryOriginal = () => {
     window.clearTimeout(retryTimerRef.current);
-    setLoadState({
-      id: image.id,
-      attempt: currentLoadState.attempt + 1,
-      loaded: false,
-      failed: false,
-    });
+    setLoadState(pendingViewerSourceState(
+      image.id,
+      currentLoadState.attempt + 1,
+    ));
   };
 
   useLayoutEffect(() => {
+    if (
+      !useViewportBitmapRenderer
+      || viewerIsBusy()
+    ) return;
+    const asset = getReadyViewerViewportRenderAsset(
+      image,
+      viewportRender.width,
+      viewportRender.height,
+      currentLoadState.attempt,
+    );
+    const canvas = canvasRef.current;
+    if (!asset?.bitmap || !canvas) return;
+    const sourceKey = `${fullSource}@${asset.width}x${asset.height}`;
+    try {
+      if (canvas.dataset.renderedSource !== sourceKey) {
+        drawViewerCanvas(canvas, asset.bitmap, asset.width, asset.height, sourceKey);
+      }
+      markOriginalReady(image.id, currentLoadState.attempt, "direct");
+    } catch (error) {
+      console.warn("Pixhelf could not reuse the prepared viewer image", error);
+    }
+  }, [
+    fullSource,
+    image.id,
+    useViewportBitmapRenderer,
+    viewportRender.height,
+    viewportRender.width,
+  ]);
+
+  useEffect(() => {
     if (!useCanvasRenderer) return;
     let disposed = false;
     let frame = 0;
+    let settleTimer = 0;
     const attempt = currentLoadState.attempt;
     const viewportAsset = useViewportBitmapRenderer
       ? getViewerViewportRenderAsset(
@@ -945,22 +1187,14 @@ export function ImageViewer({
           ?? Math.max(1, Math.round(image.height * renderScale));
         const source = viewportAsset?.bitmap ?? originalAsset?.element;
         const canvas = canvasRef.current;
-        const context = canvas?.getContext("2d", { alpha: true });
-        if (!canvas || !context || !source) throw new Error("canvas renderer is unavailable");
-        canvas.width = renderWidth;
-        canvas.height = renderHeight;
-        context.imageSmoothingEnabled = true;
-        context.imageSmoothingQuality = "high";
-        context.clearRect(0, 0, renderWidth, renderHeight);
-        context.drawImage(source, 0, 0, renderWidth, renderHeight);
+        if (!canvas || !source) throw new Error("canvas renderer is unavailable");
+        const sourceKey = `${fullSource}@${renderWidth}x${renderHeight}`;
+        if (canvas.dataset.renderedSource !== sourceKey) {
+          drawViewerCanvas(canvas, source, renderWidth, renderHeight, sourceKey);
+        }
 
         window.clearTimeout(retryTimerRef.current);
-        setLoadState({
-          id: image.id,
-          attempt,
-          loaded: true,
-          failed: false,
-        });
+        markOriginalReady(image.id, attempt);
       } catch (error) {
         if (disposed) return;
         console.warn("Pixhelf could not render the original image", error);
@@ -969,20 +1203,33 @@ export function ImageViewer({
     };
 
     const scheduleRender = () => {
-      if (disposed || frame) return;
+      if (disposed || frame || settleTimer) return;
+      const swipeInProgress = useViewportBitmapRenderer
+        && dialogRef.current?.hasAttribute("data-swipe-direction");
+      if (viewerIsBusy(useViewportBitmapRenderer)) {
+        settleTimer = window.setTimeout(() => {
+          settleTimer = 0;
+          scheduleRender();
+        }, swipeInProgress ? MOBILE_RENDER_SETTLE_MS : 48);
+        return;
+      }
       frame = window.requestAnimationFrame(() => {
         frame = 0;
+        if (viewerIsBusy(useViewportBitmapRenderer)) {
+          scheduleRender();
+          return;
+        }
         renderOriginal();
       });
     };
 
-    if (viewportAsset?.status === "ready") renderOriginal();
-    else scheduleRender();
+    scheduleRender();
     const pending = viewportAsset ?? originalAsset;
     if (pending?.status === "loading") void pending.promise.then(scheduleRender);
     return () => {
       disposed = true;
       if (frame) window.cancelAnimationFrame(frame);
+      window.clearTimeout(settleTimer);
     };
   }, [
     fullSource,
@@ -999,6 +1246,19 @@ export function ImageViewer({
   const beginContact = (id: number, point: PointerPoint, pointerType: string) => {
     if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
     if (pointerType !== "mouse" && pointersRef.current.size === 0) clearSwipeMotion();
+    if (pointersRef.current.size === 0) {
+      const surface = surfaceRef.current;
+      const media = mediaRef.current;
+      if (surface && media) {
+        gestureGeometryRef.current = {
+          surfaceWidth: surface.clientWidth,
+          surfaceHeight: surface.clientHeight,
+          mediaWidth: media.offsetWidth,
+          mediaHeight: media.offsetHeight,
+          surfaceBounds: surface.getBoundingClientRect(),
+        };
+      }
+    }
     pointersRef.current.set(id, point);
     setDragging(true);
 
@@ -1042,9 +1302,9 @@ export function ImageViewer({
         MIN_SCALE,
         MAX_SCALE,
       );
-      const surface = surfaceRef.current;
-      if (!surface) return;
-      const bounds = surface.getBoundingClientRect();
+      const bounds = gestureGeometryRef.current?.surfaceBounds
+        ?? surfaceRef.current?.getBoundingClientRect();
+      if (!bounds) return;
       const center = {
         x: bounds.left + bounds.width / 2,
         y: bounds.top + bounds.height / 2,
@@ -1053,7 +1313,7 @@ export function ImageViewer({
         x: (start.midpoint.x - center.x - start.transform.x) / start.transform.scale,
         y: (start.midpoint.y - center.y - start.transform.y) / start.transform.scale,
       };
-      commitTransform(constrainTransform({
+      stageTransform(constrainTransform({
         scale,
         x: midpoint.x - center.x - imagePoint.x * scale,
         y: midpoint.y - center.y - imagePoint.y * scale,
@@ -1081,7 +1341,7 @@ export function ImageViewer({
 
     if (gestureModeRef.current === "pan") {
       forceViewerScroll(0);
-      commitTransform(constrainTransform({
+      stageTransform(constrainTransform({
         ...start.transform,
         x: start.transform.x + deltaX,
         y: start.transform.y + deltaY,
@@ -1092,8 +1352,11 @@ export function ImageViewer({
     const surface = surfaceRef.current;
     if (gestureModeRef.current === "navigate") {
       const navigationAvailable = deltaX < 0 ? canNext : deltaX > 0 && canPrevious;
-      const maximumTravel = Math.max(1, (surface?.clientWidth ?? 360) * 0.94);
-      commitTransform({
+      const maximumTravel = Math.max(
+        1,
+        (gestureGeometryRef.current?.surfaceWidth ?? surface?.clientWidth ?? 360) * 0.94,
+      );
+      stageTransform({
         scale: 1,
         x: navigationAvailable
           ? clamp(deltaX * 0.92, -maximumTravel, maximumTravel)
@@ -1107,14 +1370,20 @@ export function ImageViewer({
         viewer.scrollTop = clamp(start.scrollTop - deltaY, 0, detailsTop);
         scrollTopRef.current = viewer.scrollTop;
         syncScrollPage(viewer.scrollTop);
-        if (transformRef.current.x || transformRef.current.y) commitTransform(DEFAULT_TRANSFORM);
+        if (transformRef.current.x || transformRef.current.y) stageTransform(DEFAULT_TRANSFORM);
         return;
       }
     } else if (gestureModeRef.current === "dismiss") {
-      commitTransform({
+      stageTransform({
         scale: 1,
         x: 0,
-        y: rubberBand(Math.max(0, deltaY), Math.max(80, (surface?.clientHeight ?? 640) * 0.2)),
+        y: rubberBand(
+          Math.max(0, deltaY),
+          Math.max(
+            80,
+            (gestureGeometryRef.current?.surfaceHeight ?? surface?.clientHeight ?? 640) * 0.2,
+          ),
+        ),
       });
     }
   };
@@ -1142,6 +1411,7 @@ export function ImageViewer({
     point: PointerPoint,
     pointerType: string,
   ) => {
+    flushStagedTransform();
     const pointerCount = pointersRef.current.size;
     pointersRef.current.delete(id);
 
@@ -1176,12 +1446,17 @@ export function ImageViewer({
       if (currentScroll > VIEWER_SCROLL_EPSILON && detailsTop > 0) {
         if (currentScroll >= detailsTop * 0.18) scrollToDetails();
         else scrollToImage();
+        gestureGeometryRef.current = null;
         return;
       }
       commitTransform(constrainTransform(transformRef.current));
+      gestureGeometryRef.current = null;
       return;
     }
-    if (!start) return;
+    if (!start) {
+      gestureGeometryRef.current = null;
+      return;
+    }
 
     const deltaX = point.x - start.point.x;
     const deltaY = point.y - start.point.y;
@@ -1191,30 +1466,52 @@ export function ImageViewer({
     if (start.transform.scale > MIN_SCALE) {
       if (isTap && start.pointerType !== "mouse") {
         handleTouchTap(point);
+        gestureGeometryRef.current = null;
         return;
       }
       commitTransform(constrainTransform(transformRef.current));
+      gestureGeometryRef.current = null;
       return;
     }
 
     const surface = surfaceRef.current;
-    const horizontalThreshold = Math.max(54, (surface?.clientWidth ?? 360) * 0.11);
-    const horizontalFlick = Math.abs(deltaX) > 30 && Math.abs(deltaX) / elapsed > 0.48;
-    const verticalThreshold = Math.max(84, (surface?.clientHeight ?? 640) * 0.12);
+    const surfaceWidth = gestureGeometryRef.current?.surfaceWidth
+      ?? surface?.clientWidth
+      ?? 360;
+    const isTouchSwipe = start.pointerType === "touch";
+    const horizontalDistance = Math.abs(deltaX);
+    const horizontalThreshold = isTouchSwipe
+      ? clamp(
+        surfaceWidth * TOUCH_SWIPE_DISTANCE_RATIO,
+        TOUCH_SWIPE_MIN_DISTANCE_PX,
+        TOUCH_SWIPE_MAX_DISTANCE_PX,
+      )
+      : Math.max(54, surfaceWidth * 0.11);
+    const horizontalFlick = horizontalDistance > (
+      isTouchSwipe ? TOUCH_SWIPE_FLICK_MIN_DISTANCE_PX : 30
+    ) && horizontalDistance / elapsed > (
+      isTouchSwipe ? TOUCH_SWIPE_FLICK_VELOCITY : 0.48
+    );
+    const verticalThreshold = Math.max(
+      84,
+      (gestureGeometryRef.current?.surfaceHeight ?? surface?.clientHeight ?? 640) * 0.12,
+    );
     const verticalFlick = deltaY > 38 && deltaY / elapsed > 0.52;
     const detailsFlick = deltaY < -38 && -deltaY / elapsed > 0.52;
 
     if (
       gestureMode === "navigate" &&
-      Math.abs(deltaX) > Math.abs(deltaY) &&
-      (Math.abs(deltaX) >= horizontalThreshold || horizontalFlick)
+      horizontalDistance > Math.abs(deltaY) &&
+      (horizontalDistance >= horizontalThreshold || horizontalFlick)
     ) {
       if (deltaX < 0 && canNext) {
         navigateWithSwipeMotion(1);
+        gestureGeometryRef.current = null;
         return;
       }
       if (deltaX > 0 && canPrevious) {
         navigateWithSwipeMotion(-1);
+        gestureGeometryRef.current = null;
         return;
       }
     }
@@ -1227,6 +1524,7 @@ export function ImageViewer({
       } else {
         scrollToImage();
       }
+      gestureGeometryRef.current = null;
       return;
     }
     if (
@@ -1235,6 +1533,7 @@ export function ImageViewer({
       (deltaY >= verticalThreshold || verticalFlick)
     ) {
       onClose();
+      gestureGeometryRef.current = null;
       return;
     }
 
@@ -1242,9 +1541,11 @@ export function ImageViewer({
     if (isTap && start.pointerType !== "mouse") {
       handleTouchTap(point);
     }
+    gestureGeometryRef.current = null;
   };
 
   const cancelContacts = () => {
+    flushStagedTransform();
     pointersRef.current.clear();
     gestureStartRef.current = null;
     pinchStartRef.current = null;
@@ -1260,9 +1561,11 @@ export function ImageViewer({
       } else {
         scrollToImage();
       }
+      gestureGeometryRef.current = null;
       return;
     }
     commitTransform(constrainTransform(transformRef.current));
+    gestureGeometryRef.current = null;
   };
 
   const beginPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
@@ -1405,10 +1708,16 @@ export function ImageViewer({
   };
 
   const displayPosition = Math.min(total, activeIndex + 1);
+  const liveTransform = transformRef.current;
   const viewerStyle = {
     "--viewer-dismiss-progress": String(
-      transform.scale === 1
-        ? clamp(Math.max(0, transform.y) / Math.max(1, surfaceRef.current?.clientHeight ?? 640), 0, 0.45)
+      liveTransform.scale === 1
+        ? clamp(
+          Math.max(0, liveTransform.y)
+            / Math.max(1, gestureGeometryRef.current?.surfaceHeight ?? surfaceRef.current?.clientHeight ?? 640),
+          0,
+          0.45,
+        )
         : 0,
     ),
   } as CSSProperties;
@@ -1423,11 +1732,24 @@ export function ImageViewer({
       ? "横向"
       : "竖向";
   const megapixels = image.width * image.height / 1_000_000;
+  const nativeOriginalActive = currentFullResolution.loaded
+    && liveTransform.scale > MIN_SCALE;
+  const displaySource = resolveViewerDisplaySource({
+    sourceLoaded: currentLoadState.loaded,
+    thumbnailLoaded,
+    viewportBitmapRenderer: useViewportBitmapRenderer,
+    nativeOriginalActive,
+  });
+  const renderer = sourceStrategy === "viewport-upgrade"
+    ? "viewport-bitmap"
+    : sourceStrategy === "bounded-canvas"
+      ? "safe-canvas"
+      : "native";
   const mediaStyle = {
     width: `${mediaWidth}px`,
     height: `${mediaHeight}px`,
     aspectRatio: `${image.width} / ${image.height}`,
-    transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
+    transform: `translate3d(${liveTransform.x}px, ${liveTransform.y}px, 0) scale(${liveTransform.scale})`,
   } as CSSProperties;
   const viewer = (
     <div
@@ -1440,33 +1762,24 @@ export function ImageViewer({
       data-image-name={image.name}
       data-full-loaded={currentLoadState.loaded}
       data-full-failed={currentLoadState.failed}
+      data-source-presentation={currentLoadState.presentation}
+      data-source-strategy={sourceStrategy}
       data-thumbnail-loaded={thumbnailLoaded}
       data-thumbnail-failed={thumbnailFailed}
-      data-display-source={currentLoadState.loaded
-        ? !useViewportBitmapRenderer
-          || currentFullResolution.loaded && transform.scale > MIN_SCALE
-          ? "original"
-          : "viewport-bitmap"
-        : thumbnailLoaded
-          ? "thumbnail"
-          : "placeholder"}
+      data-display-source={displaySource}
       data-native-original-requested={currentFullResolution.requested}
       data-native-original-loaded={currentFullResolution.loaded}
-      data-native-original-active={
-        currentFullResolution.loaded && transform.scale > MIN_SCALE
-      }
-      data-zoomed={transform.scale > MIN_SCALE}
+      data-native-original-active={nativeOriginalActive}
+      data-zoomed={liveTransform.scale > MIN_SCALE}
       data-dragging={dragging}
       data-page={scrollPage}
-      data-renderer={useViewportBitmapRenderer
-        ? "viewport-bitmap"
-        : useSafeCanvasRenderer
-          ? "safe-canvas"
-          : "native"}
+      data-renderer={renderer}
       data-control-system="unified"
       data-scroll-mode="continuous"
       data-mouse-side-navigation="true"
       data-mobile-swipe-motion="interruptible"
+      data-mobile-gesture-renderer="raf-dom"
+      data-mobile-original-policy={useViewportBitmapRenderer ? "zoom-only" : "direct"}
       tabIndex={-1}
       onScroll={handleViewerScroll}
       style={viewerStyle}
@@ -1572,14 +1885,15 @@ export function ImageViewer({
                 decoding="async"
                 fetchPriority="high"
                 draggable={false}
-                onLoad={() => {
+                onLoad={(event) => {
+                  const original = event.currentTarget;
                   window.clearTimeout(retryTimerRef.current);
-                  displayedOriginalsRef.current.add(fullSource);
-                  setLoadState({
-                    id: image.id,
-                    attempt: currentLoadState.attempt,
-                    loaded: true,
-                    failed: false,
+                  const decoded = typeof original.decode === "function"
+                    ? original.decode().catch(() => undefined)
+                    : Promise.resolve();
+                  void decoded.then(() => {
+                    displayedOriginalsRef.current.add(fullSource);
+                    markOriginalReady(image.id, currentLoadState.attempt);
                   });
                 }}
                 onError={handleOriginalError}

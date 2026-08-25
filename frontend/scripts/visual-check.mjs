@@ -353,12 +353,6 @@ try {
     await page.waitForFunction(() =>
       document.querySelector(".image-viewer")?.getAttribute("data-full-loaded") === "true"
     , undefined, { timeout: 60_000 });
-    if (target.name === "mobile") {
-      await page.waitForFunction(() =>
-        document.querySelector(".image-viewer")
-          ?.getAttribute("data-native-original-loaded") === "true"
-      , undefined, { timeout: 60_000 });
-    }
     await page.waitForFunction(() => {
       const originalPaths = performance.getEntriesByType("resource")
         .map((entry) => new URL(entry.name).pathname)
@@ -370,11 +364,15 @@ try {
     await page.screenshot({ path: `/tmp/pixhelf-viewer-${target.name}.png` });
     const viewer = await page.evaluate(() => {
       const overlay = document.querySelector(".image-viewer");
+      const thumbnail = document.querySelector(".viewer-thumbnail");
       const original = document.querySelector(".viewer-original");
       const nativeOriginal = document.querySelector(".viewer-native-original");
-      const media = document.querySelector(".viewer-media")?.getBoundingClientRect();
+      const mediaElement = document.querySelector(".viewer-media");
+      const media = mediaElement?.getBoundingClientRect();
       const stage = document.querySelector(".viewer-stage")?.getBoundingClientRect();
       const details = document.querySelector(".viewer-details-page")?.getBoundingClientRect();
+      const thumbnailStyle = thumbnail ? getComputedStyle(thumbnail) : null;
+      const originalStyle = original ? getComputedStyle(original) : null;
       const resourcePaths = performance.getEntriesByType("resource")
         .map((entry) => new URL(entry.name).pathname);
       const originalSource = original instanceof HTMLImageElement
@@ -396,11 +394,17 @@ try {
         nativeOriginalVisible: nativeOriginal
           ? Number.parseFloat(getComputedStyle(nativeOriginal).opacity)
           : 0,
-        mediaWillChange: document.querySelector(".viewer-media")
-          ? getComputedStyle(document.querySelector(".viewer-media")).willChange
-          : "",
+        mediaWillChange: mediaElement ? getComputedStyle(mediaElement).willChange : "",
         originalPath: originalSource ? new URL(originalSource, location.href).pathname : "",
         renderer: overlay?.getAttribute("data-renderer"),
+        sourceStrategy: overlay?.getAttribute("data-source-strategy") ?? "",
+        sourcePresentation: overlay?.getAttribute("data-source-presentation") ?? "",
+        thumbnailFilter: thumbnailStyle?.filter ?? "",
+        thumbnailTransform: thumbnailStyle?.transform ?? "",
+        thumbnailTransitionDelay: thumbnailStyle?.transitionDelay ?? "",
+        originalTransitionDuration: originalStyle?.transitionDuration ?? "",
+        gestureRenderer: overlay?.getAttribute("data-mobile-gesture-renderer") ?? "",
+        originalPolicy: overlay?.getAttribute("data-mobile-original-policy") ?? "",
         scrollMode: overlay?.getAttribute("data-scroll-mode"),
         renderedPixels: original instanceof HTMLCanvasElement
           ? [original.width, original.height]
@@ -473,17 +477,28 @@ try {
     await page.waitForFunction((imageId) =>
       document.querySelector(".image-viewer")?.getAttribute("data-image-id") === imageId
     , sideButtonStart.activeId);
-    const sideButtonNavigation = await page.evaluate(({ start, forward, back }) => ({
-      forward,
-      back,
-      returnedId: document.querySelector(".image-viewer")?.getAttribute("data-image-id") ?? "",
-      enabled: document.querySelector(".image-viewer")
-        ?.getAttribute("data-mouse-side-navigation") === "true",
-      historyPreserved: history.length === start.historyLength && location.href === start.href,
-    }), { start: sideButtonStart, forward: sideForwardEvents, back: sideBackEvents });
+    await page.evaluate(() => new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    ));
+    const sideButtonNavigation = await page.evaluate(({ start, forward, back }) => {
+      const overlay = document.querySelector(".image-viewer");
+      return {
+        forward,
+        back,
+        returnedId: overlay?.getAttribute("data-image-id") ?? "",
+        returnedSource: overlay?.getAttribute("data-display-source") ?? "",
+        returnedPresentation: overlay?.getAttribute("data-source-presentation") ?? "",
+        returnedLoaded: overlay?.getAttribute("data-full-loaded") ?? "false",
+        enabled: overlay?.getAttribute("data-mouse-side-navigation") === "true",
+        historyPreserved: history.length === start.historyLength && location.href === start.href,
+      };
+    }, { start: sideButtonStart, forward: sideForwardEvents, back: sideBackEvents });
     if (
       !sideButtonStart.nextId ||
       sideButtonNavigation.returnedId !== sideButtonStart.activeId ||
+      sideButtonNavigation.returnedPresentation !== "direct" ||
+      sideButtonNavigation.returnedLoaded !== "true" ||
+      !["original", "viewport-bitmap"].includes(sideButtonNavigation.returnedSource) ||
       !sideButtonNavigation.enabled ||
       !sideButtonNavigation.historyPreserved ||
       !Object.values(sideButtonNavigation.forward).every(Boolean) ||
@@ -531,9 +546,9 @@ try {
       switchPerformance.currentId !== switchPerformance.expectedId ||
       switchPerformance.dispatchDuration > 80 ||
       switchPerformance.firstFrameDuration > 100 ||
-      switchPerformance.firstFrameSource !== (
-        target.name === "mobile" ? "viewport-bitmap" : "original"
-      ) ||
+      (target.name === "mobile"
+        ? !["thumbnail", "viewport-bitmap"].includes(switchPerformance.firstFrameSource)
+        : switchPerformance.firstFrameSource !== "original") ||
       !switchPerformance.focusedOnViewer ||
       switchPerformance.visibleControlFocusRings !== 0 ||
       switchPerformance.mediaAnimations !== 0
@@ -591,12 +606,6 @@ try {
     await page.waitForFunction(() =>
       document.querySelector(".image-viewer")?.getAttribute("data-full-loaded") === "true"
     , undefined, { timeout: 60_000 });
-    if (target.name === "mobile") {
-      await page.waitForFunction(() =>
-        document.querySelector(".image-viewer")
-          ?.getAttribute("data-native-original-loaded") === "true"
-      , undefined, { timeout: 60_000 });
-    }
     rapidSwitch.upgradedSource = await page.locator(".image-viewer").getAttribute("data-display-source");
     Object.assign(viewer, { rapidSwitch });
     if (
@@ -833,6 +842,28 @@ try {
           && !document.querySelector(".image-viewer")?.hasAttribute("data-swipe-direction")
       );
       viewer.swipeMotionCleaned = true;
+
+      const shortSwipeStartName = await page.locator(".image-viewer")
+        .getAttribute("data-image-name");
+      await dispatchTouch("touchStart", [{ id: 32, x: 240, y: 420 }]);
+      await page.waitForTimeout(100);
+      await dispatchTouch("touchMove", [{ id: 32, x: 200, y: 420 }]);
+      await page.waitForTimeout(100);
+      await dispatchTouch("touchEnd", []);
+      await page.waitForFunction((title) =>
+        document.querySelector(".image-viewer")?.getAttribute("data-image-name") !== title
+      , shortSwipeStartName);
+      const shortSwipeEndName = await page.locator(".image-viewer")
+        .getAttribute("data-image-name");
+      viewer.shortSwipeNavigation = {
+        distance: 40,
+        changed: shortSwipeEndName !== shortSwipeStartName,
+        imageName: shortSwipeEndName,
+      };
+      await page.waitForFunction(() =>
+        !document.querySelector(".viewer-swipe-outgoing")
+          && !document.querySelector(".image-viewer")?.hasAttribute("data-swipe-direction")
+      );
 
       await dispatchTouch("touchStart", [{ id: 35, x: 195, y: 500 }]);
       await page.waitForTimeout(32);
@@ -1546,6 +1577,15 @@ try {
       viewer.fullLoaded !== "true" ||
       !viewer.originalPath.endsWith("/original") ||
       !["native", "safe-canvas", "viewport-bitmap"].includes(viewer.renderer) ||
+      viewer.sourceStrategy !== (
+        target.name === "mobile" ? "viewport-upgrade" : "direct-original"
+      ) ||
+      viewer.thumbnailFilter !== "none" ||
+      viewer.thumbnailTransform !== "none" ||
+      (viewer.sourcePresentation === "upgrade" && (
+        Number.parseFloat(viewer.thumbnailTransitionDelay) < .15 ||
+        Number.parseFloat(viewer.originalTransitionDuration) < .15
+      )) ||
       viewer.renderedPixels.some((size) => size <= 0) ||
       (viewer.renderer === "safe-canvas" && viewer.renderedPixels.some((size) => size > 4096)) ||
       (viewer.renderer === "viewport-bitmap" && viewer.renderedPixels.some((size) => size > 2048)) ||
@@ -1582,9 +1622,9 @@ try {
       viewer.keyboardFocus.visibleControlFocusRings !== 0 ||
       !viewer.switchPerformance?.focusedOnViewer ||
       viewer.switchPerformance.visibleControlFocusRings !== 0 ||
-      viewer.switchPerformance.firstFrameSource !== (
-        target.name === "mobile" ? "viewport-bitmap" : "original"
-      ) ||
+      (target.name === "mobile"
+        ? !["thumbnail", "viewport-bitmap"].includes(viewer.switchPerformance.firstFrameSource)
+        : viewer.switchPerformance.firstFrameSource !== "original") ||
       viewer.switchPerformance.mediaAnimations !== 0 ||
       viewer.switchPerformance.dispatchDuration > 80 ||
       viewer.switchPerformance.firstFrameDuration > 100 ||
@@ -1606,13 +1646,15 @@ try {
         !viewer.returnWheelHandoffLocked
       )) ||
       (target.name === "mobile" && (
-        viewer.nativeOriginalLoaded !== "true" ||
+        viewer.nativeOriginalLoaded !== "false" ||
         viewer.nativeOriginalActive !== "false" ||
-        viewer.nativeOriginalCount !== 1 ||
-        !viewer.nativeOriginalPath.endsWith("/original") ||
+        viewer.nativeOriginalCount !== 0 ||
+        viewer.nativeOriginalPath !== "" ||
         viewer.nativeOriginalVisible > .01 ||
-        viewer.nativeOriginalPixels.some((size, index) => size <= viewer.renderedPixels[index]) ||
+        viewer.nativeOriginalPixels.some((size) => size !== 0) ||
         viewer.displaySource !== "viewport-bitmap" ||
+        viewer.gestureRenderer !== "raf-dom" ||
+        viewer.originalPolicy !== "zoom-only" ||
         viewer.mediaWillChange !== "auto" ||
         !viewer.pinchZoomed ||
         viewer.pinchScale < 1.5 ||
@@ -1628,6 +1670,8 @@ try {
         viewer.nativeOriginalAfterReset.settledWillChange !== "auto" ||
         !viewer.swipeNavigation ||
         viewer.swipeNavigation === viewer.keyboardNavigation ||
+        !viewer.shortSwipeNavigation?.changed ||
+        viewer.shortSwipeNavigation.distance !== 40 ||
         viewer.swipeDragTracking > -190 ||
         viewer.swipeDragTracking < -225 ||
         viewer.swipeDragWillChange !== "transform" ||
@@ -1644,7 +1688,7 @@ try {
         !viewer.detailsFollowedTouch ||
         !viewer.detailsReachedBySwipe ||
         viewer.pageAfterDetails !== "details" ||
-        viewer.detailsName !== viewer.swipeNavigation ||
+        viewer.detailsName !== viewer.shortSwipeNavigation.imageName ||
         viewer.detailsHeading !== "图片详情" ||
         !viewer.stageScrolledAway ||
         !viewer.detailsVisible ||

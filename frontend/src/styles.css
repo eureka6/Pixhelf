@@ -1144,9 +1144,9 @@ select:focus-visible,
 }
 
 .viewer-thumbnail {
-  filter: saturate(.88) brightness(.84) blur(.35px);
-  transform: scale(1.002);
-  transition: filter 160ms ease, opacity 140ms ease;
+  filter: none;
+  transform: none;
+  transition: none;
 }
 
 .viewer-original {
@@ -1157,7 +1157,7 @@ select:focus-visible,
   max-width: none !important;
   max-height: none !important;
   opacity: 0;
-  transition: opacity 140ms ease;
+  transition: opacity 160ms ease-out;
 }
 
 .viewer-original-canvas { object-fit: fill; }
@@ -1175,10 +1175,19 @@ select:focus-visible,
 
 .image-viewer[data-full-loaded="true"] .viewer-original { opacity: 1; }
 
-.image-viewer[data-full-loaded="true"] .viewer-thumbnail { opacity: 0; }
+.image-viewer[data-source-presentation="direct"]
+  .viewer-original:not(.viewer-native-original) {
+  transition: none;
+}
 
-.image-viewer[data-full-failed="true"] .viewer-thumbnail {
-  filter: saturate(.92) brightness(.9);
+.image-viewer[data-full-loaded="true"] .viewer-thumbnail {
+  opacity: 0;
+  transition: opacity 0s linear 160ms;
+}
+
+.image-viewer[data-source-presentation="direct"][data-full-loaded="true"]
+  .viewer-thumbnail {
+  transition: none;
 }
 
 .viewer-nav {
