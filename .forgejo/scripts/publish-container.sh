@@ -5,7 +5,8 @@ set -euo pipefail
 : "${RELEASE_TAG:?RELEASE_TAG is required}"
 : "${IMAGE_REPOSITORY:?IMAGE_REPOSITORY is required}"
 
-CRANE_BIN="${CRANE_BIN:-crane}"
+SKOPEO_BIN="${SKOPEO_BIN:-skopeo}"
+UMOCI_BIN="${UMOCI_BIN:-umoci}"
 ALPINE_IMAGE="${ALPINE_IMAGE:-docker.io/library/alpine:latest}"
 DIST_DIR="${DIST_DIR:-dist}"
 SOURCE_URL="${SOURCE_URL:-}"
@@ -33,23 +34,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-crane_args=()
-if [ "${CRANE_INSECURE:-0}" = 1 ]; then
-  crane_args+=(--insecure)
-fi
-crane() {
-  "$CRANE_BIN" "${crane_args[@]}" "$@"
-}
-
 created="$(date --utc --date="@$SOURCE_DATE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')"
-platform_digest=''
 
 build_platform() {
   local arch="$1"
   local binary="$2"
   local root="$work_dir/root-$arch"
   local layer="$work_dir/pixhelf-$arch.tar"
-  local platform_ref="$IMAGE_REPOSITORY:$version-$arch"
+  local layout="$work_dir/oci-$arch"
 
   test -x "$binary"
   install -d -m 0755 "$root/usr/local/bin" "$root/gallery"
@@ -66,58 +58,125 @@ build_platform() {
     -cf "$layer" \
     cache gallery usr
 
-  crane append \
-    --platform "linux/$arch" \
-    --base "$ALPINE_IMAGE" \
-    --new_layer "$layer" \
-    --new_tag "$platform_ref" \
-    --set-base-image-annotations
+  "$SKOPEO_BIN" copy \
+    --override-os linux \
+    --override-arch "$arch" \
+    "docker://$ALPINE_IMAGE" \
+    "oci:$layout:base"
+  "$UMOCI_BIN" raw add-layer \
+    --image "$layout:base" \
+    --history.created "$created" \
+    --history.created_by "pixhelf release $RELEASE_TAG" \
+    "$layer"
+  "$UMOCI_BIN" config \
+    --image "$layout:base" \
+    --created "$created" \
+    --os linux \
+    --architecture "$arch" \
+    --config.user=65532:65532 \
+    --config.entrypoint=/usr/local/bin/pixhelf \
+    --config.cmd=--gallery-dir \
+    --config.cmd=/gallery \
+    --config.cmd=--cache-dir \
+    --config.cmd=/cache \
+    --config.cmd=--listen \
+    --config.cmd=0.0.0.0:3002 \
+    --config.workingdir=/ \
+    --config.exposedports=3002/tcp \
+    --config.stopsignal=SIGTERM \
+    --config.label=org.opencontainers.image.title=Pixhelf \
+    --config.label="org.opencontainers.image.description=Self-hosted image gallery" \
+    --config.label="org.opencontainers.image.version=$version" \
+    --config.label="org.opencontainers.image.revision=$REVISION" \
+    --config.label="org.opencontainers.image.created=$created" \
+    --config.label="org.opencontainers.image.source=$SOURCE_URL"
 
-  crane mutate "$platform_ref" \
-    --platform "linux/$arch" \
-    --set-platform "linux/$arch" \
-    --entrypoint=/usr/local/bin/pixhelf \
-    --cmd=--gallery-dir \
-    --cmd=/gallery \
-    --cmd=--cache-dir \
-    --cmd=/cache \
-    --cmd=--listen \
-    --cmd=0.0.0.0:3002 \
-    --user=65532:65532 \
-    --workdir=/ \
-    --exposed-ports=3002/tcp \
-    --label=org.opencontainers.image.title=Pixhelf \
-    --label="org.opencontainers.image.description=Self-hosted image gallery" \
-    --label="org.opencontainers.image.version=$version" \
-    --label="org.opencontainers.image.revision=$REVISION" \
-    --label="org.opencontainers.image.created=$created" \
-    --label="org.opencontainers.image.source=$SOURCE_URL" \
-    --tag "$platform_ref"
-
-  platform_digest="$(crane digest "$platform_ref")"
-  echo "Published linux/$arch as $platform_ref@$platform_digest"
+  echo "Built linux/$arch OCI image from $ALPINE_IMAGE"
 }
 
 build_platform amd64 "$DIST_DIR/pixhelf-amd64-linux"
-amd64_digest="$platform_digest"
 build_platform arm64 "$DIST_DIR/pixhelf-arm64-linux"
-arm64_digest="$platform_digest"
+
+combined_layout="$work_dir/oci-multi"
+install -d -m 0755 "$combined_layout/blobs/sha256"
+cp -a "$work_dir/oci-amd64/blobs/sha256/." "$combined_layout/blobs/sha256/"
+cp -a "$work_dir/oci-arm64/blobs/sha256/." "$combined_layout/blobs/sha256/"
+
+AMD64_LAYOUT="$work_dir/oci-amd64" \
+ARM64_LAYOUT="$work_dir/oci-arm64" \
+COMBINED_LAYOUT="$combined_layout" \
+IMAGE_TAG="$version" \
+node <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+function platformDescriptor(layout, architecture) {
+  const index = JSON.parse(fs.readFileSync(path.join(layout, "index.json"), "utf8"));
+  const descriptor = index.manifests.find(
+    (candidate) => candidate.annotations?.["org.opencontainers.image.ref.name"] === "base",
+  );
+  if (!descriptor) throw new Error(`Cannot find image manifest in ${layout}`);
+  const result = structuredClone(descriptor);
+  delete result.annotations;
+  result.platform = { architecture, os: "linux" };
+  return result;
+}
+
+const manifests = [
+  platformDescriptor(process.env.AMD64_LAYOUT, "amd64"),
+  platformDescriptor(process.env.ARM64_LAYOUT, "arm64"),
+];
+const imageIndex = Buffer.from(JSON.stringify({
+  schemaVersion: 2,
+  mediaType: "application/vnd.oci.image.index.v1+json",
+  manifests,
+}));
+const digest = crypto.createHash("sha256").update(imageIndex).digest("hex");
+const combined = process.env.COMBINED_LAYOUT;
+fs.writeFileSync(path.join(combined, "blobs", "sha256", digest), imageIndex);
+fs.writeFileSync(path.join(combined, "oci-layout"), JSON.stringify({ imageLayoutVersion: "1.0.0" }));
+fs.writeFileSync(path.join(combined, "index.json"), JSON.stringify({
+  schemaVersion: 2,
+  mediaType: "application/vnd.oci.image.index.v1+json",
+  manifests: [{
+    mediaType: "application/vnd.oci.image.index.v1+json",
+    digest: `sha256:${digest}`,
+    size: imageIndex.length,
+    annotations: { "org.opencontainers.image.ref.name": process.env.IMAGE_TAG },
+  }],
+}));
+NODE
+
+destination_args=()
+inspect_args=()
+if [ "${REGISTRY_INSECURE:-0}" = 1 ]; then
+  destination_args+=(--dest-tls-verify=false)
+  inspect_args+=(--tls-verify=false)
+fi
+
+publish_tag() {
+  local tag="$1"
+  "$SKOPEO_BIN" copy \
+    --all \
+    "${destination_args[@]}" \
+    "oci:$combined_layout:$version" \
+    "docker://$IMAGE_REPOSITORY:$tag"
+  echo "Published $IMAGE_REPOSITORY:$tag"
+}
 
 canonical_ref="$IMAGE_REPOSITORY:$version"
-crane index append \
-  --manifest "$IMAGE_REPOSITORY@$amd64_digest" \
-  --manifest "$IMAGE_REPOSITORY@$arm64_digest" \
-  --tag "$canonical_ref"
+publish_tag "$version"
 
 if [ "$RELEASE_TAG" != "$version" ]; then
-  crane tag "$canonical_ref" "$RELEASE_TAG"
+  publish_tag "$RELEASE_TAG"
 fi
 case "$version" in
   *-*) echo "Prerelease detected; latest tag was not updated" ;;
-  *) crane tag "$canonical_ref" latest ;;
+  *) publish_tag latest ;;
 esac
 
-crane manifest "$canonical_ref" | node -e '
+"$SKOPEO_BIN" inspect "${inspect_args[@]}" --raw "docker://$canonical_ref" | node -e '
 let input = "";
 process.stdin.on("data", (chunk) => input += chunk);
 process.stdin.on("end", () => {
@@ -133,5 +192,3 @@ process.stdin.on("end", () => {
   console.log(`Verified multi-platform image: ${[...platforms].sort().join(", ")}`);
 });
 '
-
-echo "Published $canonical_ref"
