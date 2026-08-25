@@ -111,8 +111,6 @@ jobs:
           name: release-inputs
           path: |
             dist/
-            .dockerignore
-            Dockerfile
             compose.yml
           if-no-files-found: error
 
@@ -121,15 +119,26 @@ jobs:
     if: forgejo.event_name != 'pull_request'
     runs-on: docker
     container:
-      image: docker.io/library/docker:29-cli
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
+      image: docker.io/library/node:22-alpine
     env:
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
       REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
     steps:
-      - name: Install action runtime
-        run: apk add --no-cache ca-certificates curl nodejs
+      - name: Install OCI tooling
+        run: |
+          set -eu
+          apk add --no-cache ca-certificates coreutils curl tar
+
+          crane_archive=/tmp/go-containerregistry.tar.gz
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
+            https://github.com/google/go-containerregistry/releases/download/v0.21.7/go-containerregistry_Linux_x86_64.tar.gz \
+            --output "$crane_archive"
+          printf '%s  %s\n' \
+            1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230 \
+            "$crane_archive" \
+            | sha256sum --check -
+          tar -xzf "$crane_archive" -C /usr/local/bin crane
+          crane version
 
       - name: Download release inputs
         uses: https://data.forgejo.org/actions/download-artifact@v3
@@ -167,7 +176,6 @@ jobs:
           test -n "$version"
           test -s dist/pixhelf-amd64-linux
           test -s dist/pixhelf-arm64-linux
-          test -f Dockerfile
           test -f compose.yml
 
           printf 'IS_RELEASE=%s\n' "$is_release" >> "$GITHUB_ENV"
@@ -187,73 +195,128 @@ jobs:
           test -n "$token"
           test -n "$username"
           printf '%s' "$token" \
-            | docker login "$REGISTRY" --username "$username" --password-stdin
+            | crane auth login "$REGISTRY" --username "$username" --password-stdin
 
-      - name: Build and push multi-platform image
+      - name: Assemble multi-platform OCI image
         run: |
           set -eu
-          builder="pixhelf-${FORGEJO_RUN_ID:-${GITHUB_RUN_ID:-release}}"
+          work=/tmp/pixhelf-oci
+          local_registry=127.0.0.1:5000
+          mkdir -p "$work"
 
+          crane registry serve --address "$local_registry" >"$work/registry.log" 2>&1 &
+          registry_pid=$!
           cleanup() {
-            docker buildx rm --force "$builder" >/dev/null 2>&1 || true
+            kill "$registry_pid" >/dev/null 2>&1 || true
+            wait "$registry_pid" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          cleanup
+          sleep 1
 
-          docker version
-          docker buildx version
-          docker buildx create \
-            --name "$builder" \
-            --driver docker-container \
-            --use
-          docker buildx inspect --bootstrap
+          build_platform() {
+            arch="$1"
+            asset="$2"
+            platform_dir="$work/$arch"
+            rootfs="$platform_dir/rootfs"
+            base_ref="$local_registry/staging:${arch}-base"
+            configured_ref="$local_registry/staging:${arch}"
 
-          if [ "$IS_RELEASE" = true ]; then
-            set -- \
-              --tag "${IMAGE}:${IMAGE_VERSION}" \
-              --tag "${IMAGE}:${RELEASE_TAG}"
-            case "$IMAGE_VERSION" in
-              *-*) ;;
-              *) set -- "$@" --tag "${IMAGE}:latest" ;;
-            esac
+            mkdir -p "$rootfs"
+            install -m 0755 "$asset" "$rootfs/pixhelf"
+            tar \
+              --sort=name \
+              --mtime=@0 \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -cf "$platform_dir/layer.tar" \
+              -C "$rootfs" \
+              pixhelf
 
-            docker buildx build \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg "VERSION=${IMAGE_VERSION}" \
-              --build-arg "REVISION=${REVISION}" \
-              --build-arg "SOURCE_URL=${SOURCE_URL}" \
-              "$@" \
-              --push \
-              .
+            crane append --insecure --oci-empty-base \
+              --new_layer "$platform_dir/layer.tar" \
+              --new_tag "$base_ref"
+            crane mutate --insecure "$base_ref" \
+              --tag "$configured_ref" \
+              --set-platform "linux/$arch" \
+              --entrypoint /pixhelf \
+              --workdir /data \
+              --exposed-ports 3002/tcp \
+              --label org.opencontainers.image.title=Pixhelf \
+              --label 'org.opencontainers.image.description=Self-hosted image gallery' \
+              --label "org.opencontainers.image.version=$IMAGE_VERSION" \
+              --label "org.opencontainers.image.revision=$REVISION" \
+              --label "org.opencontainers.image.source=$SOURCE_URL"
 
-            docker buildx imagetools inspect "${IMAGE}:${IMAGE_VERSION}"
-          else
-            output=/tmp/pixhelf-image.oci.tar
-            docker buildx build \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg "VERSION=${IMAGE_VERSION}" \
-              --build-arg "REVISION=${REVISION}" \
-              --build-arg "SOURCE_URL=${SOURCE_URL}" \
-              --tag pixhelf:validation \
-              --output "type=oci,dest=${output}" \
-              .
-
-            test -s "$output"
-            tar -xOf "$output" index.json \
-              | node -e '
+            crane config --insecure "$configured_ref" \
+              | ARCH="$arch" node -e '
                   let input = "";
                   process.stdin.on("data", (chunk) => input += chunk);
                   process.stdin.on("end", () => {
-                    const platforms = JSON.parse(input).manifests
-                      .map((manifest) => `${manifest.platform?.os}/${manifest.platform?.architecture}`);
-                    for (const expected of ["linux/amd64", "linux/arm64"]) {
-                      if (!platforms.includes(expected)) {
-                        throw new Error(`missing OCI platform: ${expected}`);
-                      }
+                    const config = JSON.parse(input);
+                    if (config.os !== "linux" || config.architecture !== process.env.ARCH) {
+                      throw new Error(`unexpected platform: ${config.os}/${config.architecture}`);
                     }
-                    console.log(`validated OCI platforms: ${platforms.join(", ")}`);
+                    if (config.config.Entrypoint?.[0] !== "/pixhelf") {
+                      throw new Error("unexpected entrypoint");
+                    }
+                    if (config.config.WorkingDir !== "/data") {
+                      throw new Error("unexpected working directory");
+                    }
+                    if (!config.config.ExposedPorts?.["3002/tcp"]) {
+                      throw new Error("missing exposed port");
+                    }
                   });'
+
+            expected="$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            actual="$(crane export --insecure "$configured_ref" - \
+              | tar -xOf - pixhelf \
+              | sha256sum \
+              | cut -d ' ' -f 1)"
+            test "$actual" = "$expected"
+
+            if [ "$IS_RELEASE" = true ]; then
+              crane pull --insecure "$configured_ref" "$platform_dir/image.tar"
+              digest="$(crane digest --tarball "$platform_dir/image.tar")"
+              crane push "$platform_dir/image.tar" "${IMAGE}@${digest}"
+              manifest_ref="${IMAGE}@${digest}"
+            else
+              manifest_ref="$configured_ref"
+            fi
+          }
+
+          build_platform amd64 dist/pixhelf-amd64-linux
+          amd64_manifest="$manifest_ref"
+          build_platform arm64 dist/pixhelf-arm64-linux
+          arm64_manifest="$manifest_ref"
+
+          if [ "$IS_RELEASE" = true ]; then
+            crane index append \
+              --manifest "$amd64_manifest" \
+              --manifest "$arm64_manifest" \
+              --tag "${IMAGE}:${IMAGE_VERSION}"
+            crane tag "${IMAGE}:${IMAGE_VERSION}" "$RELEASE_TAG"
+            case "$IMAGE_VERSION" in
+              *-*) ;;
+              *) crane tag "${IMAGE}:${IMAGE_VERSION}" latest ;;
+            esac
+            index_ref="${IMAGE}:${IMAGE_VERSION}"
+          else
+            index_ref="$local_registry/pixhelf:validation"
+            crane index append --insecure \
+              --manifest "$amd64_manifest" \
+              --manifest "$arm64_manifest" \
+              --tag "$index_ref"
           fi
+
+          if [ "$IS_RELEASE" = true ]; then
+            index="$(crane index list "$index_ref")"
+          else
+            index="$(crane index list --insecure "$index_ref")"
+          fi
+          printf '%s\n' "$index"
+          printf '%s\n' "$index" | grep -q 'linux/amd64'
+          printf '%s\n' "$index" | grep -q 'linux/arm64'
 
       - name: Create Forgejo release and upload assets
         if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
