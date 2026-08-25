@@ -29,7 +29,24 @@ cargo build --release
 
 `cargo build` 会自动执行 React 生产构建，并将结果嵌入 `target/release/pixhelf`。
 
-发布工作流使用 musl 静态链接，并在同一台 AMD64 构建机上交叉编译两个版本：
+使用 `cross` 交叉编译 musl 版本时，先在宿主机生成与架构无关的前端资源；
+`Cross.toml` 会让容器直接复用这些资源，因此容器内不需要安装 Node.js：
+
+```bash
+npm ci --prefix frontend
+npm run build --prefix frontend
+
+# 默认 target，由 Cross.toml 配置为 AMD64 musl
+cross build --release --locked
+
+# ARM64 musl
+cross build --release --locked --target aarch64-unknown-linux-musl
+```
+
+产物分别位于 `target/x86_64-unknown-linux-musl/release/pixhelf` 和
+`target/aarch64-unknown-linux-musl/release/pixhelf`。
+
+发布工作流使用 `cross` 和 musl 静态链接，并在同一台 AMD64 构建机上交叉编译两个版本：
 
 - `pixhelf-amd64-linux`：`x86_64-unknown-linux-musl`
 - `pixhelf-arm64-linux`：`aarch64-unknown-linux-musl`

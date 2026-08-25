@@ -15,33 +15,18 @@ jobs:
       - name: Check out source
         uses: https://data.forgejo.org/actions/checkout@v6
 
-      - name: Install Rust and cross-compilation toolchains
+      - name: Install Rust toolchain
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends \
-            binutils \
             build-essential \
             ca-certificates \
             curl \
-            file \
-            pkg-config \
-            python3-venv
+            pkg-config
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
             | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" target add \
-            x86_64-unknown-linux-musl \
-            aarch64-unknown-linux-musl
-          python3 -m venv /opt/cargo-zigbuild
-          /opt/cargo-zigbuild/bin/pip install \
-            --disable-pip-version-check \
-            --no-cache-dir \
-            cargo-zigbuild==0.23.0 \
-            ziglang==0.16.0
-          echo "/opt/cargo-zigbuild/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustc" --version
-          /opt/cargo-zigbuild/bin/cargo-zigbuild --version
-          /opt/cargo-zigbuild/bin/python -m ziglang version
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -57,11 +42,62 @@ jobs:
           export PIXHELF_SKIP_FRONTEND_BUILD=1
           cargo test --locked
 
+  release:
+    if: startsWith(forgejo.ref, 'refs/tags/v')
+    needs: build
+    runs-on: docker
+    container:
+      image: docker.io/library/node:22-bookworm
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      # The runner's Docker daemon uses the containerd image store, which does
+      # not expose the MergedDir required by CROSS_CONTAINER_IN_CONTAINER.
+      # Remote mode transfers the project and artifacts through Docker volumes.
+      CROSS_REMOTE: "true"
+      # Non-hidden paths are required so cross can expose the Rust toolchain in
+      # the remote build container when the workflow itself runs as root.
+      CARGO_HOME: /opt/cargo
+      RUSTUP_HOME: /opt/rustup
+    steps:
+      - name: Check out source
+        uses: https://data.forgejo.org/actions/checkout@v6
+
+      - name: Install Rust, Docker CLI, and cross
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            docker.io \
+            file \
+            pkg-config
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+            | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          "$CARGO_HOME/bin/cargo" install \
+            --git https://github.com/cross-rs/cross \
+            --rev 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27 \
+            --locked \
+            cross
+          docker version
+          "$CARGO_HOME/bin/rustc" --version
+          "$CARGO_HOME/bin/cross" --version
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
       - name: Build static musl release binaries
         run: |
           set -eu
-          export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
-          export CARGO_ZIGBUILD_PYTHON_PATH=/opt/cargo-zigbuild/bin/python
+          export PATH="$CARGO_HOME/bin:$PATH"
           export PIXHELF_SKIP_FRONTEND_BUILD=1
           mkdir -p dist
 
@@ -71,7 +107,7 @@ jobs:
             machine="$3"
             binary="target/${target}/release/pixhelf"
 
-            cargo zigbuild --release --locked --target "$target"
+            cross build --release --locked --target "$target"
             file "$binary"
 
             if ! readelf -h "$binary" | grep -q "Machine:.*${machine}"; then
@@ -102,13 +138,11 @@ jobs:
           dist/pixhelf-amd64-linux --help >/dev/null
 
       - name: Prepare release metadata
-        if: startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME}}"
           printf 'RELEASE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
 
       - name: Create Forgejo release and upload assets
-        if: startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           set -eu
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
