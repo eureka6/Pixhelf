@@ -198,14 +198,22 @@ jobs:
             printf '\n'
           done
 
-      - name: Install container publishing tools
+      - name: Install container publishing tool
         if: startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           set -eu
-          apt-get update
-          apt-get install --yes --no-install-recommends skopeo umoci
-          skopeo --version
-          umoci --version
+          crane_version=0.21.9
+          crane_archive="go-containerregistry_Linux_x86_64.tar.gz"
+          crane_sha256=5c16d8ddb971cb1d5e6ed8b1e743da8224414eeba2c2762d8f1a61b2f095699e
+          crane_url="https://github.com/google/go-containerregistry/releases/download/v${crane_version}/${crane_archive}"
+
+          curl --location --silent --show-error --fail \
+            --output "/tmp/${crane_archive}" \
+            "$crane_url"
+          printf '%s  %s\n' "$crane_sha256" "/tmp/${crane_archive}" \
+            | sha256sum --check
+          tar -xzf "/tmp/${crane_archive}" -C /usr/local/bin crane
+          crane version
 
       - name: Publish multi-platform Alpine container
         if: startsWith(forgejo.ref, 'refs/tags/v')
@@ -221,13 +229,10 @@ jobs:
           image_repository="${registry}/${image_path}"
           test -n "$token"
 
-          export REGISTRY_AUTH_FILE=/tmp/pixhelf-container-auth.json
+          export DOCKER_CONFIG=/tmp/pixhelf-container-auth
+          install -d -m 0700 "$DOCKER_CONFIG"
           printf '%s' "$token" \
-            | skopeo login \
-                --authfile "$REGISTRY_AUTH_FILE" \
-                --username "$actor" \
-                --password-stdin \
-                "$registry"
+            | crane auth login "$registry" --username "$actor" --password-stdin
 
           export RELEASE_TAG
           export IMAGE_REPOSITORY="$image_repository"
