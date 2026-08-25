@@ -31,11 +31,11 @@ cargo build --release
 
 发布工作流使用 musl 静态链接，并在同一台 AMD64 构建机上交叉编译两个版本：
 
-- `pixhelf-amd64`：`x86_64-unknown-linux-musl`
-- `pixhelf-arm64`：`aarch64-unknown-linux-musl`
+- `pixhelf-amd64-linux`：`x86_64-unknown-linux-musl`
+- `pixhelf-arm64-linux`：`aarch64-unknown-linux-musl`
 
 两个 Release 产物都是无扩展名的独立可执行文件，下载后需要执行
-`chmod +x pixhelf-amd64` 或 `chmod +x pixhelf-arm64`。
+`chmod +x pixhelf-amd64-linux` 或 `chmod +x pixhelf-arm64-linux`。
 
 ## 参数
 
