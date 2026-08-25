@@ -119,6 +119,9 @@ jobs:
     container:
       image: docker.io/library/node:22-alpine
     env:
+      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pixhelf
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
       REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
     steps:
@@ -197,6 +200,23 @@ jobs:
           test -n "$username"
           printf '%s' "$token" \
             | crane auth login "$REGISTRY" --username "$username" --password-stdin
+
+      - name: Log in to Docker Hub
+        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          token="${DOCKERHUB_TOKEN:-}"
+          username="${DOCKERHUB_USERNAME:-}"
+          if [ -z "$token" ]; then
+            echo 'DOCKERHUB_TOKEN must contain a Docker Hub access token with write access' >&2
+            exit 1
+          fi
+          if [ -z "$username" ]; then
+            echo 'DOCKERHUB_USERNAME must contain the Docker Hub username' >&2
+            exit 1
+          fi
+          printf '%s' "$token" \
+            | crane auth login index.docker.io --username "$username" --password-stdin
 
       - name: Assemble multi-platform OCI image
         run: |
@@ -280,44 +300,68 @@ jobs:
               crane pull --insecure "$configured_ref" "$platform_dir/image.tar"
               digest="$(crane digest --tarball "$platform_dir/image.tar")"
               crane push "$platform_dir/image.tar" "${IMAGE}@${digest}"
-              manifest_ref="${IMAGE}@${digest}"
+              crane push "$platform_dir/image.tar" "${DOCKERHUB_IMAGE}@${digest}"
+              forgejo_manifest_ref="${IMAGE}@${digest}"
+              dockerhub_manifest_ref="${DOCKERHUB_IMAGE}@${digest}"
             else
-              manifest_ref="$configured_ref"
+              forgejo_manifest_ref="$configured_ref"
+              dockerhub_manifest_ref="$configured_ref"
             fi
           }
 
           build_platform amd64 dist/pixhelf-amd64-linux
-          amd64_manifest="$manifest_ref"
+          amd64_forgejo_manifest="$forgejo_manifest_ref"
+          amd64_dockerhub_manifest="$dockerhub_manifest_ref"
           build_platform arm64 dist/pixhelf-arm64-linux
-          arm64_manifest="$manifest_ref"
+          arm64_forgejo_manifest="$forgejo_manifest_ref"
+          arm64_dockerhub_manifest="$dockerhub_manifest_ref"
 
           if [ "$IS_RELEASE" = true ]; then
             crane index append \
-              --manifest "$amd64_manifest" \
-              --manifest "$arm64_manifest" \
+              --manifest "$amd64_forgejo_manifest" \
+              --manifest "$arm64_forgejo_manifest" \
               --tag "${IMAGE}:${IMAGE_VERSION}"
             crane tag "${IMAGE}:${IMAGE_VERSION}" "$RELEASE_TAG"
             case "$IMAGE_VERSION" in
               *-*) ;;
               *) crane tag "${IMAGE}:${IMAGE_VERSION}" latest ;;
             esac
-            index_ref="${IMAGE}:${IMAGE_VERSION}"
+
+            crane index append \
+              --manifest "$amd64_dockerhub_manifest" \
+              --manifest "$arm64_dockerhub_manifest" \
+              --tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}"
+            crane tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}" "$RELEASE_TAG"
+            case "$IMAGE_VERSION" in
+              *-*) ;;
+              *) crane tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}" latest ;;
+            esac
+
+            forgejo_index_ref="${IMAGE}:${IMAGE_VERSION}"
+            dockerhub_index_ref="${DOCKERHUB_IMAGE}:${IMAGE_VERSION}"
           else
             index_ref="$local_registry/pixhelf:validation"
             crane index append --insecure \
-              --manifest "$amd64_manifest" \
-              --manifest "$arm64_manifest" \
+              --manifest "$amd64_forgejo_manifest" \
+              --manifest "$arm64_forgejo_manifest" \
               --tag "$index_ref"
           fi
 
           if [ "$IS_RELEASE" = true ]; then
-            index="$(crane index list "$index_ref")"
+            forgejo_index="$(crane index list "$forgejo_index_ref")"
+            dockerhub_index="$(crane index list "$dockerhub_index_ref")"
+            printf '%s\n' "$forgejo_index"
+            printf '%s\n' "$forgejo_index" | grep -q 'linux/amd64'
+            printf '%s\n' "$forgejo_index" | grep -q 'linux/arm64'
+            printf '%s\n' "$dockerhub_index"
+            printf '%s\n' "$dockerhub_index" | grep -q 'linux/amd64'
+            printf '%s\n' "$dockerhub_index" | grep -q 'linux/arm64'
           else
             index="$(crane index list --insecure "$index_ref")"
+            printf '%s\n' "$index"
+            printf '%s\n' "$index" | grep -q 'linux/amd64'
+            printf '%s\n' "$index" | grep -q 'linux/arm64'
           fi
-          printf '%s\n' "$index"
-          printf '%s\n' "$index" | grep -q 'linux/amd64'
-          printf '%s\n' "$index" | grep -q 'linux/arm64'
 
       - name: Create Forgejo release and upload assets
         if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
