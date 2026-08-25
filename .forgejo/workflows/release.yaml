@@ -17,14 +17,33 @@ jobs:
       - name: Check out source
         uses: https://data.forgejo.org/actions/checkout@v6
 
-      - name: Install Rust toolchain
+      - name: Install Rust and cross-compilation toolchains
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends ca-certificates curl build-essential pkg-config
+          apt-get install --yes --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            pkg-config \
+            python3-venv
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
             | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl
+          python3 -m venv /opt/cargo-zigbuild
+          /opt/cargo-zigbuild/bin/pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            cargo-zigbuild==0.23.0 \
+            ziglang==0.16.0
+          echo "/opt/cargo-zigbuild/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustc" --version
+          /opt/cargo-zigbuild/bin/cargo-zigbuild --version
+          /opt/cargo-zigbuild/bin/python -m ziglang version
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -34,23 +53,65 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
-      - name: Test and build Rust application
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Test Rust application
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          export PIXHELF_SKIP_FRONTEND_BUILD=1
           cargo test --locked
-          cargo build --release --locked
 
-      - name: Package release assets
-        if: startsWith(forgejo.ref, 'refs/tags/v')
+      - name: Build static musl release binaries
         run: |
           set -eu
-          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME}}"
-          package="pixhelf-${tag}-linux-x86_64"
+          export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
+          export CARGO_ZIGBUILD_PYTHON_PATH=/opt/cargo-zigbuild/bin/python
+          export PIXHELF_SKIP_FRONTEND_BUILD=1
           mkdir -p dist
-          install -m 0755 target/release/pixhelf "dist/${package}"
-          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          sha256sum "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
-          printf 'RELEASE_TAG=%s\nRELEASE_PACKAGE=%s\n' "$tag" "$package" >> "$GITHUB_ENV"
+
+          build_release() {
+            target="$1"
+            asset="$2"
+            machine="$3"
+            binary="target/${target}/release/pixhelf"
+
+            cargo zigbuild --release --locked --target "$target"
+            file "$binary"
+
+            if ! readelf -h "$binary" | grep -q "Machine:.*${machine}"; then
+              echo "Unexpected architecture for ${binary}"
+              exit 1
+            fi
+            if readelf -l "$binary" | grep -q INTERP; then
+              echo "${binary} unexpectedly requires a dynamic loader"
+              exit 1
+            fi
+            if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
+              echo "${binary} unexpectedly requires a shared library"
+              exit 1
+            fi
+
+            install -m 0755 "$binary" "dist/${asset}"
+          }
+
+          build_release \
+            x86_64-unknown-linux-musl \
+            pixhelf-amd64 \
+            'Advanced Micro Devices X86-64'
+          build_release \
+            aarch64-unknown-linux-musl \
+            pixhelf-arm64 \
+            AArch64
+
+          dist/pixhelf-amd64 --help >/dev/null
+
+      - name: Prepare release metadata
+        if: startsWith(forgejo.ref, 'refs/tags/v')
+        run: |
+          tag="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME}}"
+          printf 'RELEASE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
 
       - name: Create Forgejo release and upload assets
         if: startsWith(forgejo.ref, 'refs/tags/v')
@@ -105,7 +166,7 @@ jobs:
             --header "Authorization: token ${token}" \
             "${api}/repos/${repository}/releases/${release_id}/assets"
 
-          for asset in "dist/${RELEASE_PACKAGE}.tar.gz" "dist/${RELEASE_PACKAGE}.tar.gz.sha256"; do
+          for asset in dist/pixhelf-amd64 dist/pixhelf-arm64; do
             asset_name="$(basename "$asset")"
             existing="$(ASSETS_JSON="$assets_json" ASSET_NAME="$asset_name" node -e \
               'const assets = JSON.parse(require("fs").readFileSync(process.env.ASSETS_JSON)); const found = assets.find((asset) => asset.name === process.env.ASSET_NAME); process.stdout.write(found ? String(found.id) : "")')"
