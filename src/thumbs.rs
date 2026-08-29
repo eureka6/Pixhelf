@@ -1,12 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -24,13 +24,14 @@ use walkdir::WalkDir;
 
 use crate::{
     gallery::ImageRecord,
-    semantic::{
-        SemanticEmbedding, SemanticIndex, SemanticStatus, is_semantic_sidecar,
-        remove_embedding_for_thumbnail,
-    },
     similarity::{
         cache_signature_for_thumbnail, has_signature_sidecar, is_signature_sidecar,
         remove_signature_for_thumbnail, signature_for_thumbnail,
+    },
+    support::{
+        PriorityQueue as JobQueue,
+        embedding::{is_sidecar, remove_sidecar},
+        mutex_lock, read_lock, write_lock,
     },
     text_search::{
         TextSearchEmbedding, TextSearchIndex, TextSearchStatus, is_text_search_sidecar,
@@ -42,6 +43,7 @@ const THUMBNAIL_EDGE: u32 = 720;
 const WEBP_QUALITY: f32 = 82.0;
 const CACHE_VERSION: &str = "720-webp-q82-v1";
 const LEGACY_VIEWER_CACHE_VERSION: &str = "viewer-3200-webp-q88-fast-v1";
+const OBSOLETE_DINO_EXTENSION: &str = "dino2";
 const MAX_ATTEMPTS: u8 = 3;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -52,7 +54,6 @@ pub struct ThumbnailManager {
     queue: JobQueue,
     initial_ready: AtomicBool,
     similarity_warmup_running: AtomicBool,
-    semantic: Option<Arc<SemanticIndex>>,
     text_search: Option<Arc<TextSearchIndex>>,
 }
 
@@ -88,34 +89,6 @@ enum ThumbState {
     Removed,
 }
 
-#[derive(Default)]
-struct JobQueue {
-    state: Mutex<QueueState>,
-    notify: Notify,
-}
-
-#[derive(Default)]
-struct QueueState {
-    urgent: VecDeque<String>,
-    background: VecDeque<String>,
-    queued: HashSet<String>,
-}
-
-fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThumbnailStatus {
@@ -126,19 +99,17 @@ pub struct ThumbnailStatus {
     pub failed: usize,
     pub initial_batch_ready: bool,
     pub background_complete: bool,
-    pub semantic: SemanticStatus,
     pub text_search: TextSearchStatus,
 }
 
 impl ThumbnailManager {
     #[cfg(test)]
     pub fn new(cache_dir: PathBuf) -> Result<Arc<Self>> {
-        Self::new_with_indexes(cache_dir, None, None)
+        Self::new_with_text_search(cache_dir, None)
     }
 
-    pub fn new_with_indexes(
+    pub fn new_with_text_search(
         cache_dir: PathBuf,
-        semantic: Option<Arc<SemanticIndex>>,
         text_search: Option<Arc<TextSearchIndex>>,
     ) -> Result<Arc<Self>> {
         let cache_root = cache_dir.join(CACHE_VERSION);
@@ -161,7 +132,6 @@ impl ThumbnailManager {
             queue: JobQueue::default(),
             initial_ready: AtomicBool::new(false),
             similarity_warmup_running: AtomicBool::new(false),
-            semantic,
             text_search,
         }))
     }
@@ -210,13 +180,8 @@ impl ThumbnailManager {
         for id in missing {
             self.queue.push_background(id);
         }
-        if self.semantic.is_some() || self.text_search.is_some() {
-            if let Some(semantic) = &self.semantic {
-                semantic.reconcile(&current_ids);
-            }
-            if let Some(text_search) = &self.text_search {
-                text_search.reconcile(&current_ids);
-            }
+        if let Some(text_search) = &self.text_search {
+            text_search.reconcile(&current_ids);
             let ready = {
                 let entries = read_lock(&self.entries);
                 entries
@@ -227,12 +192,7 @@ impl ThumbnailManager {
                     .collect::<Vec<_>>()
             };
             for (id, thumbnail) in ready {
-                if let Some(semantic) = &self.semantic {
-                    semantic.enqueue(&id, &thumbnail, false);
-                }
-                if let Some(text_search) = &self.text_search {
-                    text_search.enqueue(&id, &thumbnail, false);
-                }
+                text_search.enqueue(&id, &thumbnail, false);
             }
         }
     }
@@ -343,34 +303,11 @@ impl ThumbnailManager {
             failed,
             initial_batch_ready: self.initial_ready.load(Ordering::Acquire),
             background_complete: ready + failed == total && processing == 0,
-            semantic: self
-                .semantic
-                .as_ref()
-                .map_or_else(SemanticStatus::disabled, |semantic| semantic.status()),
             text_search: self
                 .text_search
                 .as_ref()
                 .map_or_else(TextSearchStatus::disabled, |index| index.status()),
         }
-    }
-
-    pub async fn ensure_semantic_embedding(
-        &self,
-        id: &str,
-        thumbnail: &Path,
-    ) -> Option<Arc<SemanticEmbedding>> {
-        let semantic = self.semantic.as_ref()?;
-        semantic.ensure_embedding(id, thumbnail).await
-    }
-
-    pub fn semantic_embedding(&self, id: &str) -> Option<Arc<SemanticEmbedding>> {
-        self.semantic.as_ref()?.embedding(id)
-    }
-
-    pub fn semantic_cache_token(&self) -> String {
-        self.semantic
-            .as_ref()
-            .map_or_else(|| "off".to_owned(), |semantic| semantic.cache_token())
     }
 
     pub async fn text_query_embedding(
@@ -510,36 +447,12 @@ impl ThumbnailManager {
                         }
                     };
                     if ready {
-                        if let Some(semantic) = &self.semantic {
-                            semantic.enqueue(&id, &entry.cache_path, false);
-                        }
                         if let Some(text_search) = &self.text_search {
                             text_search.enqueue(&id, &entry.cache_path, false);
                         }
                         entry.notify.notify_waiters();
-                    } else if removed {
-                        let entries = read_lock(&self.entries);
-                        if !entries.contains_key(&id)
-                            && let Err(error) = fs::remove_file(&entry.cache_path)
-                            && error.kind() != std::io::ErrorKind::NotFound
-                        {
-                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale thumbnail");
-                        }
-                        if !entries.contains_key(&id)
-                            && let Err(error) = remove_signature_for_thumbnail(&entry.cache_path)
-                        {
-                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale similarity descriptor");
-                        }
-                        if !entries.contains_key(&id)
-                            && let Err(error) = remove_embedding_for_thumbnail(&entry.cache_path)
-                        {
-                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale semantic embedding");
-                        }
-                        if !entries.contains_key(&id)
-                            && let Err(error) = remove_text_search_embedding(&entry.cache_path)
-                        {
-                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale text-search embedding");
-                        }
+                    } else if removed && !read_lock(&self.entries).contains_key(&id) {
+                        remove_cached_artifacts(&entry.cache_path);
                     }
                 }
                 Err(error) => {
@@ -593,78 +506,6 @@ impl ThumbnailManager {
     }
 }
 
-impl JobQueue {
-    fn retain(&self, valid_ids: &HashSet<&str>) {
-        let mut state = mutex_lock(&self.state);
-        state.urgent.retain(|id| valid_ids.contains(id.as_str()));
-        state
-            .background
-            .retain(|id| valid_ids.contains(id.as_str()));
-        state.queued.retain(|id| valid_ids.contains(id.as_str()));
-    }
-
-    fn push_urgent(&self, id: String) {
-        let should_notify = {
-            let mut state = mutex_lock(&self.state);
-            if state.queued.contains(&id) {
-                if let Some(position) = state.background.iter().position(|queued| queued == &id) {
-                    state.background.remove(position);
-                    state.urgent.push_back(id);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                state.queued.insert(id.clone());
-                state.urgent.push_back(id);
-                true
-            }
-        };
-        if !should_notify {
-            return;
-        }
-        self.notify.notify_one();
-    }
-
-    fn push_background(&self, id: String) {
-        let should_notify = {
-            let mut state = mutex_lock(&self.state);
-            if state.queued.insert(id.clone()) {
-                state.background.push_back(id);
-                true
-            } else {
-                false
-            }
-        };
-        if !should_notify {
-            return;
-        }
-        self.notify.notify_one();
-    }
-
-    async fn pop(&self) -> String {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(id) = {
-                let mut state = mutex_lock(&self.state);
-                let id = state
-                    .urgent
-                    .pop_front()
-                    .or_else(|| state.background.pop_front());
-                if let Some(id) = &id {
-                    state.queued.remove(id);
-                }
-                id
-            } {
-                return id;
-            }
-            notified.as_mut().await;
-        }
-    }
-}
-
 fn valid_cache_file(path: &Path) -> bool {
     fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.len() > 20)
@@ -697,23 +538,27 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
         warn!(path = %output.display(), %error, "cannot cache image similarity descriptor");
     }
     if let Err(error) = record.ensure_source_is_current() {
-        if let Err(remove_error) = fs::remove_file(output)
-            && remove_error.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(path = %output.display(), %remove_error, "cannot remove stale thumbnail");
-        }
-        if let Err(remove_error) = remove_signature_for_thumbnail(output) {
-            warn!(path = %output.display(), %remove_error, "cannot remove stale similarity descriptor");
-        }
-        if let Err(remove_error) = remove_embedding_for_thumbnail(output) {
-            warn!(path = %output.display(), %remove_error, "cannot remove stale semantic embedding");
-        }
-        if let Err(remove_error) = remove_text_search_embedding(output) {
-            warn!(path = %output.display(), %remove_error, "cannot remove stale text-search embedding");
-        }
+        remove_cached_artifacts(output);
         return Err(error);
     }
     Ok(())
+}
+
+fn remove_cached_artifacts(thumbnail: &Path) {
+    if let Err(error) = fs::remove_file(thumbnail)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(path = %thumbnail.display(), %error, "cannot remove stale thumbnail");
+    }
+    if let Err(error) = remove_signature_for_thumbnail(thumbnail) {
+        warn!(path = %thumbnail.display(), %error, "cannot remove stale similarity descriptor");
+    }
+    if let Err(error) = remove_sidecar(thumbnail, OBSOLETE_DINO_EXTENSION) {
+        warn!(path = %thumbnail.display(), %error, "cannot remove obsolete DINOv2 embedding");
+    }
+    if let Err(error) = remove_text_search_embedding(thumbnail) {
+        warn!(path = %thumbnail.display(), %error, "cannot remove stale text-search embedding");
+    }
 }
 
 fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
@@ -762,9 +607,14 @@ fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
 
 fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
     visit_cache_files(root, |path| {
+        if is_sidecar(path, OBSOLETE_DINO_EXTENSION) {
+            if let Err(error) = fs::remove_file(path) {
+                warn!(path = %path.display(), %error, "cannot remove obsolete DINOv2 embedding");
+            }
+            return;
+        }
         if path.extension().and_then(|ext| ext.to_str()) != Some("webp")
             && !is_signature_sidecar(path)
-            && !is_semantic_sidecar(path)
             && !is_text_search_sidecar(path)
         {
             return;
@@ -843,35 +693,35 @@ mod tests {
         let id = "abcdef";
         let thumbnail = shard_path(root, id);
         let signature = thumbnail.with_extension("sim2");
-        let semantic = thumbnail.with_extension("dino2");
+        let obsolete_dino = thumbnail.with_extension("dino2");
         let text_search = thumbnail.with_extension("cnclip");
         let old_compact = thumbnail.with_file_name(format!("{id}-360.webp"));
         let stale = shard_path(root, "stale");
         let stale_signature = stale.with_extension("sim2");
-        let stale_semantic = stale.with_extension("dino2");
+        let stale_dino = stale.with_extension("dino2");
         let stale_text_search = stale.with_extension("cnclip");
         fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&thumbnail, [1; 32]).unwrap();
         fs::write(&signature, [1; 32]).unwrap();
-        fs::write(&semantic, [1; 32]).unwrap();
+        fs::write(&obsolete_dino, [1; 32]).unwrap();
         fs::write(&text_search, [1; 32]).unwrap();
         fs::write(&old_compact, [1; 32]).unwrap();
         fs::write(&stale, [1; 32]).unwrap();
         fs::write(&stale_signature, [1; 32]).unwrap();
-        fs::write(&stale_semantic, [1; 32]).unwrap();
+        fs::write(&stale_dino, [1; 32]).unwrap();
         fs::write(&stale_text_search, [1; 32]).unwrap();
 
         cleanup_cache(root, &HashSet::from([id.to_owned()]));
 
         assert!(thumbnail.exists());
         assert!(signature.exists());
-        assert!(semantic.exists());
+        assert!(!obsolete_dino.exists());
         assert!(text_search.exists());
         assert!(!old_compact.exists());
         assert!(!stale.exists());
         assert!(!stale_signature.exists());
-        assert!(!stale_semantic.exists());
+        assert!(!stale_dino.exists());
         assert!(!stale_text_search.exists());
     }
 
@@ -908,45 +758,6 @@ mod tests {
         })
         .await
         .expect("similarity descriptor warmup timed out");
-    }
-
-    #[test]
-    fn queue_promotes_without_duplicate_jobs() {
-        let queue = JobQueue::default();
-        queue.push_background("image".to_owned());
-        queue.push_background("image".to_owned());
-        queue.push_urgent("image".to_owned());
-
-        let state = mutex_lock(&queue.state);
-        assert_eq!(state.urgent.as_slices().0, ["image"]);
-        assert!(state.background.is_empty());
-        assert_eq!(state.queued.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn queue_wakes_all_needed_workers() {
-        let queue = Arc::new(JobQueue::default());
-        let first_queue = Arc::clone(&queue);
-        let second_queue = Arc::clone(&queue);
-        let first = tokio::spawn(async move { first_queue.pop().await });
-        let second = tokio::spawn(async move { second_queue.pop().await });
-        tokio::task::yield_now().await;
-
-        queue.push_background("first".to_owned());
-        queue.push_background("second".to_owned());
-
-        let first = tokio::time::timeout(Duration::from_secs(1), first)
-            .await
-            .expect("first worker timed out")
-            .unwrap();
-        let second = tokio::time::timeout(Duration::from_secs(1), second)
-            .await
-            .expect("second worker timed out")
-            .unwrap();
-        assert_eq!(
-            HashSet::from([first, second]),
-            HashSet::from(["first".into(), "second".into()])
-        );
     }
 
     #[tokio::test]

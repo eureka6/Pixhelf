@@ -2,11 +2,18 @@ services:
   pixhelf:
     image: eureka6688/pixhelf:latest
     restart: unless-stopped
+    environment:
+      PIXHELF_INITIAL_BATCH: "60"
+      PIXHELF_WORKERS: "4"
+      PIXHELF_SCAN_INTERVAL: "10"
+      PIXHELF_TEXT_SEARCH_MODEL: "/models/chinese-clip/model.safetensors"
+      PIXHELF_TEXT_SEARCH_VOCAB: "/models/chinese-clip/vocab.txt"
     ports:
       - "3002:3002"
     volumes:
       - "./pic:/data/pic:ro"
       - pixhelf-cache:/data/.pixhelf-cache
+      - "./models/chinese-clip:/models/chinese-clip:ro"
 
 volumes:
   pixhelf-cache:

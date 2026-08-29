@@ -3,5 +3,5 @@
 /target/
 /frontend/node_modules/
 /frontend/dist/
+/models/
 *.log
-

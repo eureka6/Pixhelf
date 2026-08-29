@@ -1,14 +1,12 @@
 //! Compact, local image descriptors used by the "find similar" endpoint.
 //!
-//! The descriptor deliberately stays CPU-only and model-free so it remains a
-//! dependable fallback when no semantic vision model is configured. It mixes
+//! The descriptor deliberately stays CPU-only and model-free. It mixes
 //! brightness-invariant structure, a perceptual hash, colour distribution,
 //! spatial colour and edge orientation. Descriptor sidecars are persisted
 //! beside thumbnails so an application restart does not require decoding the
 //! whole gallery again.
 
 use std::{
-    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     sync::atomic::{AtomicU64, Ordering},
@@ -21,7 +19,10 @@ use image::{DynamicImage, ImageReader, imageops::FilterType};
 use image::{ImageDecoder, metadata::Orientation};
 use tracing::warn;
 
-use crate::gallery::ImageRecord;
+use crate::{
+    gallery::ImageRecord,
+    support::{BoundedCache, mutex_lock},
+};
 
 const SAMPLE_EDGE: u32 = 32;
 const PIXEL_COUNT: usize = (SAMPLE_EDGE * SAMPLE_EDGE) as usize;
@@ -48,8 +49,7 @@ const SIGNATURE_LENGTH: u64 = (SIGNATURE_MAGIC.len()
     + 4 * 3) as u64;
 
 /// Scores below this value are generally a coincidental palette/layout match,
-/// rather than a useful recommendation. Keep this in one place so a future
-/// semantic model can calibrate its score before entering the same pipeline.
+/// rather than a useful recommendation.
 pub(crate) const MIN_SIMILARITY_SCORE: f32 = 0.58;
 
 #[derive(Clone)]
@@ -87,29 +87,16 @@ impl ImageSignature {
     }
 }
 
-static SIGNATURE_CACHE: OnceLock<Mutex<HashMap<String, ImageSignature>>> = OnceLock::new();
+static SIGNATURE_CACHE: OnceLock<Mutex<BoundedCache<ImageSignature>>> = OnceLock::new();
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static DCT_BASIS: OnceLock<[[f32; SAMPLE_EDGE as usize]; HASH_EDGE]> = OnceLock::new();
 
-fn signature_cache() -> &'static Mutex<HashMap<String, ImageSignature>> {
-    SIGNATURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn lock_cache() -> std::sync::MutexGuard<'static, HashMap<String, ImageSignature>> {
-    signature_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn signature_cache() -> &'static Mutex<BoundedCache<ImageSignature>> {
+    SIGNATURE_CACHE.get_or_init(|| Mutex::new(BoundedCache::new(CACHE_LIMIT)))
 }
 
 fn cache_signature(id: &str, signature: ImageSignature) {
-    let mut cache = lock_cache();
-    if cache.len() >= CACHE_LIMIT {
-        // IDs include the file fingerprint, so evicting any old entry is safe.
-        if let Some(evicted) = cache.keys().next().cloned() {
-            cache.remove(&evicted);
-        }
-    }
-    cache.insert(id.to_owned(), signature);
+    mutex_lock(signature_cache()).insert(id.to_owned(), signature);
 }
 
 /// Return a cached signature, decoding the original only in focused unit tests.
@@ -138,7 +125,7 @@ pub(crate) fn signature_for_thumbnail(
     record: &ImageRecord,
     thumbnail: &std::path::Path,
 ) -> Result<ImageSignature> {
-    if let Some(signature) = lock_cache().get(&record.id).cloned() {
+    if let Some(signature) = mutex_lock(signature_cache()).peek_cloned(&record.id) {
         return Ok(signature);
     }
 

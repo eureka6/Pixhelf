@@ -69,14 +69,6 @@ function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
     && isNonNegativeInteger(value.failed)
     && typeof value.initialBatchReady === "boolean"
     && typeof value.backgroundComplete === "boolean"
-    && isObject(value.semantic)
-    && typeof value.semantic.enabled === "boolean"
-    && isNonNegativeInteger(value.semantic.total)
-    && isNonNegativeInteger(value.semantic.ready)
-    && isNonNegativeInteger(value.semantic.queued)
-    && isNonNegativeInteger(value.semantic.processing)
-    && isNonNegativeInteger(value.semantic.failed)
-    && typeof value.semantic.backgroundComplete === "boolean"
     && isObject(value.textSearch)
     && typeof value.textSearch.enabled === "boolean"
     && isNonNegativeInteger(value.textSearch.total)

@@ -1,6 +1,5 @@
 use std::{
     cmp::Reverse,
-    collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -25,11 +24,11 @@ use tracing::error;
 
 use crate::{
     gallery::{Album, GalleryIndex, ImageRecord},
-    semantic::{SemanticEmbedding, semantic_similarity},
     similarity::{
         DiversityFingerprint, MIN_SIMILARITY_SCORE, redundancy_score, signature_for_thumbnail,
         similarity_score,
     },
+    support::{BoundedCache, mutex_lock},
     text_search::{TextSearchEmbedding, text_image_similarity},
     thumbs::{ThumbnailError, ThumbnailManager, ThumbnailStatus},
 };
@@ -52,15 +51,6 @@ const MAX_PAGE_SIZE: usize = 200;
 const DIVERSIFIED_SIMILARITY_RESULTS: usize = 120;
 const REDUNDANCY_PENALTY_START: f32 = 0.86;
 const MAX_REDUNDANCY_PENALTY: f32 = 0.08;
-const SEMANTIC_WEIGHT: f32 = 0.70;
-// DINOv2 CLS vectors are zero-centred: unrelated images cluster around zero,
-// so raw cosine values are not probabilities. Preserve the raw gate for
-// precision, then calibrate the useful -0.10..0.20 range before blending it
-// with the model-free visual score.
-const MIN_SEMANTIC_COSINE: f32 = 0.085;
-const SEMANTIC_CALIBRATION_OFFSET: f32 = 0.10;
-const SEMANTIC_CALIBRATION_RANGE: f32 = 0.30;
-const MIN_HYBRID_SCORE: f32 = 0.48;
 const SIMILARITY_RANKING_CACHE_LIMIT: usize = 8;
 const TEXT_SEARCH_RANKING_CACHE_LIMIT: usize = 16;
 const TEXT_SEARCH_RESULT_LIMIT: usize = 600;
@@ -69,10 +59,10 @@ const MAX_QUERY_VALUE_BYTES: usize = 4096;
 
 static SIMILARITY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 type SimilarityRanking = Arc<Vec<Arc<ImageRecord>>>;
-type SimilarityRankingCache = Mutex<HashMap<String, SimilarityRanking>>;
+type SimilarityRankingCache = Mutex<BoundedCache<SimilarityRanking>>;
 static SIMILARITY_RANKING_CACHE: OnceLock<SimilarityRankingCache> = OnceLock::new();
 type TextSearchRanking = Arc<Vec<Arc<ImageRecord>>>;
-type TextSearchRankingCache = Mutex<HashMap<String, TextSearchRanking>>;
+type TextSearchRankingCache = Mutex<BoundedCache<TextSearchRanking>>;
 static TEXT_SEARCH_RANKING_CACHE: OnceLock<TextSearchRankingCache> = OnceLock::new();
 
 fn similarity_limit() -> Arc<Semaphore> {
@@ -80,53 +70,29 @@ fn similarity_limit() -> Arc<Semaphore> {
 }
 
 fn similarity_ranking_cache() -> &'static SimilarityRankingCache {
-    SIMILARITY_RANKING_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    SIMILARITY_RANKING_CACHE
+        .get_or_init(|| Mutex::new(BoundedCache::new(SIMILARITY_RANKING_CACHE_LIMIT)))
 }
 
 fn cached_similarity_ranking(key: &str) -> Option<SimilarityRanking> {
-    similarity_ranking_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(key)
-        .cloned()
+    mutex_lock(similarity_ranking_cache()).get_cloned(key)
 }
 
 fn cache_similarity_ranking(key: String, ranking: SimilarityRanking) {
-    let mut cache = similarity_ranking_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !cache.contains_key(&key)
-        && cache.len() >= SIMILARITY_RANKING_CACHE_LIMIT
-        && let Some(evicted) = cache.keys().next().cloned()
-    {
-        cache.remove(&evicted);
-    }
-    cache.insert(key, ranking);
+    mutex_lock(similarity_ranking_cache()).insert(key, ranking);
 }
 
 fn text_search_ranking_cache() -> &'static TextSearchRankingCache {
-    TEXT_SEARCH_RANKING_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    TEXT_SEARCH_RANKING_CACHE
+        .get_or_init(|| Mutex::new(BoundedCache::new(TEXT_SEARCH_RANKING_CACHE_LIMIT)))
 }
 
 fn cached_text_search_ranking(key: &str) -> Option<TextSearchRanking> {
-    text_search_ranking_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(key)
-        .cloned()
+    mutex_lock(text_search_ranking_cache()).get_cloned(key)
 }
 
 fn cache_text_search_ranking(key: String, ranking: TextSearchRanking) {
-    let mut cache = text_search_ranking_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !cache.contains_key(&key)
-        && cache.len() >= TEXT_SEARCH_RANKING_CACHE_LIMIT
-        && let Some(evicted) = cache.keys().next().cloned()
-    {
-        cache.remove(&evicted);
-    }
-    cache.insert(key, ranking);
+    mutex_lock(text_search_ranking_cache()).insert(key, ranking);
 }
 
 #[derive(Clone)]
@@ -359,8 +325,7 @@ async fn images(
         return not_modified(&etag, "private, no-cache");
     }
 
-    if text_search_active {
-        let search = query.search.as_deref().expect("search was checked above");
+    if text_search_active && let Some(search) = query.search.as_deref() {
         let ranking_key = text_search_ranking_key(
             &index.revision,
             query.album.as_deref(),
@@ -453,25 +418,18 @@ async fn similar_images(
             return (StatusCode::INTERNAL_SERVER_ERROR, "无法读取查询图片").into_response();
         }
     };
-    let source_semantic = state
-        .thumbnails
-        .ensure_semantic_embedding(&id, &source_thumbnail)
-        .await;
     let initial_status = state.thumbnails.status();
-    let initial_semantic_token = state.thumbnails.semantic_cache_token();
     let initial_ranking_key = similar_ranking_key(
         &index.revision,
         &id,
         initial_status.ready,
         initial_status.failed,
-        &initial_semantic_token,
     );
     let initial_etag = similar_images_etag(
         &index.revision,
         &id,
         initial_status.ready,
         initial_status.failed,
-        &initial_semantic_token,
         query,
     );
     if is_not_modified(&headers, &initial_etag) {
@@ -496,20 +454,17 @@ async fn similar_images(
     // ranking worker. Refresh the key and conditional response before doing
     // any expensive descriptor work.
     let thumbnail_status = state.thumbnails.status();
-    let semantic_token = state.thumbnails.semantic_cache_token();
     let ranking_key = similar_ranking_key(
         &index.revision,
         &id,
         thumbnail_status.ready,
         thumbnail_status.failed,
-        &semantic_token,
     );
     let etag = similar_images_etag(
         &index.revision,
         &id,
         thumbnail_status.ready,
         thumbnail_status.failed,
-        &semantic_token,
         query,
     );
     if is_not_modified(&headers, &etag) {
@@ -523,30 +478,20 @@ async fn similar_images(
         );
     }
 
-    // Keep results stable while the one-time semantic index is still being
-    // built. The frontend refreshes an active recommendation when indexing
-    // completes; until then every candidate uses the dependable local visual
-    // descriptor instead of mixing indexed and not-yet-indexed candidates.
-    let semantic_active = thumbnail_status.semantic.enabled
-        && thumbnail_status.semantic.background_complete
-        && source_semantic.is_some();
-    let source_semantic = semantic_active.then_some(source_semantic).flatten();
     let candidates = index
         .images
         .iter()
         .filter(|candidate| candidate.id != source.id)
         .filter_map(|candidate| {
-            state.thumbnails.ready_path(&candidate.id).map(|path| {
-                let semantic = semantic_active
-                    .then(|| state.thumbnails.semantic_embedding(&candidate.id))
-                    .flatten();
-                (Arc::clone(candidate), path, semantic)
-            })
+            state
+                .thumbnails
+                .ready_path(&candidate.id)
+                .map(|path| (Arc::clone(candidate), path))
         })
         .collect::<Vec<_>>();
     let ranking = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        rank_similar_images(source, source_thumbnail, source_semantic, candidates)
+        rank_similar_images(source, source_thumbnail, candidates)
     })
     .await
     {
@@ -572,21 +517,10 @@ struct RankedSimilarity {
     fingerprint: DiversityFingerprint,
 }
 
-#[derive(Clone, Copy)]
-struct SimilarityScore {
-    relevance: f32,
-    included: bool,
-}
-
 fn rank_similar_images(
     source: Arc<ImageRecord>,
     source_thumbnail: std::path::PathBuf,
-    source_semantic: Option<Arc<SemanticEmbedding>>,
-    candidates: Vec<(
-        Arc<ImageRecord>,
-        std::path::PathBuf,
-        Option<Arc<SemanticEmbedding>>,
-    )>,
+    candidates: Vec<(Arc<ImageRecord>, std::path::PathBuf)>,
 ) -> anyhow::Result<Vec<Arc<ImageRecord>>> {
     let source_signature = signature_for_thumbnail(source.as_ref(), &source_thumbnail)?;
     let worker_count = std::thread::available_parallelism()
@@ -594,7 +528,6 @@ fn rank_similar_images(
         .unwrap_or(2)
         .min(candidates.len().max(1));
     let chunk_size = candidates.len().div_ceil(worker_count).max(1);
-    let source_semantic = source_semantic.as_deref();
     let mut ranked = std::thread::scope(|scope| -> anyhow::Result<Vec<_>> {
         let workers = candidates
             .chunks(chunk_size)
@@ -603,7 +536,7 @@ fn rank_similar_images(
                 let source_signature = &source_signature;
                 scope.spawn(move || {
                     let mut matches = Vec::with_capacity(chunk.len());
-                    for (candidate, thumbnail, candidate_semantic) in chunk {
+                    for (candidate, thumbnail) in chunk {
                         if candidate.id == source_id {
                             continue;
                         }
@@ -614,17 +547,13 @@ fn rank_similar_images(
                         else {
                             continue;
                         };
-                        let visual_score = similarity_score(source_signature, &candidate_signature);
-                        let semantic_score = source_semantic
-                            .zip(candidate_semantic.as_deref())
-                            .map(|(source, candidate)| semantic_similarity(source, candidate));
-                        let score = hybrid_similarity_score(visual_score, semantic_score);
-                        if !score.included {
+                        let score = similarity_score(source_signature, &candidate_signature);
+                        if score < MIN_SIMILARITY_SCORE {
                             continue;
                         }
                         matches.push(RankedSimilarity {
                             record: Arc::clone(candidate),
-                            score: score.relevance,
+                            score,
                             fingerprint: candidate_signature.diversity_fingerprint(),
                         });
                     }
@@ -656,25 +585,6 @@ fn rank_similar_images(
         .collect())
 }
 
-fn hybrid_similarity_score(visual: f32, semantic: Option<f32>) -> SimilarityScore {
-    let Some(semantic) = semantic else {
-        return SimilarityScore {
-            relevance: visual,
-            included: visual >= MIN_SIMILARITY_SCORE,
-        };
-    };
-    let semantic_cosine = semantic.clamp(-1.0, 1.0);
-    let semantic_relevance = ((semantic_cosine + SEMANTIC_CALIBRATION_OFFSET)
-        / SEMANTIC_CALIBRATION_RANGE)
-        .clamp(0.0, 1.0);
-    let relevance = semantic_relevance * SEMANTIC_WEIGHT + visual * (1.0 - SEMANTIC_WEIGHT);
-    SimilarityScore {
-        relevance,
-        included: visual >= MIN_SIMILARITY_SCORE
-            || (semantic_cosine >= MIN_SEMANTIC_COSINE && relevance >= MIN_HYBRID_SCORE),
-    }
-}
-
 fn similar_image_page(ranked: &[Arc<ImageRecord>], query: SimilarImagesRequest) -> ImagesResponse {
     let total = ranked.len();
     let offset = query.offset.min(total);
@@ -698,7 +608,7 @@ fn diversify_similarity_results(ranked: &mut Vec<RankedSimilarity>) {
         .collect::<Vec<_>>();
     let mut selected = Vec::with_capacity(target);
     while selected.len() < target {
-        let next = remaining
+        let Some(next) = remaining
             .iter()
             .enumerate()
             .max_by(
@@ -709,7 +619,9 @@ fn diversify_similarity_results(ranked: &mut Vec<RankedSimilarity>) {
                 },
             )
             .map(|(index, _)| index)
-            .expect("similarity selection has remaining candidates");
+        else {
+            break;
+        };
         let (candidate, _) = remaining.swap_remove(next);
         let fingerprint = candidate.fingerprint;
         selected.push(candidate);
@@ -1059,29 +971,21 @@ fn similar_images_etag(
     source_id: &str,
     ready: usize,
     failed: usize,
-    semantic_token: &str,
     query: SimilarImagesRequest,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-similar-images-v3\0");
+    hasher.update(b"pixhelf-similar-images-v4\0");
     hasher.update(source_id.as_bytes());
     hasher.update(&ready.to_le_bytes());
     hasher.update(&failed.to_le_bytes());
-    hasher.update(semantic_token.as_bytes());
     hasher.update(&query.offset.to_le_bytes());
     hasher.update(&query.limit.to_le_bytes());
     let query_hash = hasher.finalize().to_hex();
     format!("\"similar-{revision}-{}\"", &query_hash[..16])
 }
 
-fn similar_ranking_key(
-    revision: &str,
-    source_id: &str,
-    ready: usize,
-    failed: usize,
-    semantic_token: &str,
-) -> String {
-    format!("{revision}:{source_id}:{ready}:{failed}:{semantic_token}")
+fn similar_ranking_key(revision: &str, source_id: &str, ready: usize, failed: usize) -> String {
+    format!("{revision}:{source_id}:{ready}:{failed}")
 }
 
 fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
@@ -1309,20 +1213,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_similarity_can_rescue_a_visually_different_match() {
-        let semantic_match = hybrid_similarity_score(0.20, Some(0.10));
-        assert!(semantic_match.included);
-        assert!(semantic_match.relevance > MIN_HYBRID_SCORE);
-
-        let unrelated = hybrid_similarity_score(0.20, Some(0.04));
-        assert!(!unrelated.included);
-
-        let fallback = hybrid_similarity_score(0.70, None);
-        assert!(fallback.included);
-        assert_eq!(fallback.relevance, 0.70);
-    }
-
-    #[test]
     fn natural_language_search_ranks_shared_text_image_embeddings() {
         let record = |id: &str, name: &str| {
             Arc::new(ImageRecord {
@@ -1394,15 +1284,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_exposes_optional_semantic_index_progress() {
+    async fn status_exposes_optional_text_search_index_progress() {
         let response = request("/api/status").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status["semantic"]["enabled"], false);
-        assert_eq!(status["semantic"]["backgroundComplete"], true);
+        assert!(status.get("semantic").is_none());
         assert_eq!(status["textSearch"]["enabled"], false);
         assert_eq!(status["textSearch"]["backgroundComplete"], true);
     }
@@ -1579,9 +1468,8 @@ mod tests {
             Box::new(ColourTextSearchModel),
             [44; 16],
         );
-        let thumbnails = ThumbnailManager::new_with_indexes(
+        let thumbnails = ThumbnailManager::new_with_text_search(
             temp.path().join("cache"),
-            None,
             Some(Arc::clone(&text_search)),
         )
         .unwrap();

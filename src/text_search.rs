@@ -5,16 +5,16 @@
 //! text queries use the same shared embedding space and are cached in memory.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    fmt::Write as _,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
+
+#[cfg(test)]
+use std::fs;
 
 use anyhow::{Context, Result, anyhow, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
@@ -29,75 +29,31 @@ use tokenizers::{
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
+use crate::support::{
+    BoundedCache, PriorityQueue,
+    embedding::{
+        FINGERPRINT_BYTES, Fingerprint, QuantizedEmbedding, fingerprint_files, fingerprint_token,
+        is_sidecar, read_sidecar, remove_sidecar, sidecar_path, write_sidecar,
+    },
+    mutex_lock, read_lock, write_lock,
+};
+
 const MODEL_NAME: &str = "Chinese-CLIP ViT-B/16";
 const MODEL_EDGE: u32 = 224;
 const TEXT_CONTEXT_LENGTH: usize = 52;
 const EMBEDDING_SIZE: usize = 512;
 const EMBEDDING_MAGIC: &[u8; 8] = b"PXHFCN1\0";
 const EMBEDDING_EXTENSION: &str = "cnclip";
-const MODEL_FINGERPRINT_BYTES: usize = 16;
-const EMBEDDING_CHECKSUM_BYTES: usize = 16;
-const EMBEDDING_LENGTH: u64 =
-    (EMBEDDING_MAGIC.len() + MODEL_FINGERPRINT_BYTES + EMBEDDING_SIZE + EMBEDDING_CHECKSUM_BYTES)
-        as u64;
+const MODEL_FINGERPRINT_BYTES: usize = FINGERPRINT_BYTES;
 const QUERY_CACHE_LIMIT: usize = 16;
 
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Debug)]
-pub(crate) struct TextSearchEmbedding {
-    values: [i8; EMBEDDING_SIZE],
-    norm: f32,
-}
-
-impl TextSearchEmbedding {
-    fn quantize(values: &[f32]) -> Result<Self> {
-        if values.len() != EMBEDDING_SIZE || values.iter().any(|value| !value.is_finite()) {
-            bail!("text-search model returned an invalid embedding");
-        }
-        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-        if norm <= f32::EPSILON {
-            bail!("text-search model returned an empty embedding");
-        }
-        let values = std::array::from_fn(|index| {
-            (values[index] / norm * 127.0).round().clamp(-127.0, 127.0) as i8
-        });
-        Self::from_quantized(values)
-    }
-
-    fn from_quantized(values: [i8; EMBEDDING_SIZE]) -> Result<Self> {
-        let norm = values
-            .iter()
-            .map(|value| f32::from(*value).powi(2))
-            .sum::<f32>()
-            .sqrt();
-        if norm <= f32::EPSILON {
-            bail!("text-search embedding is empty");
-        }
-        Ok(Self { values, norm })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(values: impl IntoIterator<Item = (usize, i8)>) -> Self {
-        let mut embedding = [0_i8; EMBEDDING_SIZE];
-        for (index, value) in values {
-            embedding[index] = value;
-        }
-        Self::from_quantized(embedding).expect("test embedding must not be empty")
-    }
-}
+pub(crate) type TextSearchEmbedding = QuantizedEmbedding<EMBEDDING_SIZE>;
 
 pub(crate) fn text_image_similarity(
     query: &TextSearchEmbedding,
     image: &TextSearchEmbedding,
 ) -> f32 {
-    let dot = query
-        .values
-        .iter()
-        .zip(&image.values)
-        .map(|(left, right)| f32::from(*left) * f32::from(*right))
-        .sum::<f32>();
-    (dot / (query.norm * image.norm)).clamp(-1.0, 1.0)
+    query.cosine_similarity(image)
 }
 
 pub(crate) trait TextImageModel: Send {
@@ -107,11 +63,11 @@ pub(crate) trait TextImageModel: Send {
 
 pub(crate) struct TextSearchIndex {
     model: Arc<Mutex<Box<dyn TextImageModel>>>,
-    model_fingerprint: [u8; MODEL_FINGERPRINT_BYTES],
+    model_fingerprint: Fingerprint,
     model_token: String,
     entries: RwLock<HashMap<String, Arc<TextSearchEntry>>>,
-    queue: TextSearchQueue,
-    query_cache: Mutex<VecDeque<(String, Arc<TextSearchEmbedding>)>>,
+    queue: PriorityQueue,
+    query_cache: Mutex<BoundedCache<Arc<TextSearchEmbedding>>>,
     worker_started: AtomicBool,
     revision: AtomicU64,
 }
@@ -128,19 +84,6 @@ enum TextSearchState {
     Ready(Arc<TextSearchEmbedding>),
     Failed,
     Removed,
-}
-
-#[derive(Default)]
-struct TextSearchQueue {
-    state: Mutex<TextSearchQueueState>,
-    notify: Notify,
-}
-
-#[derive(Default)]
-struct TextSearchQueueState {
-    urgent: VecDeque<String>,
-    background: VecDeque<String>,
-    queued: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -169,24 +112,10 @@ impl TextSearchStatus {
     }
 }
 
-fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 impl TextSearchIndex {
     pub(crate) fn load(model_path: &Path, vocabulary_path: &Path) -> Result<Arc<Self>> {
-        let fingerprint = fingerprint_files(&[model_path, vocabulary_path])?;
+        let fingerprint =
+            fingerprint_files(&[model_path, vocabulary_path], "text-search model file")?;
         let model = ChineseClip::load(model_path, vocabulary_path).with_context(|| {
             format!(
                 "cannot load natural-language search model: {}",
@@ -219,8 +148,8 @@ impl TextSearchIndex {
             model_fingerprint,
             model_token: fingerprint_token(&model_fingerprint),
             entries: RwLock::new(HashMap::new()),
-            queue: TextSearchQueue::default(),
-            query_cache: Mutex::new(VecDeque::new()),
+            queue: PriorityQueue::default(),
+            query_cache: Mutex::new(BoundedCache::new(QUERY_CACHE_LIMIT)),
             worker_started: AtomicBool::new(false),
             revision: AtomicU64::new(0),
         })
@@ -304,23 +233,11 @@ impl TextSearchIndex {
     }
 
     fn cached_query(&self, query: &str) -> Option<Arc<TextSearchEmbedding>> {
-        let mut cache = mutex_lock(&self.query_cache);
-        let position = cache.iter().position(|(cached, _)| cached == query)?;
-        let entry = cache.remove(position)?;
-        let embedding = Arc::clone(&entry.1);
-        cache.push_back(entry);
-        Some(embedding)
+        mutex_lock(&self.query_cache).get_cloned(query)
     }
 
     fn cache_query(&self, query: String, embedding: Arc<TextSearchEmbedding>) {
-        let mut cache = mutex_lock(&self.query_cache);
-        if let Some(position) = cache.iter().position(|(cached, _)| cached == &query) {
-            cache.remove(position);
-        }
-        if cache.len() >= QUERY_CACHE_LIMIT {
-            cache.pop_front();
-        }
-        cache.push_back((query, embedding));
+        mutex_lock(&self.query_cache).insert(query, embedding);
     }
 
     pub(crate) fn cache_token(&self) -> String {
@@ -421,118 +338,28 @@ impl TextSearchIndex {
     }
 }
 
-impl TextSearchQueue {
-    fn retain(&self, valid_ids: &HashSet<&str>) {
-        let mut state = mutex_lock(&self.state);
-        state.urgent.retain(|id| valid_ids.contains(id.as_str()));
-        state
-            .background
-            .retain(|id| valid_ids.contains(id.as_str()));
-        state.queued.retain(|id| valid_ids.contains(id.as_str()));
-    }
-
-    fn push_urgent(&self, id: String) {
-        let should_notify = {
-            let mut state = mutex_lock(&self.state);
-            if state.queued.contains(&id) {
-                if let Some(position) = state.background.iter().position(|queued| queued == &id) {
-                    state.background.remove(position);
-                    state.urgent.push_back(id);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                state.queued.insert(id.clone());
-                state.urgent.push_back(id);
-                true
-            }
-        };
-        if should_notify {
-            self.notify.notify_one();
-        }
-    }
-
-    fn push_background(&self, id: String) {
-        let should_notify = {
-            let mut state = mutex_lock(&self.state);
-            if state.queued.insert(id.clone()) {
-                state.background.push_back(id);
-                true
-            } else {
-                false
-            }
-        };
-        if should_notify {
-            self.notify.notify_one();
-        }
-    }
-
-    async fn pop(&self) -> String {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(id) = {
-                let mut state = mutex_lock(&self.state);
-                let id = state
-                    .urgent
-                    .pop_front()
-                    .or_else(|| state.background.pop_front());
-                if let Some(id) = &id {
-                    state.queued.remove(id);
-                }
-                id
-            } {
-                return id;
-            }
-            notified.as_mut().await;
-        }
-    }
-}
-
 pub(crate) fn embedding_path(thumbnail: &Path) -> PathBuf {
-    thumbnail.with_extension(EMBEDDING_EXTENSION)
+    sidecar_path(thumbnail, EMBEDDING_EXTENSION)
 }
 
 pub(crate) fn is_text_search_sidecar(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some(EMBEDDING_EXTENSION)
+    is_sidecar(path, EMBEDDING_EXTENSION)
 }
 
 pub(crate) fn remove_embedding_for_thumbnail(thumbnail: &Path) -> std::io::Result<()> {
-    match fs::remove_file(embedding_path(thumbnail)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
+    remove_sidecar(thumbnail, EMBEDDING_EXTENSION)
 }
 
 fn read_embedding(
     path: &Path,
     expected_fingerprint: &[u8; MODEL_FINGERPRINT_BYTES],
 ) -> Result<TextSearchEmbedding> {
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() || metadata.len() != EMBEDDING_LENGTH {
-        bail!("text-search embedding cache has an unexpected size");
-    }
-    let mut file = File::open(path)?;
-    let mut magic = [0_u8; EMBEDDING_MAGIC.len()];
-    file.read_exact(&mut magic)?;
-    if &magic != EMBEDDING_MAGIC {
-        bail!("text-search embedding cache has an unknown version");
-    }
-    let mut fingerprint = [0_u8; MODEL_FINGERPRINT_BYTES];
-    file.read_exact(&mut fingerprint)?;
-    if &fingerprint != expected_fingerprint {
-        bail!("text-search embedding belongs to another model");
-    }
-    let mut bytes = [0_u8; EMBEDDING_SIZE];
-    file.read_exact(&mut bytes)?;
-    let mut checksum = [0_u8; EMBEDDING_CHECKSUM_BYTES];
-    file.read_exact(&mut checksum)?;
-    if checksum != embedding_checksum(&fingerprint, &bytes) {
-        bail!("text-search embedding cache checksum does not match");
-    }
-    TextSearchEmbedding::from_quantized(bytes.map(|value| value as i8))
+    read_sidecar(
+        path,
+        expected_fingerprint,
+        EMBEDDING_MAGIC,
+        "text-search embedding",
+    )
 }
 
 fn write_embedding(
@@ -540,78 +367,13 @@ fn write_embedding(
     fingerprint: &[u8; MODEL_FINGERPRINT_BYTES],
     embedding: &TextSearchEmbedding,
 ) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("invalid text-search cache path: {}", path.display()))?;
-    fs::create_dir_all(parent)?;
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("embedding"),
-        std::process::id(),
-        sequence
-    ));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(EMBEDDING_MAGIC)?;
-        file.write_all(fingerprint)?;
-        let values = embedding.values.map(|value| value as u8);
-        file.write_all(&values)?;
-        file.write_all(&embedding_checksum(fingerprint, &values))?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn embedding_checksum(
-    fingerprint: &[u8; MODEL_FINGERPRINT_BYTES],
-    values: &[u8; EMBEDDING_SIZE],
-) -> [u8; EMBEDDING_CHECKSUM_BYTES] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(fingerprint);
-    hasher.update(values);
-    let mut checksum = [0_u8; EMBEDDING_CHECKSUM_BYTES];
-    checksum.copy_from_slice(&hasher.finalize().as_bytes()[..EMBEDDING_CHECKSUM_BYTES]);
-    checksum
-}
-
-fn fingerprint_files(paths: &[&Path]) -> Result<[u8; MODEL_FINGERPRINT_BYTES]> {
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    for path in paths {
-        let mut file = File::open(path)
-            .with_context(|| format!("cannot open text-search model file: {}", path.display()))?;
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        hasher.update(b"\0");
-    }
-    let mut fingerprint = [0_u8; MODEL_FINGERPRINT_BYTES];
-    fingerprint.copy_from_slice(&hasher.finalize().as_bytes()[..MODEL_FINGERPRINT_BYTES]);
-    Ok(fingerprint)
-}
-
-fn fingerprint_token(fingerprint: &[u8; MODEL_FINGERPRINT_BYTES]) -> String {
-    let mut token = String::with_capacity(MODEL_FINGERPRINT_BYTES * 2);
-    for byte in fingerprint {
-        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    token
+    write_sidecar(
+        path,
+        fingerprint,
+        EMBEDDING_MAGIC,
+        embedding,
+        "text-search embedding",
+    )
 }
 
 struct ChineseClip {
@@ -646,7 +408,7 @@ impl TextImageModel for ChineseClip {
             .get_image_features(&input)?
             .i(0)?
             .to_vec1::<f32>()?;
-        TextSearchEmbedding::quantize(&values)
+        TextSearchEmbedding::quantize(&values, "text-search image model")
     }
 
     fn embed_text(&mut self, text: &str) -> Result<TextSearchEmbedding> {
@@ -666,7 +428,7 @@ impl TextImageModel for ChineseClip {
             .get_text_features(&input_ids, Some(&token_type_ids), Some(&attention_mask))?
             .i(0)?
             .to_vec1::<f32>()?;
-        TextSearchEmbedding::quantize(&values)
+        TextSearchEmbedding::quantize(&values, "text-search text model")
     }
 }
 

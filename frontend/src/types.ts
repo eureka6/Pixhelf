@@ -33,15 +33,6 @@ export interface ThumbnailStatus {
   failed: number;
   initialBatchReady: boolean;
   backgroundComplete: boolean;
-  semantic: {
-    enabled: boolean;
-    total: number;
-    ready: number;
-    queued: number;
-    processing: number;
-    failed: number;
-    backgroundComplete: boolean;
-  };
   textSearch: {
     enabled: boolean;
     total: number;

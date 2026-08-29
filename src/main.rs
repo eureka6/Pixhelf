@@ -1,7 +1,7 @@
 mod config;
 mod gallery;
-mod semantic;
 mod similarity;
+mod support;
 mod text_search;
 mod thumbs;
 mod web;
@@ -11,7 +11,6 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use config::Config;
 use gallery::{GalleryIndex, scan_gallery};
-use semantic::SemanticIndex;
 use text_search::TextSearchIndex;
 use thumbs::ThumbnailManager;
 use tokio::{net::TcpListener, sync::RwLock};
@@ -51,16 +50,6 @@ async fn main() -> Result<()> {
         .map(|record| record.id.clone())
         .collect();
     let index = Arc::new(RwLock::new(Arc::new(index)));
-    let semantic = match config.semantic_model.as_deref() {
-        Some(model_path) => match SemanticIndex::load(model_path) {
-            Ok(index) => Some(index),
-            Err(error) => {
-                warn!(path = %model_path.display(), %error, "semantic model unavailable; using local visual fallback");
-                None
-            }
-        },
-        None => None,
-    };
     let text_search = match config.text_search.as_ref() {
         Some(files) => match TextSearchIndex::load(&files.model, &files.vocabulary) {
             Ok(index) => Some(index),
@@ -76,9 +65,8 @@ async fn main() -> Result<()> {
         },
         None => None,
     };
-    let thumbnails = ThumbnailManager::new_with_indexes(
+    let thumbnails = ThumbnailManager::new_with_text_search(
         config.cache_dir.clone(),
-        semantic.as_ref().map(Arc::clone),
         text_search.as_ref().map(Arc::clone),
     )?;
     {
@@ -86,9 +74,6 @@ async fn main() -> Result<()> {
         thumbnails.reconcile(&current.images);
     }
     thumbnails.start_workers(config.workers);
-    if let Some(semantic) = semantic {
-        semantic.start_worker();
-    }
     if let Some(text_search) = text_search {
         text_search.start_worker();
     }

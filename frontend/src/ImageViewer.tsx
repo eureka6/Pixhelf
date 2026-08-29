@@ -14,11 +14,34 @@ import {
   ScanSearch,
   X,
 } from "./icons";
+import { SimilarImageMasonry, SimilarImageSkeleton } from "./SimilarImages";
 import type { GalleryImage } from "./types";
+import {
+  DEFAULT_TRANSFORM,
+  clamp,
+  drawViewerCanvas,
+  initialViewerSourceState,
+  isDirectOriginalReady,
+  mouseSideDirection,
+  pendingViewerSourceState,
+  pointDistance,
+  pointMidpoint,
+  resolveViewerDisplaySource,
+  rubberBand,
+  selectViewerSourceStrategy,
+  useViewportSize,
+  viewerMediaDimensions,
+  viewportRenderDimensions,
+} from "./viewerLogic";
+import type {
+  PointerPoint,
+  ViewerSourcePresentation,
+  ViewerSourceState,
+  ViewerTransform,
+} from "./viewerLogic";
 import {
   canPreloadViewerNeighbors,
   getViewerOriginalAsset,
-  getViewerOriginalStatus,
   getReadyViewerViewportRenderAsset,
   getViewerThumbnailStatus,
   getViewerViewportRenderAsset,
@@ -35,8 +58,6 @@ const DOUBLE_TAP_DELAY_MS = 280;
 const VIEWER_SCROLL_EPSILON = 2;
 const WHEEL_HANDOFF_DELAY_MS = 220;
 const MAX_RENDER_EDGE = 4096;
-const MAX_NATIVE_IMAGE_EDGE = 12_288;
-const MOBILE_VIEWPORT_RENDER_EDGE = 2048;
 const MOBILE_SWIPE_MOTION_MS = 170;
 const MOBILE_SWIPE_CLEANUP_MS = MOBILE_SWIPE_MOTION_MS + 50;
 const MOBILE_RENDER_SETTLE_MS = MOBILE_SWIPE_CLEANUP_MS + 16;
@@ -46,17 +67,6 @@ const TOUCH_SWIPE_MAX_DISTANCE_PX = 56;
 const TOUCH_SWIPE_DISTANCE_RATIO = 0.08;
 const TOUCH_SWIPE_FLICK_MIN_DISTANCE_PX = 20;
 const TOUCH_SWIPE_FLICK_VELOCITY = 0.32;
-
-type ViewerTransform = {
-  scale: number;
-  x: number;
-  y: number;
-};
-
-type PointerPoint = {
-  x: number;
-  y: number;
-};
 
 type GestureStart = {
   point: PointerPoint;
@@ -76,25 +86,6 @@ type PinchStart = {
   transform: ViewerTransform;
 };
 
-type ViewerSourcePresentation = "direct" | "upgrade";
-
-type ViewerSourceStrategy = "viewport-upgrade" | "bounded-canvas" | "direct-original";
-
-type ViewerSourceState = {
-  id: string;
-  attempt: number;
-  loaded: boolean;
-  failed: boolean;
-  presentation: ViewerSourcePresentation;
-};
-
-type ViewerDisplayState = {
-  sourceLoaded: boolean;
-  thumbnailLoaded: boolean;
-  viewportBitmapRenderer: boolean;
-  nativeOriginalActive: boolean;
-};
-
 type ThumbnailLoadState = {
   id: string;
   loaded: boolean;
@@ -111,11 +102,6 @@ type FullResolutionState = {
 type PreparedSwipeSnapshot = {
   imageId: string;
   element: HTMLDivElement;
-};
-
-type ViewportSize = {
-  width: number;
-  height: number;
 };
 
 type GestureGeometry = {
@@ -137,290 +123,6 @@ type IdleScheduler = Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
   cancelIdleCallback?: (handle: number) => void;
 };
-
-const DEFAULT_TRANSFORM: ViewerTransform = { scale: 1, x: 0, y: 0 };
-
-function readViewportSize(): ViewportSize {
-  return {
-    width: window.visualViewport?.width ?? window.innerWidth,
-    height: window.visualViewport?.height ?? window.innerHeight,
-  };
-}
-
-function useViewportSize(): ViewportSize {
-  const [size, setSize] = useState(readViewportSize);
-  useEffect(() => {
-    const viewport = window.visualViewport;
-    let frame = 0;
-    const schedule = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        setSize(readViewportSize());
-      });
-    };
-    window.addEventListener("resize", schedule);
-    window.addEventListener("orientationchange", schedule);
-    viewport?.addEventListener("resize", schedule);
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("orientationchange", schedule);
-      viewport?.removeEventListener("resize", schedule);
-    };
-  }, []);
-  return size;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function pointDistance(first: PointerPoint, second: PointerPoint): number {
-  return Math.hypot(second.x - first.x, second.y - first.y);
-}
-
-function pointMidpoint(first: PointerPoint, second: PointerPoint): PointerPoint {
-  return {
-    x: (first.x + second.x) / 2,
-    y: (first.y + second.y) / 2,
-  };
-}
-
-function rubberBand(distance: number, limit: number): number {
-  if (!distance) return 0;
-  return Math.sign(distance) * limit * (1 - Math.exp(-Math.abs(distance) / limit));
-}
-
-function mouseSideDirection(button: number): -1 | 1 | null {
-  if (button === 3) return -1;
-  if (button === 4) return 1;
-  return null;
-}
-
-function viewerMediaDimensions(
-  image: GalleryImage,
-  viewport: ViewportSize,
-): { width: number; height: number } {
-  const availableWidth = Math.max(1, viewport.width);
-  const availableHeight = Math.max(1, viewport.height);
-  const imageRatio = image.width / Math.max(1, image.height);
-  const width = Math.min(availableWidth, availableHeight * imageRatio);
-  return { width, height: width / imageRatio };
-}
-
-function viewportRenderDimensions(
-  image: GalleryImage,
-  viewport: ViewportSize,
-): { width: number; height: number } {
-  const media = viewerMediaDimensions(image, viewport);
-  const density = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
-  const requestedWidth = media.width * density;
-  const requestedHeight = media.height * density;
-  const scale = Math.min(
-    1,
-    MOBILE_VIEWPORT_RENDER_EDGE / Math.max(1, requestedWidth, requestedHeight),
-  );
-  return {
-    width: Math.max(1, Math.round(requestedWidth * scale)),
-    height: Math.max(1, Math.round(requestedHeight * scale)),
-  };
-}
-
-function selectViewerSourceStrategy(
-  image: GalleryImage,
-  renderSize: ViewportSize,
-  viewportBitmapsSupported: boolean,
-): ViewerSourceStrategy {
-  const sourceFitsViewport = image.width <= renderSize.width
-    && image.height <= renderSize.height;
-  if (viewportBitmapsSupported && !sourceFitsViewport) return "viewport-upgrade";
-  if (Math.max(image.width, image.height) > MAX_NATIVE_IMAGE_EDGE) return "bounded-canvas";
-  return "direct-original";
-}
-
-function isDirectOriginalReady(
-  image: GalleryImage,
-  strategy: ViewerSourceStrategy,
-  displayedSources: ReadonlySet<string>,
-): boolean {
-  return strategy === "direct-original" && (
-    displayedSources.has(viewerOriginalUrl(image))
-    || getViewerOriginalStatus(image) === "ready"
-  );
-}
-
-function initialViewerSourceState(id: string, ready: boolean): ViewerSourceState {
-  return {
-    id,
-    attempt: 0,
-    loaded: ready,
-    failed: false,
-    presentation: ready ? "direct" : "upgrade",
-  };
-}
-
-function pendingViewerSourceState(
-  id: string,
-  attempt: number,
-  failed = false,
-): ViewerSourceState {
-  return { id, attempt, loaded: false, failed, presentation: "upgrade" };
-}
-
-function resolveViewerDisplaySource({
-  sourceLoaded,
-  thumbnailLoaded,
-  viewportBitmapRenderer,
-  nativeOriginalActive,
-}: ViewerDisplayState): "original" | "viewport-bitmap" | "thumbnail" | "placeholder" {
-  if (nativeOriginalActive) return "original";
-  if (sourceLoaded) return viewportBitmapRenderer ? "viewport-bitmap" : "original";
-  return thumbnailLoaded ? "thumbnail" : "placeholder";
-}
-
-function drawViewerCanvas(
-  canvas: HTMLCanvasElement,
-  source: CanvasImageSource,
-  width: number,
-  height: number,
-  sourceKey: string,
-): void {
-  const context = canvas.getContext("2d", { alpha: true });
-  if (!context) throw new Error("canvas renderer is unavailable");
-  canvas.width = width;
-  canvas.height = height;
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
-  context.clearRect(0, 0, width, height);
-  context.drawImage(source, 0, 0, width, height);
-  canvas.dataset.renderedSource = sourceKey;
-}
-
-function SimilarImageCard({
-  image,
-  onOpen,
-}: {
-  image: GalleryImage;
-  onOpen: (image: GalleryImage) => void;
-}) {
-  return (
-    <figure
-      className="viewer-similar-card"
-      title={image.name}
-      data-image-id={image.id}
-      role="button"
-      tabIndex={0}
-      aria-label={`查看相似图片 ${image.name}`}
-      onClick={() => onOpen(image)}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onOpen(image);
-      }}
-    >
-      <div className="viewer-similar-card-media">
-        <img
-          src={viewerThumbnailUrl(image)}
-          alt={image.name}
-          loading="lazy"
-          decoding="async"
-          width={image.width}
-          height={image.height}
-          draggable={false}
-          onError={(event) => {
-            event.currentTarget.dataset.failed = "true";
-          }}
-        />
-        <span className="viewer-similar-card-fallback" aria-hidden="true">
-          <RefreshCw size={18} />
-        </span>
-      </div>
-      <figcaption>{image.name}</figcaption>
-    </figure>
-  );
-}
-
-function SimilarImageMasonry({
-  images,
-  total,
-  columnCount,
-  hasMore,
-  loadingMore,
-  error,
-  onLoadMore,
-  onOpen,
-}: {
-  images: GalleryImage[];
-  total: number;
-  columnCount: number;
-  hasMore: boolean;
-  loadingMore: boolean;
-  error: string | null;
-  onLoadMore: () => void;
-  onOpen: (image: GalleryImage) => void;
-}) {
-  const columns = Array.from({ length: columnCount }, () => [] as GalleryImage[]);
-  const heights = Array.from({ length: columnCount }, () => 0);
-  for (const image of images) {
-    const target = heights.indexOf(Math.min(...heights));
-    columns[target]!.push(image);
-    heights[target] += image.height / Math.max(1, image.width) + 0.12;
-  }
-
-  return (
-    <>
-      <div
-        className="viewer-similar-masonry"
-        data-columns={columnCount}
-        style={{ "--similar-columns": columnCount } as CSSProperties}
-      >
-        {columns.map((column, index) => (
-          <div key={index} className="viewer-similar-column">
-            {column.map((candidate) => (
-              <SimilarImageCard key={candidate.id} image={candidate} onOpen={onOpen} />
-            ))}
-          </div>
-        ))}
-      </div>
-      {error && (
-        <div className="viewer-similar-inline-error" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={onLoadMore}>重试</button>
-        </div>
-      )}
-      {!error && (
-        <div className="viewer-similar-pagination">
-          {hasMore ? (
-            <button
-              type="button"
-              className="viewer-similar-load-more"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              aria-busy={loadingMore}
-            >
-              {loadingMore && <LoaderCircle className="spin" size={15} />}
-              <span>{loadingMore ? "正在加载" : "加载更多相似图片"}</span>
-              {!loadingMore && <small>{images.length} / {total}</small>}
-            </button>
-          ) : (
-            <span className="viewer-similar-count">
-              已显示全部 {total.toLocaleString()} 张相似图片
-            </span>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-function SimilarImageSkeleton() {
-  return (
-    <div className="viewer-similar-skeleton" aria-label="正在查找相似图片">
-      {[1, 2, 3, 4, 5, 6].map((item) => <span key={item} />)}
-    </div>
-  );
-}
 
 export function ImageViewer({
   images,
