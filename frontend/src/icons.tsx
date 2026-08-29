@@ -170,6 +170,19 @@ export function Search(props: IconProps) {
   return <Icon {...props}><path d="m21 21-4.34-4.34" /><circle cx="11" cy="11" r="8" /></Icon>;
 }
 
+export function ScanSearch(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+      <circle cx="10.8" cy="10.8" r="3.8" />
+      <path d="m14 14 3.2 3.2" />
+    </Icon>
+  );
+}
+
 export function X(props: IconProps) {
   return <Icon {...props}><path d="M18 6 6 18" /><path d="m6 6 12 12" /></Icon>;
 }

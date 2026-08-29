@@ -6,10 +6,18 @@ use anyhow::{Context, Result, bail};
 pub struct Config {
     pub gallery_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub semantic_model: Option<PathBuf>,
+    pub text_search: Option<TextSearchFiles>,
     pub listen: SocketAddr,
     pub initial_batch: usize,
     pub workers: usize,
     pub scan_interval: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSearchFiles {
+    pub model: PathBuf,
+    pub vocabulary: PathBuf,
 }
 
 impl Config {
@@ -17,6 +25,9 @@ impl Config {
         let cwd = env::current_dir().context("cannot determine the working directory")?;
         let mut gallery_dir = cwd.join("pic");
         let mut cache_dir = cwd.join(".pixhelf-cache").join("thumbnails");
+        let mut semantic_model = None;
+        let mut text_search_model = None;
+        let mut text_search_vocabulary = None;
         let mut listen = "0.0.0.0:3002".parse::<SocketAddr>()?;
         let mut initial_batch = 60usize;
         let mut workers = default_worker_count();
@@ -27,6 +38,15 @@ impl Config {
             match arg.as_str() {
                 "--gallery-dir" => gallery_dir = path_value(&mut args, &arg, &cwd)?,
                 "--cache-dir" => cache_dir = path_value(&mut args, &arg, &cwd)?,
+                "--semantic-model" => {
+                    semantic_model = Some(path_value(&mut args, &arg, &cwd)?);
+                }
+                "--text-search-model" => {
+                    text_search_model = Some(path_value(&mut args, &arg, &cwd)?);
+                }
+                "--text-search-vocab" => {
+                    text_search_vocabulary = Some(path_value(&mut args, &arg, &cwd)?);
+                }
                 "--listen" => {
                     listen = value(&mut args, &arg)?
                         .parse()
@@ -53,10 +73,28 @@ impl Config {
             .with_context(|| format!("cannot create cache directory: {}", cache_dir.display()))?;
         cache_dir = canonical_directory(&cache_dir, "cache")?;
         ensure_cache_is_external(&gallery_dir, &cache_dir)?;
+        semantic_model = semantic_model
+            .map(|path| canonical_file(&path, "semantic model"))
+            .transpose()?;
+        let text_search = match text_search_model {
+            Some(model) => {
+                let model = canonical_file(&model, "text-search model")?;
+                let vocabulary = text_search_vocabulary
+                    .unwrap_or_else(|| model.parent().unwrap_or(&cwd).join("vocab.txt"));
+                let vocabulary = canonical_file(&vocabulary, "text-search vocabulary")?;
+                Some(TextSearchFiles { model, vocabulary })
+            }
+            None if text_search_vocabulary.is_some() => {
+                bail!("--text-search-vocab requires --text-search-model");
+            }
+            None => None,
+        };
 
         Ok(Self {
             gallery_dir,
             cache_dir,
+            semantic_model,
+            text_search,
             listen,
             initial_batch,
             workers,
@@ -71,6 +109,14 @@ fn canonical_directory(path: &std::path::Path, label: &str) -> Result<PathBuf> {
     }
     std::fs::canonicalize(path)
         .with_context(|| format!("cannot resolve {label} directory: {}", path.display()))
+}
+
+fn canonical_file(path: &std::path::Path, label: &str) -> Result<PathBuf> {
+    if !path.is_file() {
+        bail!("{label} file does not exist: {}", path.display());
+    }
+    std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve {label} file: {}", path.display()))
 }
 
 fn ensure_cache_is_external(
@@ -133,6 +179,9 @@ Usage: pixhelf [OPTIONS]\n\n\
 Options:\n  \
   --gallery-dir PATH     Gallery root (default: ./pic)\n  \
   --cache-dir PATH       Thumbnail cache (default: ./.pixhelf-cache/thumbnails)\n  \
+  --semantic-model PATH  Optional official facebook/dinov2-small safetensors model\n  \
+  --text-search-model PATH  Optional OFA Chinese-CLIP ViT-B/16 safetensors model\n  \
+  --text-search-vocab PATH  Chinese-CLIP vocab.txt (default: beside model)\n  \
   --listen HOST:PORT     Listen address (default: 0.0.0.0:3002)\n  \
   --initial-batch N      Priority thumbnail batch (default: 60)\n  \
   --workers N            Background thumbnail workers (default: 2-4, based on CPU)\n  \
@@ -162,6 +211,20 @@ mod tests {
             temp.path().canonicalize().unwrap()
         );
         assert!(canonical_directory(&temp.path().join("missing"), "test").is_err());
+    }
+
+    #[test]
+    fn resolves_only_existing_model_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = temp.path().join("model.safetensors");
+        std::fs::write(&model, b"model").unwrap();
+
+        assert_eq!(
+            canonical_file(&model, "model").unwrap(),
+            model.canonicalize().unwrap()
+        );
+        assert!(canonical_file(temp.path(), "model").is_err());
+        assert!(canonical_file(&temp.path().join("missing"), "model").is_err());
     }
 
     #[test]

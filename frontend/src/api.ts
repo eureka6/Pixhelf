@@ -9,6 +9,8 @@ import type {
 } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15_000;
+const IMAGE_SEARCH_REQUEST_TIMEOUT_MS = 60_000;
+const SIMILAR_REQUEST_TIMEOUT_MS = 60_000;
 
 type JsonObject = Record<string, unknown>;
 type JsonValidator<T> = (value: unknown) => value is T;
@@ -66,7 +68,23 @@ function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
     && isNonNegativeInteger(value.processing)
     && isNonNegativeInteger(value.failed)
     && typeof value.initialBatchReady === "boolean"
-    && typeof value.backgroundComplete === "boolean";
+    && typeof value.backgroundComplete === "boolean"
+    && isObject(value.semantic)
+    && typeof value.semantic.enabled === "boolean"
+    && isNonNegativeInteger(value.semantic.total)
+    && isNonNegativeInteger(value.semantic.ready)
+    && isNonNegativeInteger(value.semantic.queued)
+    && isNonNegativeInteger(value.semantic.processing)
+    && isNonNegativeInteger(value.semantic.failed)
+    && typeof value.semantic.backgroundComplete === "boolean"
+    && isObject(value.textSearch)
+    && typeof value.textSearch.enabled === "boolean"
+    && isNonNegativeInteger(value.textSearch.total)
+    && isNonNegativeInteger(value.textSearch.ready)
+    && isNonNegativeInteger(value.textSearch.queued)
+    && isNonNegativeInteger(value.textSearch.processing)
+    && isNonNegativeInteger(value.textSearch.failed)
+    && typeof value.textSearch.backgroundComplete === "boolean";
 }
 
 function isBootstrapData(value: unknown): value is BootstrapData {
@@ -80,6 +98,7 @@ async function getJson<T>(
   url: string,
   validate: JsonValidator<T>,
   signal?: AbortSignal,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -93,7 +112,7 @@ async function getJson<T>(
   const timeout = window.setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -168,5 +187,27 @@ export function getImages(
   if (options.album) params.set("album", options.album);
   if (options.search) params.set("search", options.search);
   if (options.seed) params.set("seed", options.seed);
-  return getJson(`/api/images?${params}`, isImagesPage, signal);
+  return getJson(
+    `/api/images?${params}`,
+    isImagesPage,
+    signal,
+    options.search ? IMAGE_SEARCH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function getSimilarImages(
+  imageId: string,
+  options: { offset: number; limit: number },
+  signal?: AbortSignal,
+): Promise<ImagesPage> {
+  const params = new URLSearchParams({
+    offset: String(options.offset),
+    limit: String(options.limit),
+  });
+  return getJson(
+    `/api/images/${encodeURIComponent(imageId)}/similar?${params}`,
+    isImagesPage,
+    signal,
+    SIMILAR_REQUEST_TIMEOUT_MS,
+  );
 }

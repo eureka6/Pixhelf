@@ -1,4 +1,8 @@
-use std::{cmp::Reverse, sync::Arc};
+use std::{
+    cmp::Reverse,
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use axum::{
     Json, Router,
@@ -9,7 +13,7 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tower::ServiceExt;
 use tower_http::{
     compression::{CompressionLayer, CompressionLevel},
@@ -21,6 +25,12 @@ use tracing::error;
 
 use crate::{
     gallery::{Album, GalleryIndex, ImageRecord},
+    semantic::{SemanticEmbedding, semantic_similarity},
+    similarity::{
+        DiversityFingerprint, MIN_SIMILARITY_SCORE, redundancy_score, signature_for_thumbnail,
+        similarity_score,
+    },
+    text_search::{TextSearchEmbedding, text_image_similarity},
     thumbs::{ThumbnailError, ThumbnailManager, ThumbnailStatus},
 };
 
@@ -39,7 +49,85 @@ const APP_CSS: &[u8] = include_bytes!(concat!(
 const ASSET_VERSION: &str = env!("PIXHELF_ASSET_VERSION");
 const DEFAULT_PAGE_SIZE: usize = 60;
 const MAX_PAGE_SIZE: usize = 200;
+const DIVERSIFIED_SIMILARITY_RESULTS: usize = 120;
+const REDUNDANCY_PENALTY_START: f32 = 0.86;
+const MAX_REDUNDANCY_PENALTY: f32 = 0.08;
+const SEMANTIC_WEIGHT: f32 = 0.70;
+// DINOv2 CLS vectors are zero-centred: unrelated images cluster around zero,
+// so raw cosine values are not probabilities. Preserve the raw gate for
+// precision, then calibrate the useful -0.10..0.20 range before blending it
+// with the model-free visual score.
+const MIN_SEMANTIC_COSINE: f32 = 0.085;
+const SEMANTIC_CALIBRATION_OFFSET: f32 = 0.10;
+const SEMANTIC_CALIBRATION_RANGE: f32 = 0.30;
+const MIN_HYBRID_SCORE: f32 = 0.48;
+const SIMILARITY_RANKING_CACHE_LIMIT: usize = 8;
+const TEXT_SEARCH_RANKING_CACHE_LIMIT: usize = 16;
+const TEXT_SEARCH_RESULT_LIMIT: usize = 600;
+const FILENAME_MATCH_BOOST: f32 = 3.0;
 const MAX_QUERY_VALUE_BYTES: usize = 4096;
+
+static SIMILARITY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
+type SimilarityRanking = Arc<Vec<Arc<ImageRecord>>>;
+type SimilarityRankingCache = Mutex<HashMap<String, SimilarityRanking>>;
+static SIMILARITY_RANKING_CACHE: OnceLock<SimilarityRankingCache> = OnceLock::new();
+type TextSearchRanking = Arc<Vec<Arc<ImageRecord>>>;
+type TextSearchRankingCache = Mutex<HashMap<String, TextSearchRanking>>;
+static TEXT_SEARCH_RANKING_CACHE: OnceLock<TextSearchRankingCache> = OnceLock::new();
+
+fn similarity_limit() -> Arc<Semaphore> {
+    Arc::clone(SIMILARITY_LIMIT.get_or_init(|| Arc::new(Semaphore::new(1))))
+}
+
+fn similarity_ranking_cache() -> &'static SimilarityRankingCache {
+    SIMILARITY_RANKING_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_similarity_ranking(key: &str) -> Option<SimilarityRanking> {
+    similarity_ranking_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(key)
+        .cloned()
+}
+
+fn cache_similarity_ranking(key: String, ranking: SimilarityRanking) {
+    let mut cache = similarity_ranking_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.contains_key(&key)
+        && cache.len() >= SIMILARITY_RANKING_CACHE_LIMIT
+        && let Some(evicted) = cache.keys().next().cloned()
+    {
+        cache.remove(&evicted);
+    }
+    cache.insert(key, ranking);
+}
+
+fn text_search_ranking_cache() -> &'static TextSearchRankingCache {
+    TEXT_SEARCH_RANKING_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_text_search_ranking(key: &str) -> Option<TextSearchRanking> {
+    text_search_ranking_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(key)
+        .cloned()
+}
+
+fn cache_text_search_ranking(key: String, ranking: TextSearchRanking) {
+    let mut cache = text_search_ranking_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.contains_key(&key)
+        && cache.len() >= TEXT_SEARCH_RANKING_CACHE_LIMIT
+        && let Some(evicted) = cache.keys().next().cloned()
+    {
+        cache.remove(&evicted);
+    }
+    cache.insert(key, ranking);
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,6 +145,30 @@ struct ImagesQuery {
     seed: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SimilarImagesQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimilarImagesRequest {
+    offset: usize,
+    limit: usize,
+}
+
+impl SimilarImagesQuery {
+    fn normalize(self) -> SimilarImagesRequest {
+        SimilarImagesRequest {
+            offset: self.offset.unwrap_or(0),
+            limit: self
+                .limit
+                .unwrap_or(DEFAULT_PAGE_SIZE)
+                .clamp(1, MAX_PAGE_SIZE),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -172,6 +284,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/gallery", get(gallery_summary))
         .route("/api/images", get(images))
+        .route("/api/images/{id}/similar", get(similar_images))
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
         .route("/api/images/{id}/original", get(original))
@@ -230,10 +343,84 @@ async fn images(
         Ok(query) => query,
         Err(status) => return status.into_response(),
     };
-    let index = state.index.read().await;
-    let etag = images_etag(&index.revision, &query);
+    let index = {
+        let index = state.index.read().await;
+        Arc::clone(&index)
+    };
+    let status = state.thumbnails.status();
+    let text_search_active = query.search.is_some()
+        && status.background_complete
+        && status.text_search.enabled
+        && status.text_search.background_complete
+        && status.text_search.ready > 0;
+    let text_search_token = text_search_active.then(|| state.thumbnails.text_search_cache_token());
+    let etag = images_etag(&index.revision, &query, text_search_token.as_deref());
     if is_not_modified(&headers, &etag) {
         return not_modified(&etag, "private, no-cache");
+    }
+
+    if text_search_active {
+        let search = query.search.as_deref().expect("search was checked above");
+        let ranking_key = text_search_ranking_key(
+            &index.revision,
+            query.album.as_deref(),
+            search,
+            text_search_token.as_deref().unwrap_or("off"),
+        );
+        if let Some(ranking) = cached_text_search_ranking(&ranking_key) {
+            return with_cache_headers(
+                Json(text_search_image_page(&ranking, &query)).into_response(),
+                &etag,
+                "private, no-cache",
+            );
+        }
+
+        match state.thumbnails.text_query_embedding(search).await {
+            Ok(Some(query_embedding)) => {
+                let candidates = index
+                    .images
+                    .iter()
+                    .filter(|record| {
+                        query
+                            .album
+                            .as_deref()
+                            .is_none_or(|album| record.album == album)
+                    })
+                    .filter_map(|record| {
+                        let embedding = state.thumbnails.text_search_embedding(&record.id);
+                        let filename_match = record.search_key.contains(search);
+                        (embedding.is_some() || filename_match)
+                            .then(|| (Arc::clone(record), embedding, filename_match))
+                    })
+                    .collect::<Vec<_>>();
+                let ranking = match tokio::task::spawn_blocking(move || {
+                    rank_text_search(query_embedding, candidates)
+                })
+                .await
+                {
+                    Ok(ranking) => Arc::new(ranking),
+                    Err(error) => {
+                        error!(%error, "natural-language image ranking task stopped");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                };
+                cache_text_search_ranking(ranking_key, Arc::clone(&ranking));
+                return with_cache_headers(
+                    Json(text_search_image_page(&ranking, &query)).into_response(),
+                    &etag,
+                    "private, no-cache",
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                error!(query = %search, %error, "cannot encode natural-language image query; using filename fallback");
+                let mut response = Json(image_page(&index, &query)).into_response();
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                return response;
+            }
+        }
     }
 
     with_cache_headers(
@@ -241,6 +428,315 @@ async fn images(
         &etag,
         "private, no-cache",
     )
+}
+
+async fn similar_images(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SimilarImagesQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.normalize();
+    let index = {
+        let index = state.index.read().await;
+        Arc::clone(&index)
+    };
+    let Some(source) = index.image(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let source_thumbnail = match state.thumbnails.ensure_ready(&id).await {
+        Ok(path) => path,
+        Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            error!(%id, %error, "cannot prepare source thumbnail for similarity search");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "无法读取查询图片").into_response();
+        }
+    };
+    let source_semantic = state
+        .thumbnails
+        .ensure_semantic_embedding(&id, &source_thumbnail)
+        .await;
+    let initial_status = state.thumbnails.status();
+    let initial_semantic_token = state.thumbnails.semantic_cache_token();
+    let initial_ranking_key = similar_ranking_key(
+        &index.revision,
+        &id,
+        initial_status.ready,
+        initial_status.failed,
+        &initial_semantic_token,
+    );
+    let initial_etag = similar_images_etag(
+        &index.revision,
+        &id,
+        initial_status.ready,
+        initial_status.failed,
+        &initial_semantic_token,
+        query,
+    );
+    if is_not_modified(&headers, &initial_etag) {
+        return not_modified(&initial_etag, "private, no-cache");
+    }
+    if let Some(ranking) = cached_similarity_ranking(&initial_ranking_key) {
+        return with_cache_headers(
+            Json(similar_image_page(&ranking, query)).into_response(),
+            &initial_etag,
+            "private, no-cache",
+        );
+    }
+
+    let permit = match similarity_limit().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            error!(%id, %error, "similarity search queue stopped");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    // Thumbnail generation can finish while this request waits for the single
+    // ranking worker. Refresh the key and conditional response before doing
+    // any expensive descriptor work.
+    let thumbnail_status = state.thumbnails.status();
+    let semantic_token = state.thumbnails.semantic_cache_token();
+    let ranking_key = similar_ranking_key(
+        &index.revision,
+        &id,
+        thumbnail_status.ready,
+        thumbnail_status.failed,
+        &semantic_token,
+    );
+    let etag = similar_images_etag(
+        &index.revision,
+        &id,
+        thumbnail_status.ready,
+        thumbnail_status.failed,
+        &semantic_token,
+        query,
+    );
+    if is_not_modified(&headers, &etag) {
+        return not_modified(&etag, "private, no-cache");
+    }
+    if let Some(ranking) = cached_similarity_ranking(&ranking_key) {
+        return with_cache_headers(
+            Json(similar_image_page(&ranking, query)).into_response(),
+            &etag,
+            "private, no-cache",
+        );
+    }
+
+    // Keep results stable while the one-time semantic index is still being
+    // built. The frontend refreshes an active recommendation when indexing
+    // completes; until then every candidate uses the dependable local visual
+    // descriptor instead of mixing indexed and not-yet-indexed candidates.
+    let semantic_active = thumbnail_status.semantic.enabled
+        && thumbnail_status.semantic.background_complete
+        && source_semantic.is_some();
+    let source_semantic = semantic_active.then_some(source_semantic).flatten();
+    let candidates = index
+        .images
+        .iter()
+        .filter(|candidate| candidate.id != source.id)
+        .filter_map(|candidate| {
+            state.thumbnails.ready_path(&candidate.id).map(|path| {
+                let semantic = semantic_active
+                    .then(|| state.thumbnails.semantic_embedding(&candidate.id))
+                    .flatten();
+                (Arc::clone(candidate), path, semantic)
+            })
+        })
+        .collect::<Vec<_>>();
+    let ranking = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        rank_similar_images(source, source_thumbnail, source_semantic, candidates)
+    })
+    .await
+    {
+        Ok(Ok(ranking)) => Arc::new(ranking),
+        Ok(Err(error)) => {
+            error!(%id, %error, "cannot calculate similar images");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "无法计算相似图片").into_response();
+        }
+        Err(error) => {
+            error!(%id, %error, "similar image task stopped");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "无法计算相似图片").into_response();
+        }
+    };
+    cache_similarity_ranking(ranking_key, Arc::clone(&ranking));
+    let page = similar_image_page(&ranking, query);
+
+    with_cache_headers(Json(page).into_response(), &etag, "private, no-cache")
+}
+
+struct RankedSimilarity {
+    record: Arc<ImageRecord>,
+    score: f32,
+    fingerprint: DiversityFingerprint,
+}
+
+#[derive(Clone, Copy)]
+struct SimilarityScore {
+    relevance: f32,
+    included: bool,
+}
+
+fn rank_similar_images(
+    source: Arc<ImageRecord>,
+    source_thumbnail: std::path::PathBuf,
+    source_semantic: Option<Arc<SemanticEmbedding>>,
+    candidates: Vec<(
+        Arc<ImageRecord>,
+        std::path::PathBuf,
+        Option<Arc<SemanticEmbedding>>,
+    )>,
+) -> anyhow::Result<Vec<Arc<ImageRecord>>> {
+    let source_signature = signature_for_thumbnail(source.as_ref(), &source_thumbnail)?;
+    let worker_count = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(2, 8))
+        .unwrap_or(2)
+        .min(candidates.len().max(1));
+    let chunk_size = candidates.len().div_ceil(worker_count).max(1);
+    let source_semantic = source_semantic.as_deref();
+    let mut ranked = std::thread::scope(|scope| -> anyhow::Result<Vec<_>> {
+        let workers = candidates
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let source_id = source.id.as_str();
+                let source_signature = &source_signature;
+                scope.spawn(move || {
+                    let mut matches = Vec::with_capacity(chunk.len());
+                    for (candidate, thumbnail, candidate_semantic) in chunk {
+                        if candidate.id == source_id {
+                            continue;
+                        }
+                        // A malformed candidate should not make the whole gallery
+                        // unusable. It is omitted until a rescan fixes or removes it.
+                        let Ok(candidate_signature) =
+                            signature_for_thumbnail(candidate.as_ref(), thumbnail)
+                        else {
+                            continue;
+                        };
+                        let visual_score = similarity_score(source_signature, &candidate_signature);
+                        let semantic_score = source_semantic
+                            .zip(candidate_semantic.as_deref())
+                            .map(|(source, candidate)| semantic_similarity(source, candidate));
+                        let score = hybrid_similarity_score(visual_score, semantic_score);
+                        if !score.included {
+                            continue;
+                        }
+                        matches.push(RankedSimilarity {
+                            record: Arc::clone(candidate),
+                            score: score.relevance,
+                            fingerprint: candidate_signature.diversity_fingerprint(),
+                        });
+                    }
+                    matches
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut matches = Vec::with_capacity(candidates.len().saturating_sub(1));
+        for worker in workers {
+            matches.extend(
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("similarity worker stopped"))?,
+            );
+        }
+        Ok(matches)
+    })?;
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.record.id.cmp(&right.record.id))
+    });
+    diversify_similarity_results(&mut ranked);
+
+    Ok(ranked
+        .into_iter()
+        .map(|candidate| candidate.record)
+        .collect())
+}
+
+fn hybrid_similarity_score(visual: f32, semantic: Option<f32>) -> SimilarityScore {
+    let Some(semantic) = semantic else {
+        return SimilarityScore {
+            relevance: visual,
+            included: visual >= MIN_SIMILARITY_SCORE,
+        };
+    };
+    let semantic_cosine = semantic.clamp(-1.0, 1.0);
+    let semantic_relevance = ((semantic_cosine + SEMANTIC_CALIBRATION_OFFSET)
+        / SEMANTIC_CALIBRATION_RANGE)
+        .clamp(0.0, 1.0);
+    let relevance = semantic_relevance * SEMANTIC_WEIGHT + visual * (1.0 - SEMANTIC_WEIGHT);
+    SimilarityScore {
+        relevance,
+        included: visual >= MIN_SIMILARITY_SCORE
+            || (semantic_cosine >= MIN_SEMANTIC_COSINE && relevance >= MIN_HYBRID_SCORE),
+    }
+}
+
+fn similar_image_page(ranked: &[Arc<ImageRecord>], query: SimilarImagesRequest) -> ImagesResponse {
+    let total = ranked.len();
+    let offset = query.offset.min(total);
+    let end = offset.saturating_add(query.limit).min(total);
+    let items = ranked[offset..end]
+        .iter()
+        .map(|record| ImageView::from(record.as_ref()))
+        .collect();
+    finish_page(items, total, offset, query.limit)
+}
+
+fn diversify_similarity_results(ranked: &mut Vec<RankedSimilarity>) {
+    let target = ranked.len().min(DIVERSIFIED_SIMILARITY_RESULTS);
+    if target < 2 {
+        return;
+    }
+
+    let mut remaining = std::mem::take(ranked)
+        .into_iter()
+        .map(|candidate| (candidate, 0.0_f32))
+        .collect::<Vec<_>>();
+    let mut selected = Vec::with_capacity(target);
+    while selected.len() < target {
+        let next = remaining
+            .iter()
+            .enumerate()
+            .max_by(
+                |(_, (left, left_redundancy)), (_, (right, right_redundancy))| {
+                    diversity_rank(left.score, *left_redundancy)
+                        .total_cmp(&diversity_rank(right.score, *right_redundancy))
+                        .then_with(|| right.record.id.cmp(&left.record.id))
+                },
+            )
+            .map(|(index, _)| index)
+            .expect("similarity selection has remaining candidates");
+        let (candidate, _) = remaining.swap_remove(next);
+        let fingerprint = candidate.fingerprint;
+        selected.push(candidate);
+        for (remaining_candidate, maximum_redundancy) in &mut remaining {
+            *maximum_redundancy = maximum_redundancy.max(redundancy_score(
+                fingerprint,
+                remaining_candidate.fingerprint,
+            ));
+        }
+    }
+
+    remaining.sort_by(|(left, _), (right, _)| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.record.id.cmp(&right.record.id))
+    });
+    selected.extend(remaining.into_iter().map(|(candidate, _)| candidate));
+    *ranked = selected;
+}
+
+fn diversity_rank(relevance: f32, redundancy: f32) -> f32 {
+    let penalty = ((redundancy - REDUNDANCY_PENALTY_START) / (1.0 - REDUNDANCY_PENALTY_START))
+        .clamp(0.0, 1.0)
+        .powi(2)
+        * MAX_REDUNDANCY_PENALTY;
+    relevance - penalty
 }
 
 fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {
@@ -289,6 +785,54 @@ fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {
             page_from_sorted_records(matches, requested_offset, limit)
         }
     }
+}
+
+struct RankedTextSearch {
+    record: Arc<ImageRecord>,
+    score: f32,
+}
+
+fn rank_text_search(
+    query: Arc<TextSearchEmbedding>,
+    candidates: Vec<(Arc<ImageRecord>, Option<Arc<TextSearchEmbedding>>, bool)>,
+) -> Vec<Arc<ImageRecord>> {
+    let mut ranked = candidates
+        .into_iter()
+        .map(|(record, embedding, filename_match)| {
+            let semantic = embedding
+                .as_deref()
+                .map_or(-1.0, |embedding| text_image_similarity(&query, embedding));
+            let score = semantic
+                + if filename_match {
+                    FILENAME_MATCH_BOOST
+                } else {
+                    0.0
+                };
+            RankedTextSearch { record, score }
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.record.id.cmp(&right.record.id))
+    });
+    ranked
+        .into_iter()
+        .take(TEXT_SEARCH_RESULT_LIMIT)
+        .map(|ranked| ranked.record)
+        .collect()
+}
+
+fn text_search_image_page(ranked: &[Arc<ImageRecord>], query: &ImageRequest) -> ImagesResponse {
+    let total = ranked.len();
+    let offset = query.offset.min(total);
+    let end = offset.saturating_add(query.limit).min(total);
+    let items = ranked[offset..end]
+        .iter()
+        .map(|record| ImageView::from(record.as_ref()))
+        .collect();
+    finish_page(items, total, offset, query.limit)
 }
 
 fn page_from_unfiltered_index(
@@ -475,19 +1019,69 @@ fn revision_etag(kind: &str, revision: &str) -> String {
     format!("\"{kind}-{revision}\"")
 }
 
-fn images_etag(revision: &str, query: &ImageRequest) -> String {
+fn images_etag(revision: &str, query: &ImageRequest, text_search_token: Option<&str>) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-images-query-v1\0");
+    hasher.update(b"pixhelf-images-query-v2\0");
     hasher.update(query.album.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     hasher.update(query.search.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     hasher.update(&[query.sort as u8]);
     hasher.update(query.seed.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(text_search_token.unwrap_or("filename").as_bytes());
     hasher.update(&query.offset.to_le_bytes());
     hasher.update(&query.limit.to_le_bytes());
     let query_hash = hasher.finalize().to_hex();
     format!("\"images-{revision}-{}\"", &query_hash[..16])
+}
+
+fn text_search_ranking_key(
+    revision: &str,
+    album: Option<&str>,
+    search: &str,
+    text_search_token: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pixhelf-text-search-v1\0");
+    hasher.update(revision.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(album.unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(search.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(text_search_token.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn similar_images_etag(
+    revision: &str,
+    source_id: &str,
+    ready: usize,
+    failed: usize,
+    semantic_token: &str,
+    query: SimilarImagesRequest,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pixhelf-similar-images-v3\0");
+    hasher.update(source_id.as_bytes());
+    hasher.update(&ready.to_le_bytes());
+    hasher.update(&failed.to_le_bytes());
+    hasher.update(semantic_token.as_bytes());
+    hasher.update(&query.offset.to_le_bytes());
+    hasher.update(&query.limit.to_le_bytes());
+    let query_hash = hasher.finalize().to_hex();
+    format!("\"similar-{revision}-{}\"", &query_hash[..16])
+}
+
+fn similar_ranking_key(
+    revision: &str,
+    source_id: &str,
+    ready: usize,
+    failed: usize,
+    semantic_token: &str,
+) -> String {
+    format!("{revision}:{source_id}:{ready}:{failed}:{semantic_token}")
 }
 
 fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
@@ -631,6 +1225,24 @@ fn escape_script_json(json: String) -> String {
 mod tests {
     use super::*;
 
+    struct ColourTextSearchModel;
+
+    impl crate::text_search::TextImageModel for ColourTextSearchModel {
+        fn embed_thumbnail(
+            &mut self,
+            thumbnail: &std::path::Path,
+        ) -> anyhow::Result<TextSearchEmbedding> {
+            let pixel = image::open(thumbnail)?.to_rgb8().get_pixel(0, 0).0;
+            let axis = if pixel[0] >= pixel[2] { 0 } else { 1 };
+            Ok(TextSearchEmbedding::for_test([(axis, 100)]))
+        }
+
+        fn embed_text(&mut self, text: &str) -> anyhow::Result<TextSearchEmbedding> {
+            let axis = if text.contains('红') { 0 } else { 1 };
+            Ok(TextSearchEmbedding::for_test([(axis, 100)]))
+        }
+    }
+
     fn empty_router() -> Router {
         let temp = tempfile::tempdir().unwrap();
         let thumbnails = ThumbnailManager::new(temp.path().to_owned()).unwrap();
@@ -690,6 +1302,58 @@ mod tests {
     }
 
     #[test]
+    fn diversity_penalty_can_surface_a_distinct_result() {
+        assert_eq!(diversity_rank(0.94, REDUNDANCY_PENALTY_START), 0.94);
+        assert!(diversity_rank(0.94, 0.0) > diversity_rank(0.99, 1.0));
+        assert!(diversity_rank(0.99, 0.90) > diversity_rank(0.94, 0.0));
+    }
+
+    #[test]
+    fn semantic_similarity_can_rescue_a_visually_different_match() {
+        let semantic_match = hybrid_similarity_score(0.20, Some(0.10));
+        assert!(semantic_match.included);
+        assert!(semantic_match.relevance > MIN_HYBRID_SCORE);
+
+        let unrelated = hybrid_similarity_score(0.20, Some(0.04));
+        assert!(!unrelated.included);
+
+        let fallback = hybrid_similarity_score(0.70, None);
+        assert!(fallback.included);
+        assert_eq!(fallback.relevance, 0.70);
+    }
+
+    #[test]
+    fn natural_language_search_ranks_shared_text_image_embeddings() {
+        let record = |id: &str, name: &str| {
+            Arc::new(ImageRecord {
+                id: id.into(),
+                path: name.into(),
+                relative_path: name.into(),
+                search_key: name.to_lowercase(),
+                name: name.into(),
+                album: String::new(),
+                width: 10,
+                height: 10,
+                size: 1,
+                modified_ms: 1,
+                modified_ns: 1,
+            })
+        };
+        let query = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));
+        let red = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));
+        let blue = Arc::new(TextSearchEmbedding::for_test([(1, 100)]));
+        let ranked = rank_text_search(
+            query,
+            vec![
+                (record("blue", "first.png"), Some(blue), false),
+                (record("red", "second.png"), Some(red), false),
+            ],
+        );
+        assert_eq!(ranked[0].id, "red");
+        assert_eq!(ranked[1].id, "blue");
+    }
+
+    #[test]
     fn normalizes_image_queries_once() {
         let query = ImagesQuery {
             album: Some("album".into()),
@@ -730,6 +1394,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_exposes_optional_semantic_index_progress() {
+        let response = request("/api/status").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["semantic"]["enabled"], false);
+        assert_eq!(status["semantic"]["backgroundComplete"], true);
+        assert_eq!(status["textSearch"]["enabled"], false);
+        assert_eq!(status["textSearch"]["backgroundComplete"], true);
+    }
+
+    #[tokio::test]
     async fn unknown_api_and_image_routes_return_not_found() {
         assert_eq!(
             request("/api/does-not-exist").await.status(),
@@ -743,6 +1421,10 @@ mod tests {
             request("/api/images/missing/original").await.status(),
             StatusCode::NOT_FOUND
         );
+        assert_eq!(
+            request("/api/images/missing/similar").await.status(),
+            StatusCode::NOT_FOUND
+        );
         let response = request("/missing").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
@@ -751,6 +1433,196 @@ mod tests {
         );
         assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
         assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+    }
+
+    #[tokio::test]
+    async fn similar_images_are_ranked_exclude_the_source_and_paginate() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([220, 80, 40]))
+            .save(gallery.join("source.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([216, 82, 43]))
+            .save(gallery.join("closest.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([205, 88, 48]))
+            .save(gallery.join("nearby.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([20, 50, 220]))
+            .save(gallery.join("blue.png"))
+            .unwrap();
+
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let source_id = index
+            .images
+            .iter()
+            .find(|image| image.name == "source.png")
+            .unwrap()
+            .id
+            .clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        for image in &index.images {
+            thumbnails.ensure_ready(&image.id).await.unwrap();
+        }
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{source_id}/similar?offset=0&limit=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["nextOffset"], 1);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["name"], "closest.png");
+        assert_ne!(page["items"][0]["id"], source_id);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{source_id}/similar?offset=1&limit=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["nextOffset"], serde_json::Value::Null);
+        assert_eq!(page["items"][0]["name"], "nearby.png");
+    }
+
+    #[tokio::test]
+    async fn similar_images_omit_unrelated_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([220, 80, 40]))
+            .save(gallery.join("source.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([20, 50, 220]))
+            .save(gallery.join("unrelated.png"))
+            .unwrap();
+
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let source_id = index
+            .images
+            .iter()
+            .find(|image| image.name == "source.png")
+            .unwrap()
+            .id
+            .clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        for image in &index.images {
+            thumbnails.ensure_ready(&image.id).await.unwrap();
+        }
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{source_id}/similar"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["total"], 0);
+        assert_eq!(page["nextOffset"], serde_json::Value::Null);
+        assert!(page["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn natural_language_api_searches_image_content_not_only_filenames() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([230, 25, 20]))
+            .save(gallery.join("first.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([20, 30, 230]))
+            .save(gallery.join("second.png"))
+            .unwrap();
+
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let text_search = crate::text_search::TextSearchIndex::with_test_model(
+            Box::new(ColourTextSearchModel),
+            [44; 16],
+        );
+        let thumbnails = ThumbnailManager::new_with_indexes(
+            temp.path().join("cache"),
+            None,
+            Some(Arc::clone(&text_search)),
+        )
+        .unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        text_search.start_worker();
+        for image in &index.images {
+            thumbnails.ensure_ready(&image.id).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status = thumbnails.status();
+                if status.background_complete && status.text_search.background_complete {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("text-search index timed out");
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/images?search=%E7%BA%A2%E8%89%B2%E5%9B%BE%E7%89%87&limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(page["items"][0]["name"], "first.png");
+        assert_eq!(page["items"][1]["name"], "second.png");
     }
 
     #[tokio::test]

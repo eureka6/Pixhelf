@@ -1,5 +1,8 @@
 mod config;
 mod gallery;
+mod semantic;
+mod similarity;
+mod text_search;
 mod thumbs;
 mod web;
 
@@ -8,6 +11,8 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use config::Config;
 use gallery::{GalleryIndex, scan_gallery};
+use semantic::SemanticIndex;
+use text_search::TextSearchIndex;
 use thumbs::ThumbnailManager;
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{error, info, warn};
@@ -46,12 +51,48 @@ async fn main() -> Result<()> {
         .map(|record| record.id.clone())
         .collect();
     let index = Arc::new(RwLock::new(Arc::new(index)));
-    let thumbnails = ThumbnailManager::new(config.cache_dir.clone())?;
+    let semantic = match config.semantic_model.as_deref() {
+        Some(model_path) => match SemanticIndex::load(model_path) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                warn!(path = %model_path.display(), %error, "semantic model unavailable; using local visual fallback");
+                None
+            }
+        },
+        None => None,
+    };
+    let text_search = match config.text_search.as_ref() {
+        Some(files) => match TextSearchIndex::load(&files.model, &files.vocabulary) {
+            Ok(index) => Some(index),
+            Err(error) => {
+                warn!(
+                    model = %files.model.display(),
+                    vocabulary = %files.vocabulary.display(),
+                    %error,
+                    "natural-language search model unavailable; using filename search"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let thumbnails = ThumbnailManager::new_with_indexes(
+        config.cache_dir.clone(),
+        semantic.as_ref().map(Arc::clone),
+        text_search.as_ref().map(Arc::clone),
+    )?;
     {
         let current = index.read().await;
         thumbnails.reconcile(&current.images);
     }
     thumbnails.start_workers(config.workers);
+    if let Some(semantic) = semantic {
+        semantic.start_worker();
+    }
+    if let Some(text_search) = text_search {
+        text_search.start_worker();
+    }
+    thumbnails.start_similarity_warmup();
     let initial_thumbnail_manager = Arc::clone(&thumbnails);
     tokio::spawn(async move {
         initial_thumbnail_manager
@@ -102,6 +143,7 @@ async fn rescan_gallery(state: AppState, config: Config) {
 
         let new_count = updated.images.len();
         state.thumbnails.reconcile(&updated.images);
+        state.thumbnails.start_similarity_warmup();
         *state.index.write().await = Arc::new(updated);
         state.thumbnails.cleanup_stale().await;
         info!(old_count, new_count, "gallery changes indexed");

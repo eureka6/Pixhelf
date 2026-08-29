@@ -328,16 +328,29 @@ try {
       })(),
       scrollCuePresentation: (() => {
         const cue = document.querySelector(".viewer-scroll-cue");
-        const media = document.querySelector(".viewer-media");
-        if (!cue || !media) return null;
+        if (!cue) return null;
         const style = getComputedStyle(cue);
         const cueBounds = cue.getBoundingClientRect();
-        const mediaBounds = media.getBoundingClientRect();
         return {
-          borderless: Number.parseFloat(style.borderTopWidth) === 0,
-          transparent: style.backgroundColor === "rgba(0, 0, 0, 0)",
+          surfaced: style.backgroundColor !== "rgba(0, 0, 0, 0)"
+            && Number.parseFloat(style.borderTopWidth) > 0,
+          circular: Number.parseFloat(style.borderTopLeftRadius) >= cueBounds.height / 2 - 1,
           width: cueBounds.width,
-          clearsMedia: cueBounds.top >= mediaBounds.bottom - 1,
+        };
+      })(),
+      floatingToolbar: (() => {
+        const viewer = document.querySelector(".image-viewer");
+        const header = document.querySelector(".viewer-header");
+        const actions = document.querySelector(".viewer-header-actions");
+        if (!viewer || !header || !actions) return null;
+        const headerStyle = getComputedStyle(header);
+        const actionsStyle = getComputedStyle(actions);
+        return {
+          mode: viewer.getAttribute("data-ui-layout"),
+          headerTransparent: headerStyle.backgroundImage === "none"
+            && headerStyle.backgroundColor === "rgba(0, 0, 0, 0)",
+          actionsSurfaced: actionsStyle.backgroundColor !== "rgba(0, 0, 0, 0)"
+            && Number.parseFloat(actionsStyle.borderTopWidth) > 0,
         };
       })(),
       headingModules: document.querySelectorAll(".viewer-heading").length,
@@ -1628,10 +1641,13 @@ try {
       viewer.switchPerformance.mediaAnimations !== 0 ||
       viewer.switchPerformance.dispatchDuration > 80 ||
       viewer.switchPerformance.firstFrameDuration > 100 ||
-      !viewerChrome.scrollCuePresentation?.borderless ||
-      !viewerChrome.scrollCuePresentation?.transparent ||
-      viewerChrome.scrollCuePresentation.width < 88 ||
-      !viewerChrome.scrollCuePresentation?.clearsMedia ||
+      !viewerChrome.scrollCuePresentation?.surfaced ||
+      !viewerChrome.scrollCuePresentation?.circular ||
+      viewerChrome.scrollCuePresentation.width < 44 ||
+      viewerChrome.scrollCuePresentation.width > 52 ||
+      viewerChrome.floatingToolbar?.mode !== "floating" ||
+      !viewerChrome.floatingToolbar?.headerTransparent ||
+      !viewerChrome.floatingToolbar?.actionsSurfaced ||
       (target.name === "desktop" && (
         !viewer.detailsReachedByWheel ||
         viewer.detailsName !== viewer.keyboardNavigation ||

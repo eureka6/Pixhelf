@@ -23,7 +23,13 @@ import {
 } from "preact/hooks";
 import { ToolbarPopover } from "./ToolbarPopover";
 import { ImageViewer } from "./ImageViewer";
-import { getGallery, getImages, getStatus, takeInitialBootstrap } from "./api";
+import {
+  getGallery,
+  getImages,
+  getSimilarImages,
+  getStatus,
+  takeInitialBootstrap,
+} from "./api";
 import type {
   GalleryImage,
   GallerySummary,
@@ -37,6 +43,7 @@ import {
 } from "./viewerAssets";
 
 const PAGE_SIZE = 60;
+const SIMILAR_PAGE_SIZE = 30;
 const CARD_PREFETCH_MARGIN = "1200px 0px";
 const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
 const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
@@ -52,6 +59,13 @@ const COUNT_FORMATTER = new Intl.NumberFormat("zh-CN");
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
 type ImagePageState = {
+  images: GalleryImage[];
+  total: number;
+  nextOffset: number | null;
+};
+
+type SimilarImagePageState = {
+  source: GalleryImage | null;
   images: GalleryImage[];
   total: number;
   nextOffset: number | null;
@@ -80,6 +94,13 @@ type ViewerReturnFlight = {
 };
 
 const EMPTY_IMAGE_PAGE: ImagePageState = {
+  images: [],
+  total: 0,
+  nextOffset: null,
+};
+
+const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
+  source: null,
   images: [],
   total: 0,
   nextOffset: null,
@@ -510,11 +531,34 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
+  const [viewerDiscoveredImages, setViewerDiscoveredImages] = useState<GalleryImage[]>([]);
+  const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
+    EMPTY_SIMILAR_IMAGE_PAGE,
+  );
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarLoadingMore, setSimilarLoadingMore] = useState(false);
+  const [similarError, setSimilarError] = useState<string | null>(null);
   const [viewerReturnRequest, setViewerReturnRequest] = useState<ViewerReturnRequest | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const compactLayout = useMediaQuery("(max-width: 720px)");
   const mobileNavMounted = useDelayedUnmount(mobileNavOpen, MOBILE_NAV_EXIT_MS);
-  const debouncedSearch = useDebounced(search.trim(), 250);
+  const textSearchReady = Boolean(
+    status?.backgroundComplete
+    && status.textSearch.enabled
+    && status.textSearch.backgroundComplete
+    && status.textSearch.ready > 0,
+  );
+  const textSearchMode: "filename" | "indexing" | "semantic" = status?.textSearch.enabled
+    ? textSearchReady
+      ? "semantic"
+      : status.backgroundComplete && status.textSearch.backgroundComplete
+        ? "filename"
+        : "indexing"
+    : "filename";
+  const debouncedSearch = useDebounced(
+    search.trim(),
+    status?.textSearch.enabled ? 500 : 250,
+  );
   const requestVersionRef = useRef(0);
   const summaryRevisionRef = useRef<string | null>(
     INITIAL_BOOTSTRAP?.summary.revision ?? null,
@@ -522,11 +566,25 @@ function App() {
   const skipInitialImagesRef = useRef(Boolean(INITIAL_BOOTSTRAP));
   const loadMoreControllerRef = useRef<AbortController | null>(null);
   const loadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
+  const similarRequestVersionRef = useRef(0);
+  const similarControllerRef = useRef<AbortController | null>(null);
+  const similarLoadMoreControllerRef = useRef<AbortController | null>(null);
+  const similarLoadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
+  const backgroundCompletionRef = useRef(
+    Boolean(
+      INITIAL_BOOTSTRAP?.status.backgroundComplete
+      && INITIAL_BOOTSTRAP.status.semantic.backgroundComplete,
+    ),
+  );
   const viewerImageIdRef = useRef<string | null>(null);
   const viewerAnchorRef = useRef<ViewerAnchor | null>(null);
   const viewerReturnSequenceRef = useRef(0);
   const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const { images, total, nextOffset } = imagePage;
+  const viewerImages = useMemo(
+    () => appendUniqueImages(images, viewerDiscoveredImages),
+    [images, viewerDiscoveredImages],
+  );
 
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -539,6 +597,8 @@ function App() {
   useEffect(() => () => {
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
+    similarControllerRef.current?.abort();
+    similarLoadMoreControllerRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -626,13 +686,22 @@ function App() {
         const next = await getStatus(controller.signal);
         if (controller.signal.aborted) return;
         setStatus(next);
-        timer = window.setTimeout(poll, next.backgroundComplete ? 10000 : 1500);
+        const complete = next.backgroundComplete
+          && next.semantic.backgroundComplete
+          && next.textSearch.backgroundComplete;
+        timer = window.setTimeout(poll, complete ? 10000 : 1500);
       } catch {
         if (!controller.signal.aborted) timer = window.setTimeout(poll, 5000);
       }
     };
     const initialDelay = INITIAL_BOOTSTRAP
-      ? (INITIAL_BOOTSTRAP.status.backgroundComplete ? 10_000 : 1_500)
+      ? (
+          INITIAL_BOOTSTRAP.status.backgroundComplete
+          && INITIAL_BOOTSTRAP.status.semantic.backgroundComplete
+          && INITIAL_BOOTSTRAP.status.textSearch.backgroundComplete
+            ? 10_000
+            : 1_500
+        )
       : 0;
     timer = window.setTimeout(poll, initialDelay);
     return () => {
@@ -691,7 +760,7 @@ function App() {
       loadMorePromiseRef.current = null;
       loadMoreController?.abort();
     };
-  }, [album, debouncedSearch, exploreSeed, reloadToken]);
+  }, [album, debouncedSearch, exploreSeed, reloadToken, textSearchReady]);
 
   const loadMore = useCallback((): Promise<GalleryImage[]> => {
     if (loading || nextOffset === null) return Promise.resolve([]);
@@ -740,6 +809,124 @@ function App() {
     return promise;
   }, [album, debouncedSearch, exploreSeed, loading, nextOffset]);
 
+  const resetSimilarSearch = useCallback(() => {
+    similarRequestVersionRef.current += 1;
+    similarControllerRef.current?.abort();
+    similarLoadMoreControllerRef.current?.abort();
+    similarControllerRef.current = null;
+    similarLoadMoreControllerRef.current = null;
+    similarLoadMorePromiseRef.current = null;
+    setSimilarPage(EMPTY_SIMILAR_IMAGE_PAGE);
+    setSimilarLoading(false);
+    setSimilarLoadingMore(false);
+    setSimilarError(null);
+  }, []);
+
+  const searchSimilar = useCallback((source: GalleryImage, force = false) => {
+    const sameSource = similarPage.source?.id === source.id;
+    if (!force && sameSource && (similarLoading || !similarError)) return;
+
+    similarControllerRef.current?.abort();
+    similarLoadMoreControllerRef.current?.abort();
+    similarLoadMoreControllerRef.current = null;
+    similarLoadMorePromiseRef.current = null;
+    const controller = new AbortController();
+    const requestVersion = ++similarRequestVersionRef.current;
+    similarControllerRef.current = controller;
+    setSimilarPage({ source, images: [], total: 0, nextOffset: null });
+    setSimilarLoading(true);
+    setSimilarLoadingMore(false);
+    setSimilarError(null);
+
+    void getSimilarImages(
+      source.id,
+      { offset: 0, limit: SIMILAR_PAGE_SIZE },
+      controller.signal,
+    )
+      .then((page) => {
+        if (requestVersion !== similarRequestVersionRef.current) return;
+        setSimilarPage({
+          source,
+          images: page.items,
+          total: page.total,
+          nextOffset: page.nextOffset,
+        });
+        setViewerDiscoveredImages((current) => appendUniqueImages(current, page.items));
+      })
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
+          setSimilarError(errorMessage(reason, "无法查找相似图片"));
+        }
+      })
+      .finally(() => {
+        if (similarControllerRef.current === controller) {
+          similarControllerRef.current = null;
+          if (requestVersion === similarRequestVersionRef.current) setSimilarLoading(false);
+        }
+      });
+  }, [similarError, similarLoading, similarPage.source?.id]);
+
+  useEffect(() => {
+    const complete = Boolean(
+      status?.backgroundComplete && status.semantic.backgroundComplete,
+    );
+    const justCompleted = complete && !backgroundCompletionRef.current;
+    backgroundCompletionRef.current = complete;
+    if (justCompleted && similarPage.source) {
+      searchSimilar(similarPage.source, true);
+    }
+  }, [searchSimilar, similarPage.source, status]);
+
+  const loadMoreSimilar = useCallback((): Promise<GalleryImage[]> => {
+    const source = similarPage.source;
+    const offset = similarPage.nextOffset;
+    if (!source || similarLoading || offset === null) return Promise.resolve([]);
+    const pending = similarLoadMorePromiseRef.current;
+    if (pending) return pending;
+
+    const controller = new AbortController();
+    const requestVersion = similarRequestVersionRef.current;
+    similarLoadMoreControllerRef.current = controller;
+    setSimilarLoadingMore(true);
+    setSimilarError(null);
+
+    const promise = (async () => {
+      try {
+        const page = await getSimilarImages(
+          source.id,
+          { offset, limit: SIMILAR_PAGE_SIZE },
+          controller.signal,
+        );
+        if (requestVersion !== similarRequestVersionRef.current) return [];
+        setSimilarPage((current) => current.source?.id === source.id
+          ? {
+              source,
+              images: appendUniqueImages(current.images, page.items),
+              total: page.total,
+              nextOffset: page.nextOffset,
+            }
+          : current);
+        setViewerDiscoveredImages((current) => appendUniqueImages(current, page.items));
+        return page.items;
+      } catch (reason) {
+        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
+          setSimilarError(errorMessage(reason, "无法继续加载相似图片"));
+        }
+        return [];
+      } finally {
+        if (similarLoadMoreControllerRef.current === controller) {
+          similarLoadMoreControllerRef.current = null;
+          similarLoadMorePromiseRef.current = null;
+          if (requestVersion === similarRequestVersionRef.current) {
+            setSimilarLoadingMore(false);
+          }
+        }
+      }
+    })();
+    similarLoadMorePromiseRef.current = promise;
+    return promise;
+  }, [similarLoading, similarPage.nextOffset, similarPage.source]);
+
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -759,8 +946,22 @@ function App() {
   }, [compactLayout, loadMore, nextOffset]);
 
   const viewerIndex = viewerImageId
+    ? viewerImages.findIndex((image) => image.id === viewerImageId)
+    : -1;
+  const galleryViewerIndex = viewerImageId
     ? images.findIndex((image) => image.id === viewerImageId)
     : -1;
+  const viewerImage = viewerIndex >= 0 ? viewerImages[viewerIndex] : null;
+  const similarActive = Boolean(
+    viewerImage && similarPage.source?.id === viewerImage.id,
+  );
+  const viewerCanLoadMore = Boolean(
+    viewerImage && (
+      images.some((candidate) => candidate.id === viewerImage.id)
+        ? nextOffset !== null
+        : similarActive && similarPage.nextOffset !== null
+    ),
+  );
 
   const openViewer = useCallback((
     imageId: string,
@@ -771,10 +972,12 @@ function App() {
     viewerReturnFlightRef.current = null;
     viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
     prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
+    resetSimilarSearch();
+    setViewerDiscoveredImages([]);
     setViewerReturnRequest(null);
     viewerImageIdRef.current = imageId;
     setViewerImageId(imageId);
-  }, [images]);
+  }, [images, resetSimilarSearch]);
 
   const closeViewer = useCallback(() => {
     const currentImageId = viewerImageIdRef.current;
@@ -792,9 +995,11 @@ function App() {
       imageId: currentImageId,
       sequence: viewerReturnSequenceRef.current,
     });
+    resetSimilarSearch();
+    setViewerDiscoveredImages([]);
     viewerImageIdRef.current = null;
     setViewerImageId(null);
-  }, []);
+  }, [resetSimilarSearch]);
 
   useLayoutEffect(() => {
     if (viewerImageId || !viewerReturnRequest) return;
@@ -1016,31 +1221,45 @@ function App() {
   }, [viewerImageId, viewerReturnRequest]);
 
   useEffect(() => {
-    if (!viewerImageId || viewerIndex < 0 || nextOffset === null) return;
-    if (viewerIndex >= images.length - 5) void loadMore();
-  }, [images.length, loadMore, nextOffset, viewerImageId, viewerIndex]);
+    if (!viewerImageId || galleryViewerIndex < 0 || nextOffset === null) return;
+    if (galleryViewerIndex >= images.length - 5) void loadMore();
+  }, [galleryViewerIndex, images.length, loadMore, nextOffset, viewerImageId]);
+
+  const openSimilarImage = useCallback((candidate: GalleryImage) => {
+    setViewerDiscoveredImages((current) => appendUniqueImages(current, [candidate]));
+    prepareViewerImages([candidate], 0);
+    viewerImageIdRef.current = candidate.id;
+    setViewerImageId(candidate.id);
+    searchSimilar(candidate);
+  }, [searchSimilar]);
 
   const navigateViewer = useCallback((direction: -1 | 1) => {
     const currentImageId = viewerImageIdRef.current;
     if (!currentImageId) return;
-    const currentIndex = images.findIndex((image) => image.id === currentImageId);
+    const currentIndex = viewerImages.findIndex((image) => image.id === currentImageId);
     if (currentIndex < 0) return;
-    const target = images[currentIndex + direction];
+    const target = viewerImages[currentIndex + direction];
     if (target) {
       viewerImageIdRef.current = target.id;
       setViewerImageId(target.id);
       return;
     }
-    if (direction < 0 || nextOffset === null) return;
+    if (direction < 0) return;
 
     const startingId = currentImageId;
-    void loadMore().then((incoming) => {
+    const pending = similarPage.source?.id === currentImageId
+      && similarPage.nextOffset !== null
+      ? loadMoreSimilar()
+      : nextOffset !== null && images.some((candidate) => candidate.id === currentImageId)
+        ? loadMore()
+        : Promise.resolve([]);
+    void pending.then((incoming) => {
       const next = incoming[0];
       if (!next || viewerImageIdRef.current !== startingId) return;
       viewerImageIdRef.current = next.id;
       setViewerImageId(next.id);
     });
-  }, [images, loadMore, nextOffset]);
+  }, [images, loadMore, loadMoreSimilar, nextOffset, similarPage, viewerImages]);
 
   const galleryPath = `/${album.replace(/^\/+/, "")}`;
   const chooseAlbum = (path: string) => {
@@ -1077,6 +1296,7 @@ function App() {
     >
       <Header
         search={search}
+        searchMode={textSearchMode}
         onSearchChange={changeSearch}
         onExplore={startExploring}
         exploreActive={Boolean(exploreSeed)}
@@ -1148,7 +1368,11 @@ function App() {
             <ImageIcon size={30} strokeWidth={1.6} />
             <strong>{summary?.total === 0 ? "图库暂无图片" : "没有找到图片"}</strong>
             <span>
-              {summary?.total === 0 ? "添加图片后将自动显示" : "请调整相册或搜索条件"}
+              {summary?.total === 0
+                ? "添加图片后将自动显示"
+                : textSearchReady && debouncedSearch
+                  ? "换一种自然语言描述，或减少限定词"
+                  : "请调整相册或搜索条件"}
             </span>
           </div>
         )}
@@ -1162,13 +1386,23 @@ function App() {
       </main>
       {viewerIndex >= 0 && (
         <ImageViewer
-          images={images}
+          images={viewerImages}
           activeIndex={viewerIndex}
-          total={total}
-          hasMore={nextOffset !== null}
-          loadingMore={loadingMore}
+          total={Math.max(summary?.total ?? total, viewerImages.length)}
+          hasMore={viewerCanLoadMore}
+          loadingMore={loadingMore || similarLoadingMore}
           onNavigate={navigateViewer}
           onClose={closeViewer}
+          similarActive={similarActive}
+          similarImages={similarActive ? similarPage.images : []}
+          similarTotal={similarActive ? similarPage.total : 0}
+          similarHasMore={similarActive && similarPage.nextOffset !== null}
+          similarLoading={similarActive && similarLoading}
+          similarLoadingMore={similarActive && similarLoadingMore}
+          similarError={similarActive ? similarError : null}
+          onSearchSimilar={searchSimilar}
+          onLoadMoreSimilar={() => void loadMoreSimilar()}
+          onOpenSimilar={openSimilarImage}
         />
       )}
     </div>
@@ -1177,6 +1411,7 @@ function App() {
 
 function Header({
   search,
+  searchMode,
   onSearchChange,
   onExplore,
   exploreActive,
@@ -1186,6 +1421,7 @@ function Header({
   navigationOpen,
 }: {
   search: string;
+  searchMode: "filename" | "indexing" | "semantic";
   onSearchChange: (value: string) => void;
   onExplore: () => void;
   exploreActive: boolean;
@@ -1197,6 +1433,13 @@ function Header({
   const [searchOpen, setSearchOpen] = useState(false);
   const [exploreMotionKey, setExploreMotionKey] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const semanticSearch = searchMode === "semantic";
+  const searchIndexing = searchMode === "indexing";
+  const searchPlaceholder = semanticSearch
+    ? "描述想找的图片"
+    : searchIndexing
+      ? "文字索引中 · 暂搜文件名"
+      : "搜索文件名";
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1280,7 +1523,7 @@ function Header({
               <span className="toolbar-state-dot" aria-hidden="true" />
             </>
           }
-          rootClassName={`topbar-search ${search ? "has-query" : ""}`}
+          rootClassName={`topbar-search ${search ? "has-query" : ""} ${semanticSearch ? "is-semantic" : ""}`}
           triggerClassName="search-toggle"
           panelClassName="search-popover-panel"
         >
@@ -1290,12 +1533,21 @@ function Header({
             type="search"
             value={search}
             onInput={(event) => onSearchChange(event.currentTarget.value)}
-            placeholder="搜索文件名"
-            aria-label="搜索文件名"
+            placeholder={searchPlaceholder}
+            aria-label={semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
             enterKeyHint="search"
             autoComplete="off"
             tabIndex={searchOpen ? 0 : -1}
           />
+          {searchMode !== "filename" && (
+            <span
+              className="search-mode-badge"
+              data-state={searchMode}
+              title={semanticSearch ? "Chinese-CLIP 本地语义搜索" : "正在建立文字搜图索引"}
+            >
+              {semanticSearch ? "语义" : "索引中"}
+            </span>
+          )}
           {search && (
             <button
               type="button"
@@ -1352,16 +1604,47 @@ function SidebarStatus({ status }: { status: ThumbnailStatus | null }) {
       </div>
     );
   }
-  const complete = status.backgroundComplete;
+  const thumbnailsComplete = status.backgroundComplete;
+  const semanticIndexing = status.semantic.enabled && !status.semantic.backgroundComplete;
+  const textSearchIndexing = status.textSearch.enabled && !status.textSearch.backgroundComplete;
+  const complete = thumbnailsComplete && !semanticIndexing && !textSearchIndexing;
+  const ready = !thumbnailsComplete
+    ? status.ready
+    : textSearchIndexing
+      ? status.textSearch.ready
+      : semanticIndexing
+        ? status.semantic.ready
+        : status.ready;
+  const total = !thumbnailsComplete
+    ? status.total
+    : textSearchIndexing
+      ? status.textSearch.total
+      : semanticIndexing
+        ? status.semantic.total
+        : status.total;
+  const label = !thumbnailsComplete
+    ? "处理中"
+    : textSearchIndexing
+      ? "文字索引"
+      : semanticIndexing
+        ? "语义索引"
+        : "已就绪";
+  const title = !thumbnailsComplete
+    ? "正在后台处理缩略图"
+    : textSearchIndexing
+      ? "正在本地建立自然语言文字搜图索引"
+      : semanticIndexing
+        ? "正在本地建立语义推荐索引"
+        : "图片和搜索索引处理完成";
   return (
     <div
       className={`sidebar-status ${complete ? "complete" : ""}`}
-      title={complete ? "缩略图处理完成" : "正在后台处理缩略图"}
+      title={title}
       role="status"
     >
       {complete ? <Check size={15} /> : <LoaderCircle className="spin" size={15} />}
-      <span>{complete ? "已就绪" : "处理中"}</span>
-      <strong>{formatCount(status.ready)} / {formatCount(status.total)}</strong>
+      <span>{label}</span>
+      <strong>{formatCount(ready)} / {formatCount(total)}</strong>
     </div>
   );
 }

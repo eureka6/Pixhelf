@@ -11,6 +11,7 @@ import {
   Maximize2,
   Minimize2,
   RefreshCw,
+  ScanSearch,
   X,
 } from "./icons";
 import type { GalleryImage } from "./types";
@@ -201,9 +202,8 @@ function viewerMediaDimensions(
   image: GalleryImage,
   viewport: ViewportSize,
 ): { width: number; height: number } {
-  const compact = viewport.width <= 720;
-  const availableWidth = Math.max(1, viewport.width - (compact ? 12 : 144));
-  const availableHeight = Math.max(1, viewport.height - (compact ? 128 : 104));
+  const availableWidth = Math.max(1, viewport.width);
+  const availableHeight = Math.max(1, viewport.height);
   const imageRatio = image.width / Math.max(1, image.height);
   const width = Math.min(availableWidth, availableHeight * imageRatio);
   return { width, height: width / imageRatio };
@@ -297,6 +297,131 @@ function drawViewerCanvas(
   canvas.dataset.renderedSource = sourceKey;
 }
 
+function SimilarImageCard({
+  image,
+  onOpen,
+}: {
+  image: GalleryImage;
+  onOpen: (image: GalleryImage) => void;
+}) {
+  return (
+    <figure
+      className="viewer-similar-card"
+      title={image.name}
+      data-image-id={image.id}
+      role="button"
+      tabIndex={0}
+      aria-label={`查看相似图片 ${image.name}`}
+      onClick={() => onOpen(image)}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onOpen(image);
+      }}
+    >
+      <div className="viewer-similar-card-media">
+        <img
+          src={viewerThumbnailUrl(image)}
+          alt={image.name}
+          loading="lazy"
+          decoding="async"
+          width={image.width}
+          height={image.height}
+          draggable={false}
+          onError={(event) => {
+            event.currentTarget.dataset.failed = "true";
+          }}
+        />
+        <span className="viewer-similar-card-fallback" aria-hidden="true">
+          <RefreshCw size={18} />
+        </span>
+      </div>
+      <figcaption>{image.name}</figcaption>
+    </figure>
+  );
+}
+
+function SimilarImageMasonry({
+  images,
+  total,
+  columnCount,
+  hasMore,
+  loadingMore,
+  error,
+  onLoadMore,
+  onOpen,
+}: {
+  images: GalleryImage[];
+  total: number;
+  columnCount: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  error: string | null;
+  onLoadMore: () => void;
+  onOpen: (image: GalleryImage) => void;
+}) {
+  const columns = Array.from({ length: columnCount }, () => [] as GalleryImage[]);
+  const heights = Array.from({ length: columnCount }, () => 0);
+  for (const image of images) {
+    const target = heights.indexOf(Math.min(...heights));
+    columns[target]!.push(image);
+    heights[target] += image.height / Math.max(1, image.width) + 0.12;
+  }
+
+  return (
+    <>
+      <div
+        className="viewer-similar-masonry"
+        data-columns={columnCount}
+        style={{ "--similar-columns": columnCount } as CSSProperties}
+      >
+        {columns.map((column, index) => (
+          <div key={index} className="viewer-similar-column">
+            {column.map((candidate) => (
+              <SimilarImageCard key={candidate.id} image={candidate} onOpen={onOpen} />
+            ))}
+          </div>
+        ))}
+      </div>
+      {error && (
+        <div className="viewer-similar-inline-error" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={onLoadMore}>重试</button>
+        </div>
+      )}
+      {!error && (
+        <div className="viewer-similar-pagination">
+          {hasMore ? (
+            <button
+              type="button"
+              className="viewer-similar-load-more"
+              onClick={onLoadMore}
+              disabled={loadingMore}
+              aria-busy={loadingMore}
+            >
+              {loadingMore && <LoaderCircle className="spin" size={15} />}
+              <span>{loadingMore ? "正在加载" : "加载更多相似图片"}</span>
+              {!loadingMore && <small>{images.length} / {total}</small>}
+            </button>
+          ) : (
+            <span className="viewer-similar-count">
+              已显示全部 {total.toLocaleString()} 张相似图片
+            </span>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function SimilarImageSkeleton() {
+  return (
+    <div className="viewer-similar-skeleton" aria-label="正在查找相似图片">
+      {[1, 2, 3, 4, 5, 6].map((item) => <span key={item} />)}
+    </div>
+  );
+}
+
 export function ImageViewer({
   images,
   activeIndex,
@@ -305,6 +430,16 @@ export function ImageViewer({
   loadingMore,
   onNavigate,
   onClose,
+  similarActive,
+  similarImages,
+  similarTotal,
+  similarHasMore,
+  similarLoading,
+  similarLoadingMore,
+  similarError,
+  onSearchSimilar,
+  onLoadMoreSimilar,
+  onOpenSimilar,
 }: {
   images: GalleryImage[];
   activeIndex: number;
@@ -313,6 +448,16 @@ export function ImageViewer({
   loadingMore: boolean;
   onNavigate: (direction: -1 | 1) => void;
   onClose: () => void;
+  similarActive: boolean;
+  similarImages: GalleryImage[];
+  similarTotal: number;
+  similarHasMore: boolean;
+  similarLoading: boolean;
+  similarLoadingMore: boolean;
+  similarError: string | null;
+  onSearchSimilar: (image: GalleryImage) => void;
+  onLoadMoreSimilar: () => void;
+  onOpenSimilar: (image: GalleryImage) => void;
 }) {
   const image = images[activeIndex]!;
   const viewport = useViewportSize();
@@ -333,6 +478,7 @@ export function ImageViewer({
   const waitingForNext = loadingMore && activeIndex === images.length - 1;
   const dialogRef = useRef<HTMLDivElement>(null);
   const detailsSectionRef = useRef<HTMLElement>(null);
+  const similarSectionRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const mediaRef = useRef<HTMLDivElement>(null);
@@ -611,6 +757,17 @@ export function ImageViewer({
     if (focus) {
       window.requestAnimationFrame(() => closeButtonRef.current?.focus({ preventScroll: true }));
     }
+  };
+
+  const scrollToSimilar = () => {
+    commitTransform(DEFAULT_TRANSFORM);
+    wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
+    window.requestAnimationFrame(() => {
+      similarSectionRef.current?.scrollIntoView({
+        behavior: reducedMotion() ? "auto" : "smooth",
+        block: "start",
+      });
+    });
   };
 
   const parkViewerControlFocus = () => {
@@ -1775,6 +1932,7 @@ export function ImageViewer({
       data-page={scrollPage}
       data-renderer={renderer}
       data-control-system="unified"
+      data-ui-layout="floating"
       data-scroll-mode="continuous"
       data-mouse-side-navigation="true"
       data-mobile-swipe-motion="interruptible"
@@ -1789,6 +1947,19 @@ export function ImageViewer({
 
       <header className="viewer-header">
         <div className="viewer-header-actions">
+          <button
+            type="button"
+            className={`viewer-control viewer-similar-trigger${similarActive ? " is-active" : ""}`}
+            onClick={() => {
+              onSearchSimilar(image);
+              scrollToSimilar();
+            }}
+            aria-label="以图搜图，查找相似图片"
+            aria-pressed={similarActive}
+            title="以图搜图"
+          >
+            <ScanSearch size={19} />
+          </button>
           <a
             className="viewer-control"
             href={viewerOriginalUrl(image)}
@@ -2062,6 +2233,59 @@ export function ImageViewer({
               </span>
               <ChevronRight size={18} />
             </a>
+
+            <section
+              ref={similarSectionRef}
+              className="viewer-similar-section"
+              aria-labelledby="viewer-similar-title"
+              data-similar-active={similarActive}
+            >
+              <div className="viewer-similar-heading">
+                <div>
+                  <h3 id="viewer-similar-title">相似图片</h3>
+                  <p>在图库中查找构图、色彩和纹理相近的图片</p>
+                </div>
+                <ScanSearch size={20} aria-hidden="true" />
+              </div>
+
+              {!similarActive ? (
+                <button
+                  type="button"
+                  className="viewer-similar-search-button"
+                  onClick={() => onSearchSimilar(image)}
+                >
+                  <ScanSearch size={18} />
+                  <span>以图搜图</span>
+                  <ChevronRight size={17} />
+                </button>
+              ) : similarLoading && !similarImages.length ? (
+                <SimilarImageSkeleton />
+              ) : similarError && !similarImages.length ? (
+                <div className="viewer-similar-error" role="alert">
+                  <span>{similarError}</span>
+                  <button type="button" onClick={() => onSearchSimilar(image)}>
+                    <RefreshCw size={15} />
+                    重试
+                  </button>
+                </div>
+              ) : similarImages.length ? (
+                <SimilarImageMasonry
+                  images={similarImages}
+                  total={similarTotal}
+                  columnCount={compactViewport ? 2 : 3}
+                  hasMore={similarHasMore}
+                  loadingMore={similarLoadingMore}
+                  error={similarError}
+                  onLoadMore={onLoadMoreSimilar}
+                  onOpen={onOpenSimilar}
+                />
+              ) : (
+                <div className="viewer-similar-empty">
+                  <ScanSearch size={22} />
+                  <span>暂时没有找到相似图片</span>
+                </div>
+              )}
+            </section>
           </div>
         </div>
       </section>

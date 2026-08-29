@@ -22,7 +22,21 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
-use crate::gallery::ImageRecord;
+use crate::{
+    gallery::ImageRecord,
+    semantic::{
+        SemanticEmbedding, SemanticIndex, SemanticStatus, is_semantic_sidecar,
+        remove_embedding_for_thumbnail,
+    },
+    similarity::{
+        cache_signature_for_thumbnail, has_signature_sidecar, is_signature_sidecar,
+        remove_signature_for_thumbnail, signature_for_thumbnail,
+    },
+    text_search::{
+        TextSearchEmbedding, TextSearchIndex, TextSearchStatus, is_text_search_sidecar,
+        remove_embedding_for_thumbnail as remove_text_search_embedding,
+    },
+};
 
 const THUMBNAIL_EDGE: u32 = 720;
 const WEBP_QUALITY: f32 = 82.0;
@@ -37,6 +51,9 @@ pub struct ThumbnailManager {
     entries: RwLock<HashMap<String, Arc<ThumbEntry>>>,
     queue: JobQueue,
     initial_ready: AtomicBool,
+    similarity_warmup_running: AtomicBool,
+    semantic: Option<Arc<SemanticIndex>>,
+    text_search: Option<Arc<TextSearchIndex>>,
 }
 
 #[derive(Debug)]
@@ -109,10 +126,21 @@ pub struct ThumbnailStatus {
     pub failed: usize,
     pub initial_batch_ready: bool,
     pub background_complete: bool,
+    pub semantic: SemanticStatus,
+    pub text_search: TextSearchStatus,
 }
 
 impl ThumbnailManager {
+    #[cfg(test)]
     pub fn new(cache_dir: PathBuf) -> Result<Arc<Self>> {
+        Self::new_with_indexes(cache_dir, None, None)
+    }
+
+    pub fn new_with_indexes(
+        cache_dir: PathBuf,
+        semantic: Option<Arc<SemanticIndex>>,
+        text_search: Option<Arc<TextSearchIndex>>,
+    ) -> Result<Arc<Self>> {
         let cache_root = cache_dir.join(CACHE_VERSION);
         fs::create_dir_all(&cache_root)
             .with_context(|| format!("cannot create thumbnail cache: {}", cache_root.display()))?;
@@ -132,6 +160,9 @@ impl ThumbnailManager {
             entries: RwLock::new(HashMap::new()),
             queue: JobQueue::default(),
             initial_ready: AtomicBool::new(false),
+            similarity_warmup_running: AtomicBool::new(false),
+            semantic,
+            text_search,
         }))
     }
 
@@ -179,6 +210,31 @@ impl ThumbnailManager {
         for id in missing {
             self.queue.push_background(id);
         }
+        if self.semantic.is_some() || self.text_search.is_some() {
+            if let Some(semantic) = &self.semantic {
+                semantic.reconcile(&current_ids);
+            }
+            if let Some(text_search) = &self.text_search {
+                text_search.reconcile(&current_ids);
+            }
+            let ready = {
+                let entries = read_lock(&self.entries);
+                entries
+                    .values()
+                    .filter(|entry| matches!(*mutex_lock(&entry.state), ThumbState::Ready))
+                    .filter(|entry| valid_cache_file(&entry.cache_path))
+                    .map(|entry| (entry.record.id.clone(), entry.cache_path.clone()))
+                    .collect::<Vec<_>>()
+            };
+            for (id, thumbnail) in ready {
+                if let Some(semantic) = &self.semantic {
+                    semantic.enqueue(&id, &thumbnail, false);
+                }
+                if let Some(text_search) = &self.text_search {
+                    text_search.enqueue(&id, &thumbnail, false);
+                }
+            }
+        }
     }
 
     pub fn start_workers(self: &Arc<Self>, count: usize) {
@@ -188,6 +244,53 @@ impl ThumbnailManager {
                 manager.worker_loop(worker).await;
             });
         }
+    }
+
+    /// Build descriptors for thumbnails created by an older Pixhelf release.
+    /// New thumbnails write their descriptor during generation, so this is a
+    /// one-time, low-priority migration after an upgrade.
+    pub fn start_similarity_warmup(self: &Arc<Self>) {
+        if self.similarity_warmup_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let pending = {
+                let entries = read_lock(&manager.entries);
+                entries
+                    .values()
+                    .filter(|entry| matches!(*mutex_lock(&entry.state), ThumbState::Ready))
+                    .filter(|entry| valid_cache_file(&entry.cache_path))
+                    .filter(|entry| !has_signature_sidecar(&entry.cache_path))
+                    .map(|entry| (Arc::clone(&entry.record), entry.cache_path.clone()))
+                    .collect::<Vec<_>>()
+            };
+            let total = pending.len();
+            let result = tokio::task::spawn_blocking(move || {
+                pending
+                    .into_iter()
+                    .filter(|(record, thumbnail)| {
+                        if let Err(error) = signature_for_thumbnail(record, thumbnail) {
+                            warn!(image = %record.relative_path, %error, "cannot warm image similarity descriptor");
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .count()
+            })
+            .await;
+            match result {
+                Ok(failures) if total > 0 => {
+                    info!(total, failures, "image similarity descriptors are ready");
+                }
+                Ok(_) => {}
+                Err(error) => warn!(%error, "image similarity descriptor warmup stopped"),
+            }
+            manager
+                .similarity_warmup_running
+                .store(false, Ordering::Release);
+        });
     }
 
     pub async fn prepare_initial(&self, ids: &[String]) {
@@ -240,7 +343,60 @@ impl ThumbnailManager {
             failed,
             initial_batch_ready: self.initial_ready.load(Ordering::Acquire),
             background_complete: ready + failed == total && processing == 0,
+            semantic: self
+                .semantic
+                .as_ref()
+                .map_or_else(SemanticStatus::disabled, |semantic| semantic.status()),
+            text_search: self
+                .text_search
+                .as_ref()
+                .map_or_else(TextSearchStatus::disabled, |index| index.status()),
         }
+    }
+
+    pub async fn ensure_semantic_embedding(
+        &self,
+        id: &str,
+        thumbnail: &Path,
+    ) -> Option<Arc<SemanticEmbedding>> {
+        let semantic = self.semantic.as_ref()?;
+        semantic.ensure_embedding(id, thumbnail).await
+    }
+
+    pub fn semantic_embedding(&self, id: &str) -> Option<Arc<SemanticEmbedding>> {
+        self.semantic.as_ref()?.embedding(id)
+    }
+
+    pub fn semantic_cache_token(&self) -> String {
+        self.semantic
+            .as_ref()
+            .map_or_else(|| "off".to_owned(), |semantic| semantic.cache_token())
+    }
+
+    pub async fn text_query_embedding(
+        &self,
+        query: &str,
+    ) -> Result<Option<Arc<TextSearchEmbedding>>> {
+        let Some(index) = &self.text_search else {
+            return Ok(None);
+        };
+        index.embed_query(query).await.map(Some)
+    }
+
+    pub fn text_search_embedding(&self, id: &str) -> Option<Arc<TextSearchEmbedding>> {
+        self.text_search.as_ref()?.embedding(id)
+    }
+
+    pub fn text_search_cache_token(&self) -> String {
+        self.text_search
+            .as_ref()
+            .map_or_else(|| "off".to_owned(), |index| index.cache_token())
+    }
+
+    pub fn ready_path(&self, id: &str) -> Option<PathBuf> {
+        let entry = read_lock(&self.entries).get(id).cloned()?;
+        let ready = matches!(*mutex_lock(&entry.state), ThumbState::Ready);
+        (ready && valid_cache_file(&entry.cache_path)).then(|| entry.cache_path.clone())
     }
 
     pub async fn cleanup_stale(&self) {
@@ -354,6 +510,12 @@ impl ThumbnailManager {
                         }
                     };
                     if ready {
+                        if let Some(semantic) = &self.semantic {
+                            semantic.enqueue(&id, &entry.cache_path, false);
+                        }
+                        if let Some(text_search) = &self.text_search {
+                            text_search.enqueue(&id, &entry.cache_path, false);
+                        }
                         entry.notify.notify_waiters();
                     } else if removed {
                         let entries = read_lock(&self.entries);
@@ -362,6 +524,21 @@ impl ThumbnailManager {
                             && error.kind() != std::io::ErrorKind::NotFound
                         {
                             warn!(path = %entry.cache_path.display(), %error, "cannot remove stale thumbnail");
+                        }
+                        if !entries.contains_key(&id)
+                            && let Err(error) = remove_signature_for_thumbnail(&entry.cache_path)
+                        {
+                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale similarity descriptor");
+                        }
+                        if !entries.contains_key(&id)
+                            && let Err(error) = remove_embedding_for_thumbnail(&entry.cache_path)
+                        {
+                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale semantic embedding");
+                        }
+                        if !entries.contains_key(&id)
+                            && let Err(error) = remove_text_search_embedding(&entry.cache_path)
+                        {
+                            warn!(path = %entry.cache_path.display(), %error, "cannot remove stale text-search embedding");
                         }
                     }
                 }
@@ -516,11 +693,23 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
     };
     write_webp(&image, output, WEBP_QUALITY)
         .with_context(|| format!("cannot store thumbnail: {}", output.display()))?;
+    if let Err(error) = cache_signature_for_thumbnail(record, &image, output) {
+        warn!(path = %output.display(), %error, "cannot cache image similarity descriptor");
+    }
     if let Err(error) = record.ensure_source_is_current() {
         if let Err(remove_error) = fs::remove_file(output)
             && remove_error.kind() != std::io::ErrorKind::NotFound
         {
             warn!(path = %output.display(), %remove_error, "cannot remove stale thumbnail");
+        }
+        if let Err(remove_error) = remove_signature_for_thumbnail(output) {
+            warn!(path = %output.display(), %remove_error, "cannot remove stale similarity descriptor");
+        }
+        if let Err(remove_error) = remove_embedding_for_thumbnail(output) {
+            warn!(path = %output.display(), %remove_error, "cannot remove stale semantic embedding");
+        }
+        if let Err(remove_error) = remove_text_search_embedding(output) {
+            warn!(path = %output.display(), %remove_error, "cannot remove stale text-search embedding");
         }
         return Err(error);
     }
@@ -573,7 +762,11 @@ fn write_webp(image: &DynamicImage, output: &Path, quality: f32) -> Result<()> {
 
 fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
     visit_cache_files(root, |path| {
-        if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("webp")
+            && !is_signature_sidecar(path)
+            && !is_semantic_sidecar(path)
+            && !is_text_search_sidecar(path)
+        {
             return;
         }
         let stem = path
@@ -627,6 +820,7 @@ mod tests {
         generate_thumbnail(&index.images[0], &output).unwrap();
         let generated = image::open(output).unwrap();
         assert_eq!(generated.dimensions(), (720, 360));
+        assert!(temp.path().join("thumbnail.sim2").is_file());
     }
 
     #[test]
@@ -648,19 +842,72 @@ mod tests {
         let root = temp.path();
         let id = "abcdef";
         let thumbnail = shard_path(root, id);
+        let signature = thumbnail.with_extension("sim2");
+        let semantic = thumbnail.with_extension("dino2");
+        let text_search = thumbnail.with_extension("cnclip");
         let old_compact = thumbnail.with_file_name(format!("{id}-360.webp"));
         let stale = shard_path(root, "stale");
+        let stale_signature = stale.with_extension("sim2");
+        let stale_semantic = stale.with_extension("dino2");
+        let stale_text_search = stale.with_extension("cnclip");
         fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&thumbnail, [1; 32]).unwrap();
+        fs::write(&signature, [1; 32]).unwrap();
+        fs::write(&semantic, [1; 32]).unwrap();
+        fs::write(&text_search, [1; 32]).unwrap();
         fs::write(&old_compact, [1; 32]).unwrap();
         fs::write(&stale, [1; 32]).unwrap();
+        fs::write(&stale_signature, [1; 32]).unwrap();
+        fs::write(&stale_semantic, [1; 32]).unwrap();
+        fs::write(&stale_text_search, [1; 32]).unwrap();
 
         cleanup_cache(root, &HashSet::from([id.to_owned()]));
 
         assert!(thumbnail.exists());
+        assert!(signature.exists());
+        assert!(semantic.exists());
+        assert!(text_search.exists());
         assert!(!old_compact.exists());
         assert!(!stale.exists());
+        assert!(!stale_signature.exists());
+        assert!(!stale_semantic.exists());
+        assert!(!stale_text_search.exists());
+    }
+
+    #[tokio::test]
+    async fn warmup_migrates_cached_thumbnails_without_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let source = gallery.join("warmup.png");
+        image::RgbImage::from_fn(48, 32, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 6) as u8, ((x + y) * 3) as u8])
+        })
+        .save(&source)
+        .unwrap();
+        let index = scan_gallery(&gallery, None).unwrap();
+        let manager = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        let cached = manager.cache_path(&index.images[0].id);
+        fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        write_webp(&image::open(&source).unwrap(), &cached, WEBP_QUALITY).unwrap();
+        assert!(valid_cache_file(&cached));
+        assert!(!has_signature_sidecar(&cached));
+
+        manager.reconcile(&index.images);
+        manager.start_similarity_warmup();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if has_signature_sidecar(&cached)
+                    && !manager.similarity_warmup_running.load(Ordering::Acquire)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("similarity descriptor warmup timed out");
     }
 
     #[test]
