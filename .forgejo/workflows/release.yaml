@@ -223,7 +223,58 @@ jobs:
           set -eu
           work=/tmp/pixhelf-oci
           local_registry=127.0.0.1:5000
-          mkdir -p "$work"
+          model_revision=f4a64596bbcf9a2a94591b74b9dc39b2e4e77e3e
+          model_name=chinese-clip-vit-base-patch16-f4a64596
+          model_path="/opt/pixhelf/models/$model_name"
+          model_root="$work/model-root"
+          model_layer="$work/model-layer.tar"
+          model_base_ref="$local_registry/staging:model-base"
+          mkdir -p "$model_root$model_path"
+
+          # Keep this metadata in sync with src/text_search/download.rs and Dockerfile.
+          download_model_artifact() {
+            filename="$1"
+            checksum="$2"
+            expected_size="$3"
+            destination="$model_root$model_path/$filename"
+            url="https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16/resolve/$model_revision/$filename"
+
+            curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
+              --retry 5 \
+              --retry-all-errors \
+              --continue-at - \
+              "$url" \
+              --output "$destination"
+            printf '%s  %s\n' "$checksum" "$destination" | sha256sum --check -
+            actual_size="$(wc -c < "$destination" | tr -d ' ')"
+            test "$actual_size" = "$expected_size"
+            chmod 0644 "$destination"
+          }
+
+          download_model_artifact \
+            model.safetensors \
+            29cc0b2bcf6ff777f2e15742be92b110e4acbdb2068356e862c4637a4b15fe4f \
+            753106020
+          download_model_artifact \
+            vocab.txt \
+            45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c \
+            109540
+
+          chmod 0755 \
+            "$model_root/opt" \
+            "$model_root/opt/pixhelf" \
+            "$model_root/opt/pixhelf/models" \
+            "$model_root$model_path"
+
+          tar \
+            --sort=name \
+            --mtime=@0 \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf "$model_layer" \
+            -C "$model_root" \
+            opt
 
           crane registry serve --address "$local_registry" >"$work/registry.log" 2>&1 &
           registry_pid=$!
@@ -233,6 +284,21 @@ jobs:
           }
           trap cleanup EXIT
           sleep 1
+
+          crane append --insecure --oci-empty-base \
+            --new_layer "$model_layer" \
+            --new_tag "$model_base_ref"
+          model_layer_digest="$(crane manifest --insecure "$model_base_ref" | node -e '
+            let input = "";
+            process.stdin.on("data", (chunk) => input += chunk);
+            process.stdin.on("end", () => {
+              const manifest = JSON.parse(input);
+              if (manifest.layers?.length !== 1) {
+                throw new Error(`model base has ${manifest.layers?.length ?? 0} layers`);
+              }
+              process.stdout.write(manifest.layers[0].digest);
+            });
+          ')"
 
           build_platform() {
             arch="$1"
@@ -254,7 +320,8 @@ jobs:
               -C "$rootfs" \
               pixhelf
 
-            crane append --insecure --oci-empty-base \
+            crane append --insecure \
+              --base "$model_base_ref" \
               --new_layer "$platform_dir/layer.tar" \
               --new_tag "$base_ref"
             crane mutate --insecure "$base_ref" \
@@ -263,6 +330,7 @@ jobs:
               --entrypoint /pixhelf \
               --workdir /data \
               --exposed-ports 3002/tcp \
+              --env "PIXHELF_TEXT_SEARCH_MODEL=$model_path" \
               --label org.opencontainers.image.title=Pixhelf \
               --label 'org.opencontainers.image.description=Self-hosted image gallery' \
               --label "org.opencontainers.image.version=$IMAGE_VERSION" \
@@ -270,7 +338,7 @@ jobs:
               --label "org.opencontainers.image.source=$SOURCE_URL"
 
             crane config --insecure "$configured_ref" \
-              | ARCH="$arch" node -e '
+              | ARCH="$arch" MODEL_PATH="$model_path" node -e '
                   let input = "";
                   process.stdin.on("data", (chunk) => input += chunk);
                   process.stdin.on("end", () => {
@@ -287,10 +355,31 @@ jobs:
                     if (!config.config.ExposedPorts?.["3002/tcp"]) {
                       throw new Error("missing exposed port");
                     }
+                    const expectedModel = `PIXHELF_TEXT_SEARCH_MODEL=${process.env.MODEL_PATH}`;
+                    if (!config.config.Env?.includes(expectedModel)) {
+                      throw new Error("missing bundled model configuration");
+                    }
                   });'
 
+            app_layer_digest="$(crane manifest --insecure "$configured_ref" \
+              | EXPECTED_MODEL_LAYER="$model_layer_digest" node -e '
+                  let input = "";
+                  process.stdin.on("data", (chunk) => input += chunk);
+                  process.stdin.on("end", () => {
+                    const manifest = JSON.parse(input);
+                    if (manifest.layers?.length !== 2) {
+                      throw new Error(`application image has ${manifest.layers?.length ?? 0} layers`);
+                    }
+                    if (manifest.layers[0].digest !== process.env.EXPECTED_MODEL_LAYER) {
+                      throw new Error("application image does not reuse the model base layer");
+                    }
+                    process.stdout.write(manifest.layers[1].digest);
+                  });'
+            )"
+
             expected="$(sha256sum "$asset" | cut -d ' ' -f 1)"
-            actual="$(crane export --insecure "$configured_ref" - \
+            actual="$(crane blob --insecure "$local_registry/staging@$app_layer_digest" \
+              | gzip -dc \
               | tar -xOf - pixhelf \
               | sha256sum \
               | cut -d ' ' -f 1)"

@@ -113,6 +113,7 @@ export function Header({
           aria-label={exploreActive ? "换一组图片" : "随机探索"}
           aria-pressed={exploreActive}
           aria-busy={exploreLoading}
+          data-state={exploreActive ? "active" : "idle"}
           title={exploreActive ? "换一组" : "随机探索"}
         >
           <Dices
@@ -198,6 +199,7 @@ export function SidebarToggleButton({
       aria-label={label}
       aria-expanded={expanded}
       aria-controls={controls}
+      data-state={expanded ? "expanded" : "collapsed"}
       title={label}
     >
       <span key={String(expanded)} className="sidebar-toggle-glyph" aria-hidden="true">

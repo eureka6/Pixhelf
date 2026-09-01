@@ -1,4 +1,5 @@
 import type { CSSProperties } from "preact";
+import { useEffect, useRef } from "preact/hooks";
 
 import { LoaderCircle, RefreshCw } from "./icons";
 import type { GalleryImage } from "./types";
@@ -67,6 +68,7 @@ export function SimilarImageMasonry({
   onLoadMore: () => void;
   onOpen: (image: GalleryImage) => void;
 }) {
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
   const safeColumnCount = Math.max(1, Math.floor(columnCount));
   const columns = Array.from({ length: safeColumnCount }, () => [] as GalleryImage[]);
   const heights = Array.from({ length: safeColumnCount }, () => 0);
@@ -75,6 +77,23 @@ export function SimilarImageMasonry({
     columns[target]!.push(image);
     heights[target] += image.height / Math.max(1, image.width) + 0.12;
   }
+
+  useEffect(() => {
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel || !hasMore || loadingMore || error) return;
+    const scrollRoot = sentinel.closest<HTMLElement>(".image-viewer");
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) onLoadMore();
+      },
+      {
+        root: scrollRoot,
+        rootMargin: "800px 0px",
+      },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [error, hasMore, images.length, loadingMore, onLoadMore]);
 
   return (
     <>
@@ -98,19 +117,17 @@ export function SimilarImageMasonry({
         </div>
       )}
       {!error && (
-        <div className="viewer-similar-pagination">
+        <div
+          ref={loadMoreSentinelRef}
+          className="viewer-similar-pagination"
+          data-state={hasMore ? (loadingMore ? "loading" : "ready") : "complete"}
+          aria-live="polite"
+        >
           {hasMore ? (
-            <button
-              type="button"
-              className="viewer-similar-load-more"
-              onClick={onLoadMore}
-              disabled={loadingMore}
-              aria-busy={loadingMore}
-            >
+            <span className="viewer-similar-auto-load" aria-busy={loadingMore}>
               {loadingMore && <LoaderCircle className="spin" size={15} />}
-              <span>{loadingMore ? "正在加载" : "加载更多相似图片"}</span>
-              {!loadingMore && <small>{images.length} / {total}</small>}
-            </button>
+              <span>{loadingMore ? "正在续载相似图片" : "继续下滑自动加载"}</span>
+            </span>
           ) : (
             <span className="viewer-similar-count">
               已显示全部 {total.toLocaleString()} 张相似图片
@@ -122,10 +139,17 @@ export function SimilarImageMasonry({
   );
 }
 
-export function SimilarImageSkeleton() {
+export function SimilarImageSkeleton({ columnCount }: { columnCount: number }) {
+  const safeColumnCount = Math.max(1, Math.floor(columnCount));
+  const itemCount = Math.max(4, safeColumnCount * 2);
   return (
-    <div className="viewer-similar-skeleton" aria-label="正在查找相似图片">
-      {[1, 2, 3, 4, 5, 6].map((item) => <span key={item} />)}
+    <div
+      className="viewer-similar-skeleton"
+      aria-label="正在查找相似图片"
+      data-columns={safeColumnCount}
+      style={{ "--similar-columns": safeColumnCount } as CSSProperties}
+    >
+      {Array.from({ length: itemCount }, (_, index) => <span key={index} />)}
     </div>
   );
 }

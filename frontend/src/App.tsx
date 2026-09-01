@@ -48,6 +48,8 @@ const VIEWER_RETURN_SETTLE_MS = 32;
 const VIEWER_RETURN_TIMEOUT_MS = 480;
 const VIEWER_RETURN_ANIMATION_MS = 260;
 const READY_THUMBNAIL_CACHE_LIMIT = 2048;
+const VIEWER_HISTORY_STATE_KEY = "__pixhelfViewer";
+const VIEWER_HISTORY_STATE_VERSION = 1;
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
 type ImagePageState = {
@@ -61,6 +63,11 @@ type SimilarImagePageState = {
   images: GalleryImage[];
   total: number;
   nextOffset: number | null;
+};
+
+type ViewerHistoryEntry = {
+  version: number;
+  image: GalleryImage;
 };
 
 type ViewerAnchor = {
@@ -97,6 +104,42 @@ const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
   total: 0,
   nextOffset: null,
 };
+
+function readViewerHistoryEntry(state: unknown): ViewerHistoryEntry | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const value = (state as Record<string, unknown>)[VIEWER_HISTORY_STATE_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const entry = value as Record<string, unknown>;
+  const image = entry.image;
+  if (
+    entry.version !== VIEWER_HISTORY_STATE_VERSION
+    || !image
+    || typeof image !== "object"
+    || Array.isArray(image)
+  ) return null;
+  const candidate = image as Record<string, unknown>;
+  if (
+    typeof candidate.id !== "string"
+    || typeof candidate.name !== "string"
+    || typeof candidate.width !== "number"
+    || typeof candidate.height !== "number"
+  ) return null;
+  return value as ViewerHistoryEntry;
+}
+
+function viewerHistoryState(image: GalleryImage): Record<string, unknown> {
+  const current = window.history.state;
+  const preserved = current && typeof current === "object" && !Array.isArray(current)
+    ? current as Record<string, unknown>
+    : {};
+  return {
+    ...preserved,
+    [VIEWER_HISTORY_STATE_KEY]: {
+      version: VIEWER_HISTORY_STATE_VERSION,
+      image,
+    } satisfies ViewerHistoryEntry,
+  };
+}
 
 function clampValue(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
@@ -565,6 +608,8 @@ function App() {
   const viewerAnchorRef = useRef<ViewerAnchor | null>(null);
   const viewerReturnSequenceRef = useRef(0);
   const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
+  const viewerHistoryActiveRef = useRef(false);
+  const viewerHistoryClosingRef = useRef(false);
   const { images, total, nextOffset } = imagePage;
   const viewerImages = useMemo(
     () => appendUniqueImages(images, viewerDiscoveredImages),
@@ -943,23 +988,7 @@ function App() {
     ),
   );
 
-  const openViewer = useCallback((
-    imageId: string,
-    card: HTMLElement,
-    pointerY?: number,
-  ) => {
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
-    viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
-    prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
-    resetSimilarSearch();
-    setViewerDiscoveredImages([]);
-    setViewerReturnRequest(null);
-    viewerImageIdRef.current = imageId;
-    setViewerImageId(imageId);
-  }, [images, resetSimilarSearch]);
-
-  const closeViewer = useCallback(() => {
+  const closeViewerState = useCallback(() => {
     const currentImageId = viewerImageIdRef.current;
     if (!currentImageId) return;
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
@@ -980,6 +1009,105 @@ function App() {
     viewerImageIdRef.current = null;
     setViewerImageId(null);
   }, [resetSimilarSearch]);
+
+  const restoreViewerFromHistory = useCallback((snapshot: GalleryImage) => {
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+    const card = imageCardById(snapshot.id);
+    viewerAnchorRef.current = card ? captureViewerAnchor(card) : null;
+    prepareViewerImages([snapshot], 0);
+    resetSimilarSearch();
+    setViewerDiscoveredImages((current) => appendUniqueImages(current, [snapshot]));
+    setViewerReturnRequest(null);
+    viewerImageIdRef.current = snapshot.id;
+    setViewerImageId(snapshot.id);
+  }, [resetSimilarSearch]);
+
+  const enterViewerHistory = useCallback((snapshot: GalleryImage) => {
+    try {
+      const state = viewerHistoryState(snapshot);
+      if (readViewerHistoryEntry(window.history.state)) {
+        window.history.replaceState(state, "", window.location.href);
+      } else {
+        window.history.pushState(state, "", window.location.href);
+      }
+      viewerHistoryActiveRef.current = true;
+      viewerHistoryClosingRef.current = false;
+    } catch {
+      viewerHistoryActiveRef.current = false;
+      viewerHistoryClosingRef.current = false;
+    }
+  }, []);
+
+  const openViewer = useCallback((
+    imageId: string,
+    card: HTMLElement,
+    pointerY?: number,
+  ) => {
+    const snapshot = images.find((image) => image.id === imageId);
+    if (!viewerImageIdRef.current && snapshot) enterViewerHistory(snapshot);
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+    viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
+    prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
+    resetSimilarSearch();
+    setViewerDiscoveredImages([]);
+    setViewerReturnRequest(null);
+    viewerImageIdRef.current = imageId;
+    setViewerImageId(imageId);
+  }, [enterViewerHistory, images, resetSimilarSearch]);
+
+  const closeViewer = useCallback(() => {
+    if (!viewerImageIdRef.current || viewerHistoryClosingRef.current) return;
+    if (
+      viewerHistoryActiveRef.current
+      && readViewerHistoryEntry(window.history.state)
+    ) {
+      viewerHistoryClosingRef.current = true;
+      window.history.back();
+      return;
+    }
+    viewerHistoryActiveRef.current = false;
+    closeViewerState();
+  }, [closeViewerState]);
+
+  useEffect(() => {
+    const applyHistoryState = (state: unknown) => {
+      const entry = readViewerHistoryEntry(state);
+      viewerHistoryActiveRef.current = Boolean(entry);
+      viewerHistoryClosingRef.current = false;
+      if (entry) {
+        if (viewerImageIdRef.current !== entry.image.id) {
+          restoreViewerFromHistory(entry.image);
+        }
+      } else if (viewerImageIdRef.current) {
+        closeViewerState();
+      }
+    };
+    const onPopState = (event: PopStateEvent) => applyHistoryState(event.state);
+    window.addEventListener("popstate", onPopState);
+    const currentEntry = readViewerHistoryEntry(window.history.state);
+    viewerHistoryActiveRef.current = Boolean(currentEntry);
+    if (currentEntry && !viewerImageIdRef.current) {
+      restoreViewerFromHistory(currentEntry.image);
+    }
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [closeViewerState, restoreViewerFromHistory]);
+
+  useLayoutEffect(() => {
+    if (!viewerImage || !viewerHistoryActiveRef.current) return;
+    const entry = readViewerHistoryEntry(window.history.state);
+    if (!entry || entry.image.id === viewerImage.id) return;
+    try {
+      window.history.replaceState(
+        viewerHistoryState(viewerImage),
+        "",
+        window.location.href,
+      );
+    } catch {
+      viewerHistoryActiveRef.current = false;
+    }
+  }, [viewerImage]);
 
   useLayoutEffect(() => {
     if (viewerImageId || !viewerReturnRequest) return;
@@ -1381,7 +1509,7 @@ function App() {
           similarLoadingMore={similarActive && similarLoadingMore}
           similarError={similarActive ? similarError : null}
           onSearchSimilar={searchSimilar}
-          onLoadMoreSimilar={() => void loadMoreSimilar()}
+          onLoadMoreSimilar={loadMoreSimilar}
           onOpenSimilar={openSimilarImage}
         />
       )}

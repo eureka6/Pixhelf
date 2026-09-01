@@ -25,6 +25,25 @@ export interface ImagesPage {
   nextOffset: number | null;
 }
 
+export interface PhotoExifField {
+  label: string;
+  value: string;
+}
+
+export interface PhotoHistogram {
+  red: number[];
+  green: number[];
+  blue: number[];
+  luminance: number[];
+}
+
+export interface PhotoDetails {
+  fileSize: number;
+  modifiedMs: number;
+  exif: PhotoExifField[];
+  histogram: PhotoHistogram;
+}
+
 export interface ThumbnailStatus {
   total: number;
   ready: number;

@@ -11,21 +11,11 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
-#[cfg(test)]
-use std::fs;
-
-use anyhow::{Context, Result, anyhow, bail};
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::models::chinese_clip::{ChineseClipConfig, ChineseClipModel};
-use image::{DynamicImage, GenericImageView, ImageReader, imageops::FilterType};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
-use tokenizers::{
-    Tokenizer, TruncationParams, models::wordpiece::WordPiece, normalizers::bert::BertNormalizer,
-    pre_tokenizers::bert::BertPreTokenizer, processors::bert::BertProcessing,
-};
 use tokio::sync::Notify;
 use tracing::{info, warn};
 
@@ -38,14 +28,22 @@ use crate::support::{
     mutex_lock, read_lock, write_lock,
 };
 
-const MODEL_NAME: &str = "Chinese-CLIP ViT-B/16";
-const MODEL_EDGE: u32 = 224;
-const TEXT_CONTEXT_LENGTH: usize = 52;
+mod download;
+mod model;
+
+pub(crate) use download::ensure_automatic_model;
+
+#[cfg(test)]
+pub(crate) use model::TextImageModel;
+use model::{LazyModel, MODEL_NAME};
+
 const EMBEDDING_SIZE: usize = 512;
 const EMBEDDING_MAGIC: &[u8; 8] = b"PXHFCN1\0";
 const EMBEDDING_EXTENSION: &str = "cnclip";
 const MODEL_FINGERPRINT_BYTES: usize = FINGERPRINT_BYTES;
 const QUERY_CACHE_LIMIT: usize = 16;
+const MODEL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(crate) type TextSearchEmbedding = QuantizedEmbedding<EMBEDDING_SIZE>;
 
@@ -56,13 +54,8 @@ pub(crate) fn text_image_similarity(
     query.cosine_similarity(image)
 }
 
-pub(crate) trait TextImageModel: Send {
-    fn embed_thumbnail(&mut self, thumbnail: &Path) -> Result<TextSearchEmbedding>;
-    fn embed_text(&mut self, text: &str) -> Result<TextSearchEmbedding>;
-}
-
 pub(crate) struct TextSearchIndex {
-    model: Arc<Mutex<Box<dyn TextImageModel>>>,
+    model: Arc<Mutex<LazyModel>>,
     model_fingerprint: Fingerprint,
     model_token: String,
     entries: RwLock<HashMap<String, Arc<TextSearchEntry>>>,
@@ -116,17 +109,13 @@ impl TextSearchIndex {
     pub(crate) fn load(model_path: &Path, vocabulary_path: &Path) -> Result<Arc<Self>> {
         let fingerprint =
             fingerprint_files(&[model_path, vocabulary_path], "text-search model file")?;
-        let model = ChineseClip::load(model_path, vocabulary_path).with_context(|| {
-            format!(
-                "cannot load natural-language search model: {}",
-                model_path.display()
-            )
-        })?;
-        let index = Self::with_model(Box::new(model), fingerprint);
+        let model = LazyModel::chinese_clip(model_path.to_owned(), vocabulary_path.to_owned());
+        let index = Self::with_model(model, fingerprint);
         info!(
             model = MODEL_NAME,
+            path = %model_path.display(),
             fingerprint = %index.model_token,
-            "local natural-language image search enabled"
+            "local natural-language image search enabled; model will load on demand"
         );
         Ok(index)
     }
@@ -136,13 +125,18 @@ impl TextSearchIndex {
         model: Box<dyn TextImageModel>,
         model_fingerprint: [u8; MODEL_FINGERPRINT_BYTES],
     ) -> Arc<Self> {
-        Self::with_model(model, model_fingerprint)
+        Self::with_model(LazyModel::preloaded(model), model_fingerprint)
     }
 
-    fn with_model(
-        model: Box<dyn TextImageModel>,
+    #[cfg(test)]
+    fn with_test_loader(
+        loader: impl Fn() -> Result<Box<dyn TextImageModel>> + Send + Sync + 'static,
         model_fingerprint: [u8; MODEL_FINGERPRINT_BYTES],
     ) -> Arc<Self> {
+        Self::with_model(LazyModel::with_loader(loader), model_fingerprint)
+    }
+
+    fn with_model(model: LazyModel, model_fingerprint: [u8; MODEL_FINGERPRINT_BYTES]) -> Arc<Self> {
         Arc::new(Self {
             model: Arc::new(Mutex::new(model)),
             model_fingerprint,
@@ -162,6 +156,10 @@ impl TextSearchIndex {
         let index = Arc::clone(self);
         tokio::spawn(async move {
             index.worker_loop().await;
+        });
+        let index = Arc::clone(self);
+        tokio::spawn(async move {
+            index.model_reaper_loop().await;
         });
     }
 
@@ -275,6 +273,24 @@ impl TextSearchIndex {
         }
     }
 
+    async fn model_reaper_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(MODEL_IDLE_CHECK_INTERVAL).await;
+            if mutex_lock(&self.model).release_if_idle(MODEL_IDLE_TIMEOUT) {
+                info!(
+                    model = MODEL_NAME,
+                    idle_seconds = MODEL_IDLE_TIMEOUT.as_secs(),
+                    "released idle natural-language search model"
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn release_model_for_test(&self) -> bool {
+        mutex_lock(&self.model).release_if_idle(Duration::ZERO)
+    }
+
     async fn worker_loop(self: Arc<Self>) {
         loop {
             let id = self.queue.pop().await;
@@ -376,129 +392,6 @@ fn write_embedding(
     )
 }
 
-struct ChineseClip {
-    model: ChineseClipModel,
-    tokenizer: Tokenizer,
-    device: Device,
-}
-
-impl ChineseClip {
-    fn load(model_path: &Path, vocabulary_path: &Path) -> Result<Self> {
-        let device = Device::Cpu;
-        // SAFETY: the mapped model is immutable for the process lifetime. The
-        // documentation requires stopping Pixhelf before replacing it.
-        let variables =
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
-        let config = ChineseClipConfig::clip_vit_base_patch16();
-        let model = ChineseClipModel::new(variables, &config)?;
-        let tokenizer = load_tokenizer(vocabulary_path)?;
-        Ok(Self {
-            model,
-            tokenizer,
-            device,
-        })
-    }
-}
-
-impl TextImageModel for ChineseClip {
-    fn embed_thumbnail(&mut self, thumbnail: &Path) -> Result<TextSearchEmbedding> {
-        let input = preprocess_thumbnail(thumbnail)?;
-        let values = self
-            .model
-            .get_image_features(&input)?
-            .i(0)?
-            .to_vec1::<f32>()?;
-        TextSearchEmbedding::quantize(&values, "text-search image model")
-    }
-
-    fn embed_text(&mut self, text: &str) -> Result<TextSearchEmbedding> {
-        let encoding = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|error| anyhow!("cannot tokenize text query: {error}"))?;
-        if encoding.is_empty() {
-            bail!("text query did not produce any tokens");
-        }
-        let input_ids = Tensor::new(encoding.get_ids(), &self.device)?.unsqueeze(0)?;
-        let token_type_ids = Tensor::new(encoding.get_type_ids(), &self.device)?.unsqueeze(0)?;
-        let attention_mask =
-            Tensor::new(encoding.get_attention_mask(), &self.device)?.unsqueeze(0)?;
-        let values = self
-            .model
-            .get_text_features(&input_ids, Some(&token_type_ids), Some(&attention_mask))?
-            .i(0)?
-            .to_vec1::<f32>()?;
-        TextSearchEmbedding::quantize(&values, "text-search text model")
-    }
-}
-
-fn load_tokenizer(vocabulary_path: &Path) -> Result<Tokenizer> {
-    let vocabulary = vocabulary_path.to_str().with_context(|| {
-        format!(
-            "vocabulary path is not UTF-8: {}",
-            vocabulary_path.display()
-        )
-    })?;
-    let model = WordPiece::from_file(vocabulary)
-        .unk_token("[UNK]".to_owned())
-        .build()
-        .map_err(|error| anyhow!("cannot load Chinese-CLIP vocabulary: {error}"))?;
-    let mut tokenizer = Tokenizer::new(model);
-    let cls_id = tokenizer
-        .token_to_id("[CLS]")
-        .context("Chinese-CLIP vocabulary is missing [CLS]")?;
-    let sep_id = tokenizer
-        .token_to_id("[SEP]")
-        .context("Chinese-CLIP vocabulary is missing [SEP]")?;
-    tokenizer.with_normalizer(Some(BertNormalizer::default()));
-    tokenizer.with_pre_tokenizer(Some(BertPreTokenizer));
-    tokenizer.with_post_processor(Some(BertProcessing::new(
-        ("[SEP]".to_owned(), sep_id),
-        ("[CLS]".to_owned(), cls_id),
-    )));
-    tokenizer
-        .with_truncation(Some(TruncationParams {
-            max_length: TEXT_CONTEXT_LENGTH,
-            ..Default::default()
-        }))
-        .map_err(|error| anyhow!("cannot configure Chinese-CLIP tokenizer: {error}"))?;
-    Ok(tokenizer)
-}
-
-fn preprocess_thumbnail(path: &Path) -> Result<Tensor> {
-    let image = ImageReader::open(path)
-        .with_context(|| format!("cannot open thumbnail {}", path.display()))?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| format!("cannot decode thumbnail {}", path.display()))?;
-    preprocess_image(&image)
-}
-
-fn preprocess_image(image: &DynamicImage) -> Result<Tensor> {
-    let (width, height) = image.dimensions();
-    if width == 0 || height == 0 {
-        bail!("cannot embed an empty image");
-    }
-    // The official ChineseCLIPFeatureExtractor resizes directly to 224x224
-    // and does not centre-crop this checkpoint.
-    let pixels = image
-        .resize_exact(MODEL_EDGE, MODEL_EDGE, FilterType::CatmullRom)
-        .to_rgb8();
-    const MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-    const STANDARD_DEVIATION: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
-    let mut values = Vec::with_capacity((MODEL_EDGE * MODEL_EDGE * 3) as usize);
-    for channel in 0..3 {
-        values.extend(pixels.pixels().map(|pixel| {
-            (f32::from(pixel.0[channel]) / 255.0 - MEAN[channel]) / STANDARD_DEVIATION[channel]
-        }));
-    }
-    Ok(Tensor::from_vec(
-        values,
-        (1, 3, MODEL_EDGE as usize, MODEL_EDGE as usize),
-        &Device::Cpu,
-    )?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,59 +482,75 @@ mod tests {
         assert!(embedding_path(&thumbnail).is_file());
     }
 
-    #[test]
-    fn tokenizer_uses_chinese_bert_special_tokens() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("vocab.txt");
-        let mut vocabulary = vec!["[PAD]".to_owned()];
-        vocabulary.extend((0..99).map(|index| format!("[unused{index}]")));
-        vocabulary.extend(
-            ["[UNK]", "[CLS]", "[SEP]", "[MASK]", "海", "边", "日", "落"].map(str::to_owned),
+    #[tokio::test]
+    async fn reloadable_model_loads_on_demand_and_can_be_released() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let image_calls = Arc::new(AtomicUsize::new(0));
+        let text_calls = Arc::new(AtomicUsize::new(0));
+        let index = TextSearchIndex::with_test_loader(
+            {
+                let loads = Arc::clone(&loads);
+                let image_calls = Arc::clone(&image_calls);
+                let text_calls = Arc::clone(&text_calls);
+                move || {
+                    loads.fetch_add(1, Ordering::Relaxed);
+                    Ok(Box::new(ColourAndWordModel {
+                        image_calls: Arc::clone(&image_calls),
+                        text_calls: Arc::clone(&text_calls),
+                    }))
+                }
+            },
+            [10; MODEL_FINGERPRINT_BYTES],
         );
-        fs::write(&path, format!("{}\n", vocabulary.join("\n"))).unwrap();
-        let tokenizer = load_tokenizer(&path).unwrap();
-        let encoding = tokenizer.encode("海边日落", true).unwrap();
-        assert_eq!(encoding.get_ids().first(), Some(&101));
-        assert_eq!(encoding.get_ids().last(), Some(&102));
-        assert!(encoding.len() >= 6);
+
+        assert_eq!(loads.load(Ordering::Relaxed), 0);
+        index.embed_query("红色图片").await.unwrap();
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert!(index.release_model_for_test());
+
+        index.embed_query("blue image").await.unwrap();
+        assert_eq!(loads.load(Ordering::Relaxed), 2);
+        assert_eq!(text_calls.load(Ordering::Relaxed), 2);
     }
 
-    #[test]
-    fn preprocessing_matches_official_chinese_clip_shape() {
-        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(400, 200, |x, y| {
-            image::Rgb([(x % 255) as u8, (y % 255) as u8, 128])
-        }));
-        let tensor = preprocess_image(&image).unwrap();
-        assert_eq!(tensor.dims(), &[1, 3, 224, 224]);
-        assert!(tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0].is_finite());
-    }
-
-    #[test]
-    fn official_model_runs_when_supplied_by_the_test_environment() {
-        let (Some(model_path), Some(vocabulary_path)) = (
-            std::env::var_os("PIXHELF_CHINESE_CLIP_MODEL"),
-            std::env::var_os("PIXHELF_CHINESE_CLIP_VOCAB"),
-        ) else {
-            return;
-        };
+    #[tokio::test]
+    async fn cached_image_embedding_does_not_load_model() {
         let temp = tempfile::tempdir().unwrap();
-        let red = temp.path().join("red.png");
-        let blue = temp.path().join("blue.png");
-        image::RgbImage::from_pixel(224, 224, image::Rgb([235, 30, 25]))
-            .save(&red)
-            .unwrap();
-        image::RgbImage::from_pixel(224, 224, image::Rgb([25, 40, 235]))
-            .save(&blue)
-            .unwrap();
+        let thumbnail = temp.path().join("cached.webp");
+        let fingerprint = [11; MODEL_FINGERPRINT_BYTES];
+        write_embedding(
+            &embedding_path(&thumbnail),
+            &fingerprint,
+            &TextSearchEmbedding::for_test([(0, 100)]),
+        )
+        .unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let index = TextSearchIndex::with_test_loader(
+            {
+                let loads = Arc::clone(&loads);
+                move || {
+                    loads.fetch_add(1, Ordering::Relaxed);
+                    Ok(Box::new(ColourAndWordModel {
+                        image_calls: Arc::new(AtomicUsize::new(0)),
+                        text_calls: Arc::new(AtomicUsize::new(0)),
+                    }))
+                }
+            },
+            fingerprint,
+        );
+        index.reconcile(&HashSet::from(["cached"]));
+        index.enqueue("cached", &thumbnail, false);
+        index.start_worker();
 
-        let mut model =
-            ChineseClip::load(Path::new(&model_path), Path::new(&vocabulary_path)).unwrap();
-        let query = model.embed_text("一张红色的图片").unwrap();
-        let red = model.embed_thumbnail(&red).unwrap();
-        let blue = model.embed_thumbnail(&blue).unwrap();
-        let red_score = text_image_similarity(&query, &red);
-        let blue_score = text_image_similarity(&query, &blue);
-        eprintln!("official Chinese-CLIP scores: red={red_score:.4}, blue={blue_score:.4}");
-        assert!(red_score > blue_score);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !index.status().background_complete {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cached text-search index timed out");
+
+        assert!(index.embedding("cached").is_some());
+        assert_eq!(loads.load(Ordering::Relaxed), 0);
     }
 }

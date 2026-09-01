@@ -1,15 +1,16 @@
 mod config;
 mod gallery;
+mod photo_details;
 mod similarity;
 mod support;
 mod text_search;
 mod thumbs;
 mod web;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use config::Config;
+use config::{Config, TextSearchFiles, TextSearchSource};
 use gallery::{GalleryIndex, scan_gallery};
 use text_search::TextSearchIndex;
 use thumbs::ThumbnailManager;
@@ -17,6 +18,8 @@ use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use web::AppState;
+
+const AUTOMATIC_MODEL_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,20 +53,10 @@ async fn main() -> Result<()> {
         .map(|record| record.id.clone())
         .collect();
     let index = Arc::new(RwLock::new(Arc::new(index)));
-    let text_search = match config.text_search.as_ref() {
-        Some(files) => match TextSearchIndex::load(&files.model, &files.vocabulary) {
-            Ok(index) => Some(index),
-            Err(error) => {
-                warn!(
-                    model = %files.model.display(),
-                    vocabulary = %files.vocabulary.display(),
-                    %error,
-                    "natural-language search model unavailable; using filename search"
-                );
-                None
-            }
-        },
-        None => None,
+    let (text_search, automatic_text_search) = match config.text_search.as_ref() {
+        Some(TextSearchSource::Local(files)) => (load_text_search(files), None),
+        Some(TextSearchSource::AutoDownload(files)) => (None, Some(files.clone())),
+        None => (None, None),
     };
     let thumbnails = ThumbnailManager::new_with_text_search(
         config.cache_dir.clone(),
@@ -99,11 +92,63 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("cannot listen on {}", config.listen))?;
     info!(listen = %config.listen, "Pixhelf is ready");
+    if let Some(files) = automatic_text_search {
+        start_automatic_text_search(Arc::clone(&thumbnails), files);
+    }
 
     axum::serve(listener, web::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn load_text_search(files: &TextSearchFiles) -> Option<Arc<TextSearchIndex>> {
+    match TextSearchIndex::load(&files.model, &files.vocabulary) {
+        Ok(index) => Some(index),
+        Err(error) => {
+            warn!(
+                model = %files.model.display(),
+                vocabulary = %files.vocabulary.display(),
+                %error,
+                "natural-language search model unavailable; using filename search"
+            );
+            None
+        }
+    }
+}
+
+fn start_automatic_text_search(thumbnails: Arc<ThumbnailManager>, files: TextSearchFiles) {
+    tokio::spawn(async move {
+        loop {
+            match prepare_automatic_text_search(&files).await {
+                Ok(index) => {
+                    if thumbnails.enable_text_search(index) {
+                        info!(
+                            "background model preparation complete; natural-language search enabled"
+                        );
+                    }
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        retry_seconds = AUTOMATIC_MODEL_RETRY_INTERVAL.as_secs(),
+                        error = %format!("{error:#}"),
+                        "natural-language search model is not ready; filename search remains available"
+                    );
+                    tokio::time::sleep(AUTOMATIC_MODEL_RETRY_INTERVAL).await;
+                }
+            }
+        }
+    });
+}
+
+async fn prepare_automatic_text_search(files: &TextSearchFiles) -> Result<Arc<TextSearchIndex>> {
+    text_search::ensure_automatic_model(files).await?;
+    let model = files.model.clone();
+    let vocabulary = files.vocabulary.clone();
+    tokio::task::spawn_blocking(move || TextSearchIndex::load(&model, &vocabulary))
+        .await
+        .context("natural-language search setup task stopped")?
 }
 
 async fn rescan_gallery(state: AppState, config: Config) {

@@ -315,6 +315,13 @@ try {
     const viewerChrome = await page.evaluate(() => ({
       fullscreenButtons: document.querySelectorAll(".viewer-fullscreen").length,
       detailsPages: document.querySelectorAll(".viewer-details-page").length,
+      detailsToolbars: document.querySelectorAll(".viewer-details-toolbar").length,
+      detailsToolbarControls: document.querySelectorAll(
+        ".viewer-details-toolbar > .viewer-control",
+      ).length,
+      detailsToolbarUnified: document.querySelector(".viewer-details-toolbar")
+        ?.classList.contains("viewer-header-actions") ?? false,
+      detailsInlineActions: document.querySelectorAll(".viewer-details-quick-actions").length,
       scrollCues: document.querySelectorAll(".viewer-scroll-cue").length,
       zoomControls: document.querySelectorAll(
         ".viewer-zoom-controls, .viewer-zoom-value",
@@ -333,11 +340,21 @@ try {
         const cueBounds = cue.getBoundingClientRect();
         return {
           surfaced: style.backgroundColor !== "rgba(0, 0, 0, 0)"
-            && Number.parseFloat(style.borderTopWidth) > 0,
+            || style.backgroundImage !== "none",
+          borderless: Number.parseFloat(style.borderTopWidth) === 0,
+          glass: style.backdropFilter !== "none" || style.webkitBackdropFilter !== "none",
+          noInsetRing: !style.boxShadow.includes("inset"),
           circular: Number.parseFloat(style.borderTopLeftRadius) >= cueBounds.height / 2 - 1,
           width: cueBounds.width,
         };
       })(),
+      navigationGlass: [...document.querySelectorAll(".viewer-nav")].every((control) => {
+        const style = getComputedStyle(control);
+        return Number.parseFloat(style.borderTopWidth) === 0
+          && !style.boxShadow.includes("inset")
+          && (style.backgroundImage !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)")
+          && (style.backdropFilter !== "none" || style.webkitBackdropFilter !== "none");
+      }),
       floatingToolbar: (() => {
         const viewer = document.querySelector(".image-viewer");
         const header = document.querySelector(".viewer-header");
@@ -1607,6 +1624,10 @@ try {
       viewer.previewRequests !== 0 ||
       viewer.fullscreenButtons !== 1 ||
       viewer.detailsPages !== 1 ||
+      viewer.detailsToolbars !== 1 ||
+      viewer.detailsToolbarControls !== 5 ||
+      !viewer.detailsToolbarUnified ||
+      viewer.detailsInlineActions !== 0 ||
       viewer.scrollCues !== 1 ||
       viewer.headingModules !== 0 ||
       !viewer.unifiedControls ||
@@ -1642,9 +1663,13 @@ try {
       viewer.switchPerformance.dispatchDuration > 80 ||
       viewer.switchPerformance.firstFrameDuration > 100 ||
       !viewerChrome.scrollCuePresentation?.surfaced ||
+      !viewerChrome.scrollCuePresentation?.borderless ||
+      !viewerChrome.scrollCuePresentation?.glass ||
+      !viewerChrome.scrollCuePresentation?.noInsetRing ||
       !viewerChrome.scrollCuePresentation?.circular ||
       viewerChrome.scrollCuePresentation.width < 44 ||
       viewerChrome.scrollCuePresentation.width > 52 ||
+      !viewerChrome.navigationGlass ||
       viewerChrome.floatingToolbar?.mode !== "floating" ||
       !viewerChrome.floatingToolbar?.headerTransparent ||
       !viewerChrome.floatingToolbar?.actionsSurfaced ||

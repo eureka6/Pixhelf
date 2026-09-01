@@ -24,6 +24,7 @@ use tracing::error;
 
 use crate::{
     gallery::{Album, GalleryIndex, ImageRecord},
+    photo_details::PhotoDetails,
     similarity::{
         DiversityFingerprint, MIN_SIMILARITY_SCORE, redundancy_score, signature_for_thumbnail,
         similarity_score,
@@ -56,6 +57,7 @@ const TEXT_SEARCH_RANKING_CACHE_LIMIT: usize = 16;
 const TEXT_SEARCH_RESULT_LIMIT: usize = 600;
 const FILENAME_MATCH_BOOST: f32 = 3.0;
 const MAX_QUERY_VALUE_BYTES: usize = 4096;
+const PHOTO_DETAILS_CACHE_LIMIT: usize = 64;
 
 static SIMILARITY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 type SimilarityRanking = Arc<Vec<Arc<ImageRecord>>>;
@@ -64,6 +66,8 @@ static SIMILARITY_RANKING_CACHE: OnceLock<SimilarityRankingCache> = OnceLock::ne
 type TextSearchRanking = Arc<Vec<Arc<ImageRecord>>>;
 type TextSearchRankingCache = Mutex<BoundedCache<TextSearchRanking>>;
 static TEXT_SEARCH_RANKING_CACHE: OnceLock<TextSearchRankingCache> = OnceLock::new();
+type PhotoDetailsCache = Mutex<BoundedCache<Arc<PhotoDetails>>>;
+static PHOTO_DETAILS_CACHE: OnceLock<PhotoDetailsCache> = OnceLock::new();
 
 fn similarity_limit() -> Arc<Semaphore> {
     Arc::clone(SIMILARITY_LIMIT.get_or_init(|| Arc::new(Semaphore::new(1))))
@@ -93,6 +97,18 @@ fn cached_text_search_ranking(key: &str) -> Option<TextSearchRanking> {
 
 fn cache_text_search_ranking(key: String, ranking: TextSearchRanking) {
     mutex_lock(text_search_ranking_cache()).insert(key, ranking);
+}
+
+fn photo_details_cache() -> &'static PhotoDetailsCache {
+    PHOTO_DETAILS_CACHE.get_or_init(|| Mutex::new(BoundedCache::new(PHOTO_DETAILS_CACHE_LIMIT)))
+}
+
+fn cached_photo_details(key: &str) -> Option<Arc<PhotoDetails>> {
+    mutex_lock(photo_details_cache()).get_cloned(key)
+}
+
+fn cache_photo_details(key: String, details: Arc<PhotoDetails>) {
+    mutex_lock(photo_details_cache()).insert(key, details);
 }
 
 #[derive(Clone)]
@@ -250,6 +266,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/gallery", get(gallery_summary))
         .route("/api/images", get(images))
+        .route("/api/images/{id}/details", get(image_details))
         .route("/api/images/{id}/similar", get(similar_images))
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
@@ -833,6 +850,81 @@ async fn thumbnail_status(State(state): State<AppState>) -> Response {
     response
 }
 
+async fn image_details(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let image = {
+        let index = state.index.read().await;
+        let Some(image) = index.image(&id).cloned() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        image
+    };
+    let metadata = match tokio::fs::metadata(&image.path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(error) => {
+            error!(path = %image.path.display(), %error, "cannot inspect image details source");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if !image.matches_metadata(&metadata) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let etag = format!("\"details-v1-{id}\"");
+    if is_not_modified(&headers, &etag) {
+        return not_modified(&etag, "private, max-age=31536000, immutable");
+    }
+
+    let cache_key = format!("{}:{}", image.path.display(), image.id);
+    if let Some(details) = cached_photo_details(&cache_key) {
+        return with_cache_headers(
+            Json(details.as_ref()).into_response(),
+            &etag,
+            "private, max-age=31536000, immutable",
+        );
+    }
+
+    let thumbnail = match state.thumbnails.ensure_ready(&id).await {
+        Ok(path) => path,
+        Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            error!(%id, %error, "cannot prepare histogram source");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let details = match tokio::task::spawn_blocking({
+        let image = Arc::clone(&image);
+        move || PhotoDetails::read(&image, &thumbnail)
+    })
+    .await
+    {
+        Ok(Ok(details)) => Arc::new(details),
+        Ok(Err(error)) => {
+            if image.ensure_source_is_current().is_err() {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            error!(%id, %error, "cannot read image details");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Err(error) => {
+            error!(%id, %error, "image details task stopped");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    cache_photo_details(cache_key, Arc::clone(&details));
+    with_cache_headers(
+        Json(details.as_ref()).into_response(),
+        &etag,
+        "private, max-age=31536000, immutable",
+    )
+}
+
 async fn thumbnail(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1311,6 +1403,10 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
+            request("/api/images/missing/details").await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
             request("/api/images/missing/similar").await.status(),
             StatusCode::NOT_FOUND
         );
@@ -1549,6 +1645,70 @@ mod tests {
             .await
             .unwrap();
         assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn image_details_expose_file_data_and_histogram() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        image::RgbImage::from_pixel(20, 10, image::Rgb([180, 90, 30]))
+            .save(gallery.join("image.png"))
+            .unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let id = index.images[0].id.clone();
+        let expected_size = index.images[0].size;
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{id}/details"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, max-age=31536000, immutable"
+        );
+        let etag = response.headers()[header::ETAG].clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let details: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(details["fileSize"], expected_size);
+        assert!(details["modifiedMs"].as_u64().unwrap() > 0);
+        assert!(details["exif"].as_array().unwrap().is_empty());
+        for channel in ["red", "green", "blue", "luminance"] {
+            let bins = details["histogram"][channel].as_array().unwrap();
+            assert_eq!(bins.len(), 256);
+            assert_eq!(
+                bins.iter().map(|bin| bin.as_u64().unwrap()).sum::<u64>(),
+                200
+            );
+        }
+
+        let cached = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{id}/details"))
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
     }
 
     #[tokio::test]

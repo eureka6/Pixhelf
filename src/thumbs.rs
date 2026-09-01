@@ -54,7 +54,7 @@ pub struct ThumbnailManager {
     queue: JobQueue,
     initial_ready: AtomicBool,
     similarity_warmup_running: AtomicBool,
-    text_search: Option<Arc<TextSearchIndex>>,
+    text_search: RwLock<Option<Arc<TextSearchIndex>>>,
 }
 
 #[derive(Debug)]
@@ -132,8 +132,46 @@ impl ThumbnailManager {
             queue: JobQueue::default(),
             initial_ready: AtomicBool::new(false),
             similarity_warmup_running: AtomicBool::new(false),
-            text_search,
+            text_search: RwLock::new(text_search),
         }))
+    }
+
+    fn text_search(&self) -> Option<Arc<TextSearchIndex>> {
+        read_lock(&self.text_search).clone()
+    }
+
+    /// Attach an automatically downloaded search model without restarting the
+    /// web service, then backfill every thumbnail that is already available.
+    pub fn enable_text_search(&self, text_search: Arc<TextSearchIndex>) -> bool {
+        {
+            let mut current = write_lock(&self.text_search);
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(Arc::clone(&text_search));
+        }
+
+        // The model is visible before this snapshot. A thumbnail completed
+        // after that point enqueues itself in the regular worker path, while a
+        // thumbnail completed before it is included below.
+        let (ids, ready) = {
+            let entries = read_lock(&self.entries);
+            let ids = entries.keys().cloned().collect::<Vec<_>>();
+            let ready = entries
+                .values()
+                .filter(|entry| matches!(*mutex_lock(&entry.state), ThumbState::Ready))
+                .filter(|entry| valid_cache_file(&entry.cache_path))
+                .map(|entry| (entry.record.id.clone(), entry.cache_path.clone()))
+                .collect::<Vec<_>>();
+            (ids, ready)
+        };
+        let current_ids = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        text_search.reconcile(&current_ids);
+        for (id, thumbnail) in ready {
+            text_search.enqueue(&id, &thumbnail, false);
+        }
+        text_search.start_worker();
+        true
     }
 
     pub fn reconcile(&self, records: &[Arc<ImageRecord>]) {
@@ -180,7 +218,7 @@ impl ThumbnailManager {
         for id in missing {
             self.queue.push_background(id);
         }
-        if let Some(text_search) = &self.text_search {
+        if let Some(text_search) = self.text_search() {
             text_search.reconcile(&current_ids);
             let ready = {
                 let entries = read_lock(&self.entries);
@@ -304,8 +342,8 @@ impl ThumbnailManager {
             initial_batch_ready: self.initial_ready.load(Ordering::Acquire),
             background_complete: ready + failed == total && processing == 0,
             text_search: self
-                .text_search
-                .as_ref()
+                .text_search()
+                .as_deref()
                 .map_or_else(TextSearchStatus::disabled, |index| index.status()),
         }
     }
@@ -314,19 +352,19 @@ impl ThumbnailManager {
         &self,
         query: &str,
     ) -> Result<Option<Arc<TextSearchEmbedding>>> {
-        let Some(index) = &self.text_search else {
+        let Some(index) = self.text_search() else {
             return Ok(None);
         };
         index.embed_query(query).await.map(Some)
     }
 
     pub fn text_search_embedding(&self, id: &str) -> Option<Arc<TextSearchEmbedding>> {
-        self.text_search.as_ref()?.embedding(id)
+        self.text_search()?.embedding(id)
     }
 
     pub fn text_search_cache_token(&self) -> String {
-        self.text_search
-            .as_ref()
+        self.text_search()
+            .as_deref()
             .map_or_else(|| "off".to_owned(), |index| index.cache_token())
     }
 
@@ -447,7 +485,7 @@ impl ThumbnailManager {
                         }
                     };
                     if ready {
-                        if let Some(text_search) = &self.text_search {
+                        if let Some(text_search) = self.text_search() {
                             text_search.enqueue(&id, &entry.cache_path, false);
                         }
                         entry.notify.notify_waiters();
@@ -656,6 +694,18 @@ mod tests {
     use super::*;
     use crate::gallery::scan_gallery;
 
+    struct ConstantTextSearchModel;
+
+    impl crate::text_search::TextImageModel for ConstantTextSearchModel {
+        fn embed_thumbnail(&mut self, _thumbnail: &Path) -> Result<TextSearchEmbedding> {
+            Ok(TextSearchEmbedding::for_test([(0, 100)]))
+        }
+
+        fn embed_text(&mut self, _text: &str) -> Result<TextSearchEmbedding> {
+            Ok(TextSearchEmbedding::for_test([(0, 100)]))
+        }
+    }
+
     #[test]
     fn generates_one_bounded_webp_thumbnail() {
         let temp = tempfile::tempdir().unwrap();
@@ -758,6 +808,42 @@ mod tests {
         })
         .await
         .expect("similarity descriptor warmup timed out");
+    }
+
+    #[tokio::test]
+    async fn downloaded_text_search_attaches_to_existing_thumbnails() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        image::RgbImage::new(20, 10)
+            .save(gallery.join("image.png"))
+            .unwrap();
+        let gallery = scan_gallery(&gallery, None).unwrap();
+        let manager = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        manager.reconcile(&gallery.images);
+        manager.start_workers(1);
+        let id = gallery.images[0].id.clone();
+        manager.ensure_ready(&id).await.unwrap();
+        assert!(!manager.status().text_search.enabled);
+
+        let text_search = TextSearchIndex::with_test_model(
+            Box::new(ConstantTextSearchModel),
+            [17; crate::support::embedding::FINGERPRINT_BYTES],
+        );
+        assert!(manager.enable_text_search(text_search));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = manager.status().text_search;
+                if status.background_complete && status.ready == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dynamically attached text-search index timed out");
+        assert!(manager.text_search_embedding(&id).is_some());
     }
 
     #[tokio::test]

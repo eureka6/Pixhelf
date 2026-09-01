@@ -1,4 +1,10 @@
-use std::{env, ffi::OsString, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    net::SocketAddr,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -6,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 pub struct Config {
     pub gallery_dir: PathBuf,
     pub cache_dir: PathBuf,
-    pub text_search: Option<TextSearchFiles>,
+    pub text_search: Option<TextSearchSource>,
     pub listen: SocketAddr,
     pub initial_batch: usize,
     pub workers: usize,
@@ -18,6 +24,26 @@ pub struct TextSearchFiles {
     pub model: PathBuf,
     pub vocabulary: PathBuf,
 }
+
+#[derive(Clone, Debug)]
+pub enum TextSearchSource {
+    Local(TextSearchFiles),
+    AutoDownload(TextSearchFiles),
+}
+
+#[derive(Clone, Debug)]
+enum TextSearchModelInput {
+    Local(PathBuf),
+    AutoDownload,
+    Disabled,
+}
+
+const TEXT_SEARCH_MODEL_FILENAME: &str = "model.safetensors";
+const TEXT_SEARCH_VOCABULARY_FILENAME: &str = "vocab.txt";
+const TEXT_SEARCH_ENABLED_VALUE: &str = "true";
+const TEXT_SEARCH_DISABLED_VALUE: &str = "false";
+const TEXT_SEARCH_LEGACY_AUTO_VALUE: &str = "auto";
+const TEXT_SEARCH_AUTO_CACHE_DIRECTORY: &str = "models/chinese-clip-vit-base-patch16-f4a64596";
 
 impl Config {
     pub fn from_env_and_args() -> Result<Self> {
@@ -46,7 +72,7 @@ impl Config {
         let mut text_search_model = if is_overridden("--text-search-model") {
             None
         } else {
-            env_path(&get_env, "PIXHELF_TEXT_SEARCH_MODEL", &cwd)?
+            env_text_search_model(&get_env, &cwd)?.or(Some(TextSearchModelInput::AutoDownload))
         };
         let mut text_search_vocabulary = if is_overridden("--text-search-vocab") {
             None
@@ -85,7 +111,7 @@ impl Config {
                 "--gallery-dir" => gallery_dir = path_value(&mut args, &arg, &cwd)?,
                 "--cache-dir" => cache_dir = path_value(&mut args, &arg, &cwd)?,
                 "--text-search-model" => {
-                    text_search_model = Some(path_value(&mut args, &arg, &cwd)?);
+                    text_search_model = Some(text_search_model_value(&mut args, &arg, &cwd)?);
                 }
                 "--text-search-vocab" => {
                     text_search_vocabulary = Some(path_value(&mut args, &arg, &cwd)?);
@@ -117,13 +143,23 @@ impl Config {
         cache_dir = canonical_directory(&cache_dir, "cache")?;
         ensure_cache_is_external(&gallery_dir, &cache_dir)?;
         let text_search = match text_search_model {
-            Some(model) => {
-                let model = canonical_file(&model, "text-search model")?;
-                let vocabulary = text_search_vocabulary
-                    .unwrap_or_else(|| model.parent().unwrap_or(&cwd).join("vocab.txt"));
-                let vocabulary = canonical_file(&vocabulary, "text-search vocabulary")?;
-                Some(TextSearchFiles { model, vocabulary })
+            Some(TextSearchModelInput::Local(model)) => Some(TextSearchSource::Local(
+                resolve_text_search_files(&model, text_search_vocabulary.as_deref(), &cwd)?,
+            )),
+            Some(TextSearchModelInput::AutoDownload) if text_search_vocabulary.is_some() => {
+                bail!("text-search vocabulary cannot be used with automatic model download");
             }
+            Some(TextSearchModelInput::AutoDownload) => {
+                let directory = cache_dir.join(TEXT_SEARCH_AUTO_CACHE_DIRECTORY);
+                Some(TextSearchSource::AutoDownload(TextSearchFiles {
+                    model: directory.join(TEXT_SEARCH_MODEL_FILENAME),
+                    vocabulary: directory.join(TEXT_SEARCH_VOCABULARY_FILENAME),
+                }))
+            }
+            Some(TextSearchModelInput::Disabled) if text_search_vocabulary.is_some() => {
+                bail!("text-search vocabulary requires text search to be enabled");
+            }
+            Some(TextSearchModelInput::Disabled) => None,
             None if text_search_vocabulary.is_some() => {
                 bail!("--text-search-vocab requires --text-search-model");
             }
@@ -156,6 +192,31 @@ fn canonical_file(path: &std::path::Path, label: &str) -> Result<PathBuf> {
     }
     std::fs::canonicalize(path)
         .with_context(|| format!("cannot resolve {label} file: {}", path.display()))
+}
+
+fn resolve_text_search_files(
+    model_or_directory: &std::path::Path,
+    vocabulary: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> Result<TextSearchFiles> {
+    let model = if model_or_directory.is_dir() {
+        model_or_directory.join(TEXT_SEARCH_MODEL_FILENAME)
+    } else {
+        model_or_directory.to_path_buf()
+    };
+    let model = canonical_file(&model, "text-search model")?;
+    let vocabulary = vocabulary.map_or_else(
+        || {
+            model
+                .parent()
+                .unwrap_or(cwd)
+                .join(TEXT_SEARCH_VOCABULARY_FILENAME)
+        },
+        std::path::Path::to_path_buf,
+    );
+    let vocabulary = canonical_file(&vocabulary, "text-search vocabulary")?;
+
+    Ok(TextSearchFiles { model, vocabulary })
 }
 
 fn ensure_cache_is_external(
@@ -204,6 +265,14 @@ fn env_path(
     Ok(env_value(get_env, name)?.map(|value| resolve_path(PathBuf::from(value), cwd)))
 }
 
+fn env_text_search_model(
+    get_env: &impl Fn(&str) -> Option<OsString>,
+    cwd: &std::path::Path,
+) -> Result<Option<TextSearchModelInput>> {
+    Ok(env_value(get_env, "PIXHELF_TEXT_SEARCH_MODEL")?
+        .map(|value| parse_text_search_model(value, cwd)))
+}
+
 fn env_number(
     get_env: &impl Fn(&str) -> Option<OsString>,
     name: &str,
@@ -221,6 +290,29 @@ fn path_value(
     cwd: &std::path::Path,
 ) -> Result<PathBuf> {
     Ok(resolve_path(PathBuf::from(value(args, flag)?), cwd))
+}
+
+fn text_search_model_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+    cwd: &std::path::Path,
+) -> Result<TextSearchModelInput> {
+    Ok(parse_text_search_model(
+        OsString::from(value(args, flag)?),
+        cwd,
+    ))
+}
+
+fn parse_text_search_model(value: OsString, cwd: &std::path::Path) -> TextSearchModelInput {
+    if value == OsStr::new(TEXT_SEARCH_ENABLED_VALUE)
+        || value == OsStr::new(TEXT_SEARCH_LEGACY_AUTO_VALUE)
+    {
+        TextSearchModelInput::AutoDownload
+    } else if value == OsStr::new(TEXT_SEARCH_DISABLED_VALUE) {
+        TextSearchModelInput::Disabled
+    } else {
+        TextSearchModelInput::Local(resolve_path(PathBuf::from(value), cwd))
+    }
 }
 
 fn resolve_path(path: PathBuf, cwd: &std::path::Path) -> PathBuf {
@@ -264,8 +356,8 @@ Usage: pixhelf [OPTIONS]\n\n\
 Options:\n  \
   --gallery-dir PATH     Gallery root (default: ./pic)\n  \
   --cache-dir PATH       Thumbnail cache (default: ./.pixhelf-cache/thumbnails)\n  \
-  --text-search-model PATH  Optional OFA Chinese-CLIP ViT-B/16 safetensors model\n  \
-  --text-search-vocab PATH  Chinese-CLIP vocab.txt (default: beside model)\n  \
+  --text-search-model VALUE 'true', 'false', Chinese-CLIP directory, or model file (default: true)\n  \
+  --text-search-vocab PATH  Optional vocab.txt override (default: beside model)\n  \
   --listen HOST:PORT     Listen address (default: 0.0.0.0:3002)\n  \
   --initial-batch N      Priority thumbnail batch (default: 60)\n  \
   --workers N            Background thumbnail workers (default: 2-4, based on CPU)\n  \
@@ -349,7 +441,7 @@ mod tests {
     #[test]
     fn resolves_only_existing_model_files() {
         let temp = tempfile::tempdir().unwrap();
-        let model = temp.path().join("model.safetensors");
+        let model = temp.path().join(TEXT_SEARCH_MODEL_FILENAME);
         std::fs::write(&model, b"model").unwrap();
 
         assert_eq!(
@@ -358,6 +450,98 @@ mod tests {
         );
         assert!(canonical_file(temp.path(), "model").is_err());
         assert!(canonical_file(&temp.path().join("missing"), "model").is_err());
+    }
+
+    #[test]
+    fn resolves_text_search_directory_and_legacy_file_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("chinese-clip");
+        std::fs::create_dir(&directory).unwrap();
+        let model = directory.join(TEXT_SEARCH_MODEL_FILENAME);
+        let vocabulary = directory.join(TEXT_SEARCH_VOCABULARY_FILENAME);
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&vocabulary, b"vocabulary").unwrap();
+
+        let from_directory = resolve_text_search_files(&directory, None, temp.path()).unwrap();
+        let from_file = resolve_text_search_files(&model, None, temp.path()).unwrap();
+
+        assert_eq!(from_directory.model, model.canonicalize().unwrap());
+        assert_eq!(
+            from_directory.vocabulary,
+            vocabulary.canonicalize().unwrap()
+        );
+        assert_eq!(from_file.model, from_directory.model);
+        assert_eq!(from_file.vocabulary, from_directory.vocabulary);
+    }
+
+    #[test]
+    fn semantic_search_is_enabled_by_default_and_uses_the_persistent_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir(&gallery).unwrap();
+        let environment = HashMap::from([
+            ("PIXHELF_GALLERY_DIR", gallery.as_os_str().to_os_string()),
+            ("PIXHELF_CACHE_DIR", cache.as_os_str().to_os_string()),
+        ]);
+
+        let config = Config::from_sources(temp.path().to_path_buf(), [], |name| {
+            environment.get(name).cloned()
+        })
+        .unwrap();
+        let expected = config.cache_dir.join(TEXT_SEARCH_AUTO_CACHE_DIRECTORY);
+
+        let Some(TextSearchSource::AutoDownload(files)) = config.text_search else {
+            panic!("expected automatic model download");
+        };
+        assert_eq!(files.model, expected.join(TEXT_SEARCH_MODEL_FILENAME));
+        assert_eq!(
+            files.vocabulary,
+            expected.join(TEXT_SEARCH_VOCABULARY_FILENAME)
+        );
+    }
+
+    #[test]
+    fn automatic_model_download_rejects_a_vocabulary_override() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("pic")).unwrap();
+        let args = [
+            "--text-search-model",
+            "true",
+            "--text-search-vocab",
+            "vocab.txt",
+        ]
+        .map(str::to_owned);
+
+        let error = Config::from_sources(temp.path().to_path_buf(), args, |_| None).unwrap_err();
+        assert!(error.to_string().contains("automatic model download"));
+    }
+
+    #[test]
+    fn boolean_false_disables_text_search_and_auto_remains_compatible() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            parse_text_search_model(OsString::from("false"), temp.path()),
+            TextSearchModelInput::Disabled
+        ));
+        assert!(matches!(
+            parse_text_search_model(OsString::from("auto"), temp.path()),
+            TextSearchModelInput::AutoDownload
+        ));
+
+        let gallery = temp.path().join("gallery");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir(&gallery).unwrap();
+        let environment = HashMap::from([
+            ("PIXHELF_GALLERY_DIR", gallery.as_os_str().to_os_string()),
+            ("PIXHELF_CACHE_DIR", cache.as_os_str().to_os_string()),
+            ("PIXHELF_TEXT_SEARCH_MODEL", OsString::from("false")),
+        ]);
+        let config = Config::from_sources(temp.path().to_path_buf(), [], |name| {
+            environment.get(name).cloned()
+        })
+        .unwrap();
+        assert!(config.text_search.is_none());
     }
 
     #[test]

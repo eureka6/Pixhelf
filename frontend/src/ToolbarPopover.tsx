@@ -75,6 +75,7 @@ export function ToolbarPopover({
         aria-label={triggerLabel}
         aria-expanded={open}
         aria-controls={id}
+        data-state={open ? "open" : "closed"}
         title={triggerLabel}
       >
         <span className="toolbar-popover-trigger-icon" aria-hidden="true">

@@ -4,6 +4,7 @@ import type {
   GalleryImage,
   GallerySummary,
   ImagesPage,
+  PhotoDetails,
   SortMode,
   ThumbnailStatus,
 } from "./types";
@@ -11,6 +12,7 @@ import type {
 const REQUEST_TIMEOUT_MS = 15_000;
 const IMAGE_SEARCH_REQUEST_TIMEOUT_MS = 60_000;
 const SIMILAR_REQUEST_TIMEOUT_MS = 60_000;
+const PHOTO_DETAILS_REQUEST_TIMEOUT_MS = 30_000;
 
 type JsonObject = Record<string, unknown>;
 type JsonValidator<T> = (value: unknown) => value is T;
@@ -58,6 +60,27 @@ function isImagesPage(value: unknown): value is ImagesPage {
     && isNonNegativeInteger(value.offset)
     && isPositiveInteger(value.limit)
     && (value.nextOffset === null || isNonNegativeInteger(value.nextOffset));
+}
+
+function isHistogramChannel(value: unknown): value is number[] {
+  return Array.isArray(value)
+    && value.length === 256
+    && value.every(isNonNegativeInteger);
+}
+
+function isPhotoDetails(value: unknown): value is PhotoDetails {
+  return isObject(value)
+    && isNonNegativeInteger(value.fileSize)
+    && isNonNegativeInteger(value.modifiedMs)
+    && Array.isArray(value.exif)
+    && value.exif.every((field) => isObject(field)
+      && typeof field.label === "string"
+      && typeof field.value === "string")
+    && isObject(value.histogram)
+    && isHistogramChannel(value.histogram.red)
+    && isHistogramChannel(value.histogram.green)
+    && isHistogramChannel(value.histogram.blue)
+    && isHistogramChannel(value.histogram.luminance);
 }
 
 function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
@@ -201,5 +224,17 @@ export function getSimilarImages(
     isImagesPage,
     signal,
     SIMILAR_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function getPhotoDetails(
+  imageId: string,
+  signal?: AbortSignal,
+): Promise<PhotoDetails> {
+  return getJson(
+    `/api/images/${encodeURIComponent(imageId)}/details`,
+    isPhotoDetails,
+    signal,
+    PHOTO_DETAILS_REQUEST_TIMEOUT_MS,
   );
 }

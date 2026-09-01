@@ -14,6 +14,7 @@ import {
   ScanSearch,
   X,
 } from "./icons";
+import { PhotoInformation } from "./PhotoInformation";
 import { SimilarImageMasonry, SimilarImageSkeleton } from "./SimilarImages";
 import type { GalleryImage } from "./types";
 import {
@@ -80,6 +81,15 @@ type GestureMode = "pan" | "navigate" | "page" | "dismiss" | "pinch";
 
 type ViewerPage = "image" | "transition" | "details";
 
+type ViewerScrollSnapshot = {
+  imageId: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  detailsTop: number;
+  scrollTop: number;
+  page: ViewerPage;
+};
+
 type PinchStart = {
   distance: number;
   midpoint: PointerPoint;
@@ -124,6 +134,26 @@ type IdleScheduler = Window & {
   cancelIdleCallback?: (handle: number) => void;
 };
 
+type ImageViewerProps = {
+  images: GalleryImage[];
+  activeIndex: number;
+  total: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onNavigate: (direction: -1 | 1) => void;
+  onClose: () => void;
+  similarActive: boolean;
+  similarImages: GalleryImage[];
+  similarTotal: number;
+  similarHasMore: boolean;
+  similarLoading: boolean;
+  similarLoadingMore: boolean;
+  similarError: string | null;
+  onSearchSimilar: (image: GalleryImage) => void;
+  onLoadMoreSimilar: () => void;
+  onOpenSimilar: (image: GalleryImage) => void;
+};
+
 export function ImageViewer({
   images,
   activeIndex,
@@ -142,28 +172,17 @@ export function ImageViewer({
   onSearchSimilar,
   onLoadMoreSimilar,
   onOpenSimilar,
-}: {
-  images: GalleryImage[];
-  activeIndex: number;
-  total: number;
-  hasMore: boolean;
-  loadingMore: boolean;
-  onNavigate: (direction: -1 | 1) => void;
-  onClose: () => void;
-  similarActive: boolean;
-  similarImages: GalleryImage[];
-  similarTotal: number;
-  similarHasMore: boolean;
-  similarLoading: boolean;
-  similarLoadingMore: boolean;
-  similarError: string | null;
-  onSearchSimilar: (image: GalleryImage) => void;
-  onLoadMoreSimilar: () => void;
-  onOpenSimilar: (image: GalleryImage) => void;
-}) {
+}: ImageViewerProps) {
   const image = images[activeIndex]!;
   const viewport = useViewportSize();
   const compactViewport = viewport.width <= 720;
+  const similarColumnCount = viewport.width < 520
+    ? 2
+    : viewport.width < 960
+      ? 3
+      : viewport.width < 1280
+        ? 4
+        : 5;
   const mediaDimensions = viewerMediaDimensions(image, viewport);
   const viewportRender = viewportRenderDimensions(image, viewport);
   const viewportBitmapCapable = supportsViewerViewportBitmaps();
@@ -199,6 +218,14 @@ export function ImageViewer({
   const sourceUpgradeTimerRef = useRef(0);
   const scrollTopRef = useRef(0);
   const scrollPageRef = useRef<ViewerPage>("image");
+  const viewerScrollSnapshotRef = useRef<ViewerScrollSnapshot>({
+    imageId: image.id,
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
+    detailsTop: viewport.height,
+    scrollTop: 0,
+    page: "image",
+  });
   const wheelZoomBlockedUntilRef = useRef(0);
   const displayedOriginalsRef = useRef(new Set<string>());
   const transformFrameRef = useRef(0);
@@ -358,6 +385,21 @@ export function ImageViewer({
     if (scrollPageRef.current === nextPage) return;
     scrollPageRef.current = nextPage;
     setScrollPage(nextPage);
+    return nextPage;
+  };
+
+  const rememberViewerScroll = (
+    viewer: HTMLDivElement,
+    page = scrollPageRef.current,
+  ) => {
+    viewerScrollSnapshotRef.current = {
+      imageId: image.id,
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      detailsTop: detailsSectionRef.current?.offsetTop ?? viewer.clientHeight,
+      scrollTop: viewer.scrollTop,
+      page,
+    };
   };
 
   const forceViewerScroll = (top: number) => {
@@ -368,7 +410,8 @@ export function ImageViewer({
     viewer.scrollTop = top;
     viewer.style.scrollBehavior = previousBehavior;
     scrollTopRef.current = viewer.scrollTop;
-    syncScrollPage(viewer.scrollTop);
+    const page = syncScrollPage(viewer.scrollTop) ?? scrollPageRef.current;
+    rememberViewerScroll(viewer, page);
   };
 
   const constrainTransform = (
@@ -603,7 +646,6 @@ export function ImageViewer({
     setDragging(false);
     commitTransform(DEFAULT_TRANSFORM);
     wheelZoomBlockedUntilRef.current = 0;
-    forceViewerScroll(0);
     setThumbnailState({
       id: image.id,
       loaded: getViewerThumbnailStatus(image) === "ready",
@@ -629,15 +671,39 @@ export function ImageViewer({
   ]);
 
   useLayoutEffect(() => {
+    const viewer = dialogRef.current;
+    if (!viewer) return;
+    const previous = viewerScrollSnapshotRef.current;
+    const imageChanged = previous.imageId !== image.id;
+    const viewportChanged = previous.viewportWidth !== viewport.width
+      || previous.viewportHeight !== viewport.height;
+
     if (transformRef.current.scale > MIN_SCALE) {
-      forceViewerScroll(0);
+      if (imageChanged || viewportChanged) forceViewerScroll(0);
       commitTransform(constrainTransform(transformRef.current));
-      return;
+    } else if (imageChanged) {
+      // Navigation starts each image at the top, while a resize keeps the current
+      // position inside the image or details page.
+      forceViewerScroll(0);
+    } else if (viewportChanged) {
+      const previousDetailsTop = Math.max(
+        1,
+        previous.detailsTop || previous.viewportHeight,
+      );
+      const nextDetailsTop = detailsSectionRef.current?.offsetTop ?? viewport.height;
+      const wasInDetails = previous.page === "details"
+        || previous.scrollTop >= previousDetailsTop - VIEWER_SCROLL_EPSILON;
+      const nextTop = wasInDetails
+        ? nextDetailsTop + Math.max(0, previous.scrollTop - previousDetailsTop)
+        : previous.page === "transition"
+          ? nextDetailsTop * clamp(previous.scrollTop / previousDetailsTop, 0, 1)
+          : 0;
+      const maximumScroll = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+      forceViewerScroll(clamp(nextTop, 0, maximumScroll));
+    } else {
+      rememberViewerScroll(viewer);
     }
-    if (scrollPageRef.current === "details") {
-      forceViewerScroll(detailsSectionRef.current?.offsetTop ?? viewport.height);
-    }
-  }, [viewport.width, viewport.height]);
+  }, [image.id, viewport.width, viewport.height]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -679,6 +745,15 @@ export function ImageViewer({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      scrollPage === "image"
+      || scrollPageRef.current === "image"
+      || similarActive
+    ) return;
+    onSearchSimilar(image);
+  }, [image, onSearchSimilar, scrollPage, similarActive]);
 
   const toggleFullscreen = async () => {
     try {
@@ -1228,7 +1303,8 @@ export function ImageViewer({
         const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer.clientHeight;
         viewer.scrollTop = clamp(start.scrollTop - deltaY, 0, detailsTop);
         scrollTopRef.current = viewer.scrollTop;
-        syncScrollPage(viewer.scrollTop);
+        const page = syncScrollPage(viewer.scrollTop) ?? scrollPageRef.current;
+        rememberViewerScroll(viewer, page);
         if (transformRef.current.x || transformRef.current.y) stageTransform(DEFAULT_TRANSFORM);
         return;
       }
@@ -1530,7 +1606,8 @@ export function ImageViewer({
       return;
     }
     scrollTopRef.current = nextTop;
-    syncScrollPage(nextTop);
+    const page = syncScrollPage(nextTop) ?? scrollPageRef.current;
+    rememberViewerScroll(viewer, page);
     if (nextTop > VIEWER_SCROLL_EPSILON || previousTop > VIEWER_SCROLL_EPSILON) {
       wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
     }
@@ -1582,15 +1659,6 @@ export function ImageViewer({
   } as CSSProperties;
   const mediaWidth = mediaDimensions.width;
   const mediaHeight = mediaDimensions.height;
-  const fileExtension = image.name.includes(".")
-    ? image.name.split(".").pop()?.toLocaleUpperCase() ?? "图片"
-    : "图片";
-  const orientation = image.width === image.height
-    ? "方形"
-    : image.width > image.height
-      ? "横向"
-      : "竖向";
-  const megapixels = image.width * image.height / 1_000_000;
   const nativeOriginalActive = currentFullResolution.loaded
     && liveTransform.scale > MIN_SCALE;
   const displaySource = resolveViewerDisplaySource({
@@ -1610,6 +1678,71 @@ export function ImageViewer({
     aspectRatio: `${image.width} / ${image.height}`,
     transform: `translate3d(${liveTransform.x}px, ${liveTransform.y}px, 0) scale(${liveTransform.scale})`,
   } as CSSProperties;
+  const renderActionSuite = (details = false) => (
+    <div
+      className={`viewer-header-actions${details ? " viewer-details-toolbar" : ""}`}
+      role="group"
+      aria-label={details ? "图片详情操作" : "图片查看操作"}
+    >
+      {details && (
+        <button
+          type="button"
+          className="viewer-control viewer-details-return"
+          onClick={() => scrollToImage(true)}
+          aria-label="返回图片"
+          title="返回图片"
+        >
+          <ChevronUp size={19} strokeWidth={1.8} />
+        </button>
+      )}
+      <button
+        type="button"
+        className={`viewer-control viewer-similar-trigger${similarActive ? " is-active" : ""}`}
+        onClick={() => {
+          onSearchSimilar(image);
+          scrollToSimilar();
+        }}
+        aria-label="以图搜图，查找相似图片"
+        aria-pressed={similarActive}
+        data-state={similarActive ? "active" : "idle"}
+        title="以图搜图"
+      >
+        <ScanSearch size={19} />
+      </button>
+      <a
+        className="viewer-control"
+        href={viewerOriginalUrl(image)}
+        download={image.name}
+        aria-label="下载原图"
+        title="下载原图"
+      >
+        <Download size={19} />
+      </a>
+      {fullscreenAvailable && (
+        <button
+          type="button"
+          className={`viewer-control ${details ? "viewer-details-fullscreen" : "viewer-fullscreen"}${fullscreen ? " is-active" : ""}`}
+          onClick={() => void toggleFullscreen()}
+          aria-label={fullscreen ? "退出全屏" : "进入全屏"}
+          aria-pressed={fullscreen}
+          data-state={fullscreen ? "active" : "idle"}
+          title={fullscreen ? "退出全屏" : "全屏查看"}
+        >
+          {fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
+        </button>
+      )}
+      <button
+        ref={details ? undefined : closeButtonRef}
+        type="button"
+        className={`viewer-control ${details ? "viewer-details-close" : "viewer-close"}`}
+        onClick={onClose}
+        aria-label="关闭查看器"
+        title="关闭 (Esc)"
+      >
+        <X size={21} />
+      </button>
+    </div>
+  );
   const viewer = (
     <div
       ref={dialogRef}
@@ -1648,51 +1781,7 @@ export function ImageViewer({
         <div className="viewer-backdrop" aria-hidden="true" />
 
       <header className="viewer-header">
-        <div className="viewer-header-actions">
-          <button
-            type="button"
-            className={`viewer-control viewer-similar-trigger${similarActive ? " is-active" : ""}`}
-            onClick={() => {
-              onSearchSimilar(image);
-              scrollToSimilar();
-            }}
-            aria-label="以图搜图，查找相似图片"
-            aria-pressed={similarActive}
-            title="以图搜图"
-          >
-            <ScanSearch size={19} />
-          </button>
-          <a
-            className="viewer-control"
-            href={viewerOriginalUrl(image)}
-            download={image.name}
-            aria-label="下载原图"
-            title="下载原图"
-          >
-            <Download size={19} />
-          </a>
-          {fullscreenAvailable && (
-            <button
-              type="button"
-              className="viewer-control viewer-fullscreen"
-              onClick={() => void toggleFullscreen()}
-              aria-label={fullscreen ? "退出全屏" : "进入全屏"}
-              title={fullscreen ? "退出全屏" : "全屏查看"}
-            >
-              {fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
-            </button>
-          )}
-          <button
-            ref={closeButtonRef}
-            type="button"
-            className="viewer-control viewer-close"
-            onClick={onClose}
-            aria-label="关闭查看器"
-            title="关闭 (Esc)"
-          >
-            <X size={21} />
-          </button>
-        </div>
+        {renderActionSuite()}
       </header>
 
       <div
@@ -1862,131 +1951,56 @@ export function ImageViewer({
               <h2 id="image-viewer-details-title">图片详情</h2>
               <span>{displayPosition} / {total}</span>
             </div>
-            <div className="viewer-details-actions">
-              <button
-                type="button"
-                className="viewer-control viewer-details-return"
-                onClick={() => scrollToImage(true)}
-                aria-label="返回图片"
-                title="返回图片"
-              >
-                <ChevronUp size={20} strokeWidth={1.8} />
-              </button>
-              <button
-                type="button"
-                className="viewer-control viewer-details-close"
-                onClick={onClose}
-                aria-label="关闭查看器"
-                title="关闭 (Esc)"
-              >
-                <X size={20} />
-              </button>
-            </div>
+            {renderActionSuite(true)}
           </header>
 
           <div className="viewer-details-content">
-            <article className="viewer-details-summary">
-              <img
-                key={`details-thumbnail-${image.id}`}
-                src={viewerThumbnailUrl(image)}
-                alt=""
-                aria-hidden="true"
-                loading="eager"
-                decoding="async"
-              />
-              <div>
-                <span className="viewer-details-kind">{orientation} · {fileExtension}</span>
-                <h3 title={image.name}>{image.name}</h3>
-                <p>{image.width.toLocaleString()} × {image.height.toLocaleString()} 像素</p>
-              </div>
-            </article>
-
-            <section className="viewer-details-section" aria-labelledby="viewer-file-info-title">
-              <h3 id="viewer-file-info-title">文件信息</h3>
-              <dl className="viewer-details-grid">
-                <div>
-                  <dt>分辨率</dt>
-                  <dd>{image.width.toLocaleString()} × {image.height.toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>像素</dt>
-                  <dd>{megapixels >= 1 ? `${megapixels.toFixed(1)} MP` : `${Math.round(megapixels * 1000)} KP`}</dd>
-                </div>
-                <div>
-                  <dt>格式</dt>
-                  <dd>{fileExtension}</dd>
-                </div>
-                <div>
-                  <dt>图库位置</dt>
-                  <dd>{displayPosition} / {total}</dd>
-                </div>
-              </dl>
-            </section>
-
-            <a
-              className="viewer-details-download"
-              href={viewerOriginalUrl(image)}
-              download={image.name}
-            >
-              <Download size={19} />
-              <span>
-                <strong>下载原图</strong>
-                <small>保留原始尺寸与格式</small>
-              </span>
-              <ChevronRight size={18} />
-            </a>
+            <PhotoInformation image={image} />
 
             <section
-              ref={similarSectionRef}
-              className="viewer-similar-section"
-              aria-labelledby="viewer-similar-title"
-              data-similar-active={similarActive}
-            >
-              <div className="viewer-similar-heading">
-                <div>
-                  <h3 id="viewer-similar-title">相似图片</h3>
-                  <p>在图库中查找构图、色彩和纹理相近的图片</p>
-                </div>
-                <ScanSearch size={20} aria-hidden="true" />
-              </div>
+                ref={similarSectionRef}
+                className={`viewer-similar-section${similarActive ? "" : " is-idle"}`}
+                aria-labelledby={similarActive ? "viewer-similar-title" : undefined}
+                data-similar-active={similarActive}
+              >
+                {similarActive && (
+                  <>
+                    <div className="viewer-similar-heading">
+                      <div>
+                        <h3 id="viewer-similar-title">相似图片</h3>
+                      </div>
+                      <ScanSearch size={20} aria-hidden="true" />
+                    </div>
 
-              {!similarActive ? (
-                <button
-                  type="button"
-                  className="viewer-similar-search-button"
-                  onClick={() => onSearchSimilar(image)}
-                >
-                  <ScanSearch size={18} />
-                  <span>以图搜图</span>
-                  <ChevronRight size={17} />
-                </button>
-              ) : similarLoading && !similarImages.length ? (
-                <SimilarImageSkeleton />
-              ) : similarError && !similarImages.length ? (
-                <div className="viewer-similar-error" role="alert">
-                  <span>{similarError}</span>
-                  <button type="button" onClick={() => onSearchSimilar(image)}>
-                    <RefreshCw size={15} />
-                    重试
-                  </button>
-                </div>
-              ) : similarImages.length ? (
-                <SimilarImageMasonry
-                  images={similarImages}
-                  total={similarTotal}
-                  columnCount={compactViewport ? 2 : 3}
-                  hasMore={similarHasMore}
-                  loadingMore={similarLoadingMore}
-                  error={similarError}
-                  onLoadMore={onLoadMoreSimilar}
-                  onOpen={onOpenSimilar}
-                />
-              ) : (
-                <div className="viewer-similar-empty">
-                  <ScanSearch size={22} />
-                  <span>暂时没有找到相似图片</span>
-                </div>
-              )}
+                    {similarLoading && !similarImages.length ? (
+                      <SimilarImageSkeleton columnCount={similarColumnCount} />
+                    ) : similarError && !similarImages.length ? (
+                      <div className="viewer-similar-error" role="alert">
+                        <span>{similarError}</span>
+                        <button type="button" onClick={() => onSearchSimilar(image)}>
+                          <RefreshCw size={15} />
+                          重试
+                        </button>
+                      </div>
+                    ) : similarImages.length ? (
+                      <SimilarImageMasonry
+                        images={similarImages}
+                        total={similarTotal}
+                        columnCount={similarColumnCount}
+                        hasMore={similarHasMore}
+                        loadingMore={similarLoadingMore}
+                        error={similarError}
+                        onLoadMore={onLoadMoreSimilar}
+                        onOpen={onOpenSimilar}
+                      />
+                    ) : (
+                      <div className="viewer-similar-empty">
+                        <ScanSearch size={22} />
+                        <span>暂时没有找到相似图片</span>
+                      </div>
+                    )}
+                  </>
+                )}
             </section>
           </div>
         </div>
