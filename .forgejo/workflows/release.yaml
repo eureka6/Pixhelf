@@ -128,7 +128,7 @@ jobs:
       - name: Install OCI tooling
         run: |
           set -eu
-          apk add --no-cache ca-certificates coreutils curl tar
+          apk add --no-cache bind-tools ca-certificates coreutils curl tar
 
           crane_archive=/tmp/go-containerregistry.tar.gz
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
@@ -230,6 +230,31 @@ jobs:
           model_layer="$work/model-layer.tar"
           model_base_ref="$local_registry/staging:model-base"
           mkdir -p "$model_root$model_path"
+
+          retry_remote() {
+            attempt=1
+            while ! "$@"; do
+              if [ "$attempt" -ge 5 ]; then
+                echo "Remote operation failed after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              retry_seconds=$((attempt * 5))
+              echo "Remote operation failed; retrying in ${retry_seconds}s: $*" >&2
+              sleep "$retry_seconds"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          pin_ipv4() {
+            host="$1"
+            address="$(dig +short A "$host" | awk '/^[0-9]+\./ { print; exit }')"
+            if [ -z "$address" ]; then
+              echo "Cannot resolve an IPv4 address for ${host}" >&2
+              return 1
+            fi
+            printf '%s %s\n' "$address" "$host" >> /etc/hosts
+            echo "Pinned ${host} to IPv4 address ${address}"
+          }
 
           # Keep this metadata in sync with src/text_search/download.rs and Dockerfile.
           download_model_artifact() {
@@ -388,8 +413,8 @@ jobs:
             if [ "$IS_RELEASE" = true ]; then
               crane pull --insecure "$configured_ref" "$platform_dir/image.tar"
               digest="$(crane digest --tarball "$platform_dir/image.tar")"
-              crane push "$platform_dir/image.tar" "${IMAGE}@${digest}"
-              crane push "$platform_dir/image.tar" "${DOCKERHUB_IMAGE}@${digest}"
+              retry_remote crane push "$platform_dir/image.tar" "${IMAGE}@${digest}"
+              retry_remote crane push "$platform_dir/image.tar" "${DOCKERHUB_IMAGE}@${digest}"
               forgejo_manifest_ref="${IMAGE}@${digest}"
               dockerhub_manifest_ref="${DOCKERHUB_IMAGE}@${digest}"
             else
@@ -397,6 +422,12 @@ jobs:
               dockerhub_manifest_ref="$configured_ref"
             fi
           }
+
+          if [ "$IS_RELEASE" = true ]; then
+            pin_ipv4 auth.docker.io
+            pin_ipv4 index.docker.io
+            pin_ipv4 registry-1.docker.io
+          fi
 
           build_platform amd64 dist/pixhelf-amd64-linux
           amd64_forgejo_manifest="$forgejo_manifest_ref"
