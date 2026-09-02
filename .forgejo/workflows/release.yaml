@@ -441,7 +441,6 @@ jobs:
               --manifest "$amd64_forgejo_manifest" \
               --manifest "$arm64_forgejo_manifest" \
               --tag "${IMAGE}:${IMAGE_VERSION}"
-            crane tag "${IMAGE}:${IMAGE_VERSION}" "$RELEASE_TAG"
             case "$IMAGE_VERSION" in
               *-*) ;;
               *) crane tag "${IMAGE}:${IMAGE_VERSION}" latest ;;
@@ -451,7 +450,6 @@ jobs:
               --manifest "$amd64_dockerhub_manifest" \
               --manifest "$arm64_dockerhub_manifest" \
               --tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}"
-            crane tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}" "$RELEASE_TAG"
             case "$IMAGE_VERSION" in
               *-*) ;;
               *) crane tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}" latest ;;

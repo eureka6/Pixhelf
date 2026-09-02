@@ -2,10 +2,6 @@ services:
   pixhelf:
     image: eureka6688/pixhelf:latest
     restart: unless-stopped
-    environment:
-      PIXHELF_INITIAL_BATCH: "60"
-      PIXHELF_WORKERS: "4"
-      PIXHELF_SCAN_INTERVAL: "10"
     ports:
       - "3002:3002"
     volumes:

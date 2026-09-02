@@ -19,6 +19,10 @@ volumes:
   pixhelf-cache:
 ```
 
+模型已经包含在镜像中，不需要挂载模型目录。这里只需把宿主机的 `./pic` 照片目录只读挂载到容器；`pixhelf-cache` 是 Compose 自动创建和管理的命名卷，无需手工准备路径，用来在容器更新后继续复用缩略图和搜索索引。
+
+如果不需要保留缓存，可以删除 `pixhelf-cache:/data/.pixhelf-cache` 和末尾的 `volumes` 段；容器重建后会重新生成缩略图与搜索索引。
+
 ```bash
 mkdir -p pic
 docker compose up -d
@@ -31,6 +35,8 @@ mkdir -p pic && docker run -d --name pixhelf --restart unless-stopped -p 3002:30
 ```
 
 照片放进 `./pic`，访问 <http://localhost:3002>。
+
+镜像发布只使用版本号标签（例如 `0.2.3`）和 `latest`；带 `v` 的标签只用于 Git 与 Forgejo Release，不再重复发布为镜像标签。
 
 ### Compose 参数配置
 
