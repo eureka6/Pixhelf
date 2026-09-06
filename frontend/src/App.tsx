@@ -3,8 +3,6 @@ import {
   LoaderCircle,
   RefreshCw,
 } from "./icons";
-import type { CSSProperties, RefObject } from "preact";
-import { memo } from "preact/compat";
 import {
   useCallback,
   useEffect,
@@ -14,8 +12,17 @@ import {
   useState,
 } from "preact/hooks";
 import { formatCount } from "./format";
-import { Header, Sidebar, SidebarToggleButton } from "./GalleryNavigation";
+import { Header, Sidebar } from "./GalleryNavigation";
+import {
+  captureViewerAnchor,
+  imageCardById,
+  scrollTopForAnchor,
+  scrollWindowImmediately,
+} from "./galleryViewport";
+import type { ViewerAnchor } from "./galleryViewport";
 import { ImageViewer } from "./ImageViewer";
+import { GallerySkeleton, MasonryGallery } from "./MasonryGallery";
+import type { MasonryGalleryHandle } from "./MasonryGallery";
 import {
   getGallery,
   getImages,
@@ -30,24 +37,19 @@ import type {
 } from "./types";
 import {
   getDecodedViewerOriginal,
-  preloadOriginalImage,
   prepareViewerImages,
-  viewerThumbnailUrl,
 } from "./viewerAssets";
 
 const PAGE_SIZE = 60;
 const SIMILAR_PAGE_SIZE = 30;
-const CARD_PREFETCH_MARGIN = "1200px 0px";
 const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
 const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
 const SIDEBAR_STORAGE_KEY = "pixhelf.sidebar-collapsed";
 const GALLERY_POLL_INTERVAL_MS = 10_000;
-const IMAGE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const MOBILE_NAV_EXIT_MS = 240;
 const VIEWER_RETURN_SETTLE_MS = 32;
 const VIEWER_RETURN_TIMEOUT_MS = 480;
 const VIEWER_RETURN_ANIMATION_MS = 260;
-const READY_THUMBNAIL_CACHE_LIMIT = 2048;
 const VIEWER_HISTORY_STATE_KEY = "__pixhelfViewer";
 const VIEWER_HISTORY_STATE_VERSION = 1;
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
@@ -70,19 +72,9 @@ type ViewerHistoryEntry = {
   image: GalleryImage;
 };
 
-type ViewerAnchor = {
-  cardRatio: number;
-  viewportRatio: number;
-  fallbackScrollY: number;
-};
-
 type ViewerReturnRequest = ViewerAnchor & {
   imageId: string;
   sequence: number;
-};
-
-type MasonryViewportAnchor = ViewerAnchor & {
-  imageId: string;
 };
 
 type ViewerReturnFlight = {
@@ -141,159 +133,6 @@ function viewerHistoryState(image: GalleryImage): Record<string, unknown> {
   };
 }
 
-function clampValue(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function imageCardById(imageId: string): HTMLElement | null {
-  return document.querySelector<HTMLElement>(
-    `.masonry .image-card[data-image-id="${CSS.escape(imageId)}"]`,
-  );
-}
-
-function visualViewportBounds(): { top: number; height: number } {
-  const viewport = window.visualViewport;
-  return {
-    top: viewport?.offsetTop ?? 0,
-    height: Math.max(1, viewport?.height ?? window.innerHeight),
-  };
-}
-
-function captureViewerAnchor(card: HTMLElement, pointerY?: number): ViewerAnchor {
-  const rect = card.getBoundingClientRect();
-  const viewport = visualViewportBounds();
-  const viewportBottom = viewport.top + viewport.height;
-  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-    ?? viewport.top;
-  const visibleTop = Math.max(rect.top, viewport.top, topbarBottom);
-  const visibleBottom = Math.min(rect.bottom, viewportBottom);
-  const visibleCenter = visibleBottom > visibleTop
-    ? (visibleTop + visibleBottom) / 2
-    : clampValue(rect.top + rect.height / 2, viewport.top, viewportBottom);
-  const requestedPoint = pointerY !== undefined && Number.isFinite(pointerY)
-    ? pointerY
-    : visibleCenter;
-  const anchorY = clampValue(
-    requestedPoint,
-    Math.min(visibleTop, visibleBottom),
-    Math.max(visibleTop, visibleBottom),
-  );
-  return {
-    cardRatio: rect.height > 0
-      ? clampValue((anchorY - rect.top) / rect.height, 0, 1)
-      : 0.5,
-    viewportRatio: clampValue((anchorY - viewport.top) / viewport.height, 0, 1),
-    fallbackScrollY: window.scrollY,
-  };
-}
-
-function captureMasonryViewportAnchor(masonry: HTMLElement): MasonryViewportAnchor | null {
-  if (window.scrollY <= 1) return null;
-  const viewport = visualViewportBounds();
-  const viewportBottom = viewport.top + viewport.height;
-  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-    ?? viewport.top;
-  const safeTop = Math.min(viewportBottom, Math.max(viewport.top, topbarBottom + 8));
-  const safeBottom = Math.max(safeTop, viewportBottom - 8);
-  const referenceY = safeTop + (safeBottom - safeTop) * .45;
-  const viewportCenterX = (window.visualViewport?.offsetLeft ?? 0)
-    + (window.visualViewport?.width ?? window.innerWidth) / 2;
-  const cards = [...masonry.querySelectorAll<HTMLElement>(".image-card")]
-    .map((card) => ({ card, rect: card.getBoundingClientRect() }))
-    .filter(({ rect }) => rect.bottom > safeTop && rect.top < safeBottom);
-  if (!cards.length) return null;
-
-  const focusedCard = document.activeElement instanceof HTMLElement
-    ? document.activeElement.closest<HTMLElement>(".image-card")
-    : null;
-  const focused = focusedCard
-    ? cards.find(({ card }) => card === focusedCard)
-    : undefined;
-  const selected = focused ?? cards.reduce((best, candidate) => {
-    const verticalDistance = candidate.rect.top <= referenceY
-      && candidate.rect.bottom >= referenceY
-      ? 0
-      : Math.min(
-        Math.abs(candidate.rect.top - referenceY),
-        Math.abs(candidate.rect.bottom - referenceY),
-      );
-    const bestVerticalDistance = best.rect.top <= referenceY
-      && best.rect.bottom >= referenceY
-      ? 0
-      : Math.min(
-        Math.abs(best.rect.top - referenceY),
-        Math.abs(best.rect.bottom - referenceY),
-      );
-    if (verticalDistance !== bestVerticalDistance) {
-      return verticalDistance < bestVerticalDistance ? candidate : best;
-    }
-    const horizontalDistance = Math.abs(
-      candidate.rect.left + candidate.rect.width / 2 - viewportCenterX,
-    );
-    const bestHorizontalDistance = Math.abs(
-      best.rect.left + best.rect.width / 2 - viewportCenterX,
-    );
-    return horizontalDistance < bestHorizontalDistance ? candidate : best;
-  });
-  const visibleTop = Math.max(safeTop, selected.rect.top);
-  const visibleBottom = Math.min(safeBottom, selected.rect.bottom);
-  const anchorY = focused
-    ? (visibleTop + visibleBottom) / 2
-    : clampValue(referenceY, visibleTop, visibleBottom);
-  return {
-    imageId: selected.card.dataset.imageId ?? "",
-    cardRatio: selected.rect.height > 0
-      ? clampValue((anchorY - selected.rect.top) / selected.rect.height, 0, 1)
-      : .5,
-    viewportRatio: clampValue((anchorY - viewport.top) / viewport.height, 0, 1),
-    fallbackScrollY: window.scrollY,
-  };
-}
-
-function restoreMasonryViewportAnchor(
-  masonry: HTMLElement,
-  anchor: MasonryViewportAnchor,
-): void {
-  const card = masonry.querySelector<HTMLElement>(
-    `.image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
-  );
-  if (!card) {
-    scrollWindowImmediately(anchor.fallbackScrollY);
-    return;
-  }
-  const rect = card.getBoundingClientRect();
-  const viewport = visualViewportBounds();
-  const viewportBottom = viewport.top + viewport.height;
-  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-    ?? viewport.top;
-  const safeTop = Math.min(viewportBottom, Math.max(viewport.top, topbarBottom + 8));
-  const safeBottom = Math.max(safeTop, viewportBottom - 8);
-  const desiredY = clampValue(
-    viewport.top + anchor.viewportRatio * viewport.height,
-    safeTop,
-    safeBottom,
-  );
-  const actualY = rect.top + rect.height * anchor.cardRatio;
-  const documentHeight = Math.max(
-    document.documentElement.scrollHeight,
-    document.body.scrollHeight,
-  );
-  const maximumScroll = Math.max(0, documentHeight - window.innerHeight);
-  scrollWindowImmediately(clampValue(
-    window.scrollY + actualY - desiredY,
-    0,
-    maximumScroll,
-  ));
-}
-
-function scrollWindowImmediately(top: number): void {
-  const root = document.documentElement;
-  const previousBehavior = root.style.scrollBehavior;
-  root.style.scrollBehavior = "auto";
-  window.scrollTo({ top, left: window.scrollX, behavior: "auto" });
-  root.style.scrollBehavior = previousBehavior;
-}
-
 function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
   if (!flight) return;
   for (const animation of flight.animations) animation.cancel();
@@ -305,17 +144,7 @@ function createViewerReturnFlight(): ViewerReturnFlight | null {
   const media = viewer?.querySelector<HTMLElement>(".viewer-media");
   if (!viewer || !media) return null;
 
-  const viewportTop = window.visualViewport?.offsetTop ?? 0;
-  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-  const viewportBottom = viewportTop + viewportHeight;
-  const mediaRect = media.getBoundingClientRect();
-  const detailsPreview = viewer.querySelector<HTMLElement>(".viewer-details-summary img");
-  const detailsRect = detailsPreview?.getBoundingClientRect();
-  const mediaVisible = mediaRect.bottom > viewportTop && mediaRect.top < viewportBottom;
-  const detailsVisible = detailsRect
-    ? detailsRect.bottom > viewportTop && detailsRect.top < viewportBottom
-    : false;
-  const sourceRect = !mediaVisible && detailsVisible ? detailsRect! : mediaRect;
+  const sourceRect = media.getBoundingClientRect();
   if (sourceRect.width <= 0 || sourceRect.height <= 0) return null;
 
   const layer = document.createElement("div");
@@ -325,7 +154,7 @@ function createViewerReturnFlight(): ViewerReturnFlight | null {
   layer.dataset.createdAt = String(performance.now());
   const backdrop = document.createElement("div");
   backdrop.className = "viewer-return-backdrop";
-  const clone = media.cloneNode(true) as HTMLElement;
+  const clone = media.cloneNode(false) as HTMLElement;
   clone.className = "viewer-media viewer-return-media";
   clone.removeAttribute("ref");
   clone.setAttribute("aria-hidden", "true");
@@ -459,7 +288,7 @@ function useDebounced<T>(value: T, delay: number): T {
 function useDelayedUnmount(visible: boolean, delay: number): boolean {
   const [mounted, setMounted] = useState(visible);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (visible) {
       setMounted(true);
       return;
@@ -496,46 +325,6 @@ function createExploreSeed(): string {
   return Array.from(values, (value) => value.toString(16).padStart(8, "0")).join("");
 }
 
-const CARD_LOAD_CALLBACKS = new WeakMap<Element, () => void>();
-const READY_THUMBNAIL_IDS = new Set<string>();
-let cardLoadObserver: IntersectionObserver | null = null;
-
-function rememberReadyThumbnail(id: string): void {
-  READY_THUMBNAIL_IDS.delete(id);
-  READY_THUMBNAIL_IDS.add(id);
-  if (READY_THUMBNAIL_IDS.size > READY_THUMBNAIL_CACHE_LIMIT) {
-    const oldest = READY_THUMBNAIL_IDS.values().next().value;
-    if (oldest !== undefined) READY_THUMBNAIL_IDS.delete(oldest);
-  }
-}
-
-function observeCardLoad(element: Element, load: () => void): () => void {
-  if (!("IntersectionObserver" in window)) {
-    load();
-    return () => undefined;
-  }
-  if (!cardLoadObserver) {
-    cardLoadObserver = new IntersectionObserver(
-      (entries, observer) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const callback = CARD_LOAD_CALLBACKS.get(entry.target);
-          CARD_LOAD_CALLBACKS.delete(entry.target);
-          observer.unobserve(entry.target);
-          callback?.();
-        }
-      },
-      { rootMargin: CARD_PREFETCH_MARGIN },
-    );
-  }
-  CARD_LOAD_CALLBACKS.set(element, load);
-  cardLoadObserver.observe(element);
-  return () => {
-    CARD_LOAD_CALLBACKS.delete(element);
-    cardLoadObserver?.unobserve(element);
-  };
-}
-
 function App() {
   useVisualViewportTop();
   const [summary, setSummary] = useState<GallerySummary | null>(
@@ -555,12 +344,14 @@ function App() {
   ));
   const [album, setAlbum] = useState("");
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [exploreSeed, setExploreSeed] = useState("");
   const [loading, setLoading] = useState(!INITIAL_BOOTSTRAP);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
+  const masonryLayoutRef = useRef<MasonryGalleryHandle>(null);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
   const [viewerDiscoveredImages, setViewerDiscoveredImages] = useState<GalleryImage[]>([]);
   const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
@@ -586,10 +377,11 @@ function App() {
         ? "filename"
         : "indexing"
     : "filename";
-  const debouncedSearch = useDebounced(
+  const delayedSearch = useDebounced(
     search.trim(),
     status?.textSearch.enabled ? 500 : 250,
   );
+  const debouncedSearch = search.trim() ? delayedSearch : "";
   const requestVersionRef = useRef(0);
   const summaryRevisionRef = useRef<string | null>(
     INITIAL_BOOTSTRAP?.summary.revision ?? null,
@@ -1145,32 +937,7 @@ function App() {
       if (!card) return null;
       observeLayout(card);
 
-      const rect = card.getBoundingClientRect();
-      const viewport = visualViewportBounds();
-      const viewportBottom = viewport.top + viewport.height;
-      const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-        ?? viewport.top;
-      const safeTop = Math.min(
-        viewportBottom,
-        Math.max(viewport.top, topbarBottom + 8),
-      );
-      const safeBottom = Math.max(safeTop, viewportBottom - 8);
-      const desiredViewportY = clampValue(
-        viewport.top + request.viewportRatio * viewport.height,
-        safeTop,
-        safeBottom,
-      );
-      const cardAnchorY = rect.top + rect.height * request.cardRatio;
-      const documentHeight = Math.max(
-        document.documentElement.scrollHeight,
-        document.body.scrollHeight,
-      );
-      const maximumScroll = Math.max(0, documentHeight - window.innerHeight);
-      const targetScroll = clampValue(
-        window.scrollY + cardAnchorY - desiredViewportY,
-        0,
-        maximumScroll,
-      );
+      const targetScroll = scrollTopForAnchor(card, request);
       if (Math.abs(targetScroll - window.scrollY) > 0.5) {
         scrollWindowImmediately(targetScroll);
       }
@@ -1220,12 +987,7 @@ function App() {
       if (stopped || animating) return;
       const card = alignToCard();
       if (!card) {
-        const maximumScroll = Math.max(
-          0,
-          Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
-            - window.innerHeight,
-        );
-        scrollWindowImmediately(clampValue(request.fallbackScrollY, 0, maximumScroll));
+        scrollWindowImmediately(scrollTopForAnchor(null, request));
       }
 
       const flight = requestFlight;
@@ -1369,7 +1131,6 @@ function App() {
     });
   }, [images, loadMore, loadMoreSimilar, nextOffset, similarPage, viewerImages]);
 
-  const galleryPath = `/${album.replace(/^\/+/, "")}`;
   const chooseAlbum = (path: string) => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     setAlbum(path);
@@ -1382,17 +1143,18 @@ function App() {
     setExploreSeed("");
     setViewerImageId(null);
   };
+  const goHome = () => {
+    requestVersionRef.current++;
+    skipInitialImagesRef.current = false;
+    chooseAlbum("");
+    setSearch("");
+    setSearchOpen(false);
+    setLoading(true);
+    setReloadToken((value) => value + 1);
+  };
   const startExploring = () => {
     setViewerImageId(null);
     setExploreSeed(createExploreSeed());
-  };
-  const goHome = () => {
-    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-    setAlbum("");
-    setSearch("");
-    setExploreSeed("");
-    setViewerImageId(null);
-    setMobileNavOpen(false);
   };
   return (
     <div
@@ -1404,14 +1166,25 @@ function App() {
     >
       <Header
         search={search}
+        searchOpen={searchOpen}
+        onSearchOpenChange={setSearchOpen}
         searchMode={textSearchMode}
         onSearchChange={changeSearch}
         onExplore={startExploring}
         exploreActive={Boolean(exploreSeed)}
         exploreLoading={Boolean(exploreSeed) && loading}
         onHome={goHome}
-        onToggleNavigation={() => setMobileNavOpen((open) => !open)}
-        navigationOpen={mobileNavOpen}
+        onToggleNavigation={() => {
+          if (compactLayout) {
+            setMobileNavOpen((open) => !open);
+          } else {
+            const updateLayout = () => setSidebarCollapsed((collapsed) => !collapsed);
+            if (masonryLayoutRef.current) masonryLayoutRef.current.resize(updateLayout);
+            else updateLayout();
+          }
+        }}
+        navigationOpen={compactLayout ? mobileNavOpen : !sidebarCollapsed}
+        compactLayout={compactLayout}
       />
       <div
         className="request-progress"
@@ -1420,27 +1193,14 @@ function App() {
         aria-label="正在更新图库"
         aria-hidden={!loading}
       >
-        <span />
+        <span key={reloadToken} />
       </div>
-      <SidebarToggleButton
-        className="gallery-sidebar-toggle"
-        expanded={compactLayout ? mobileNavOpen : !sidebarCollapsed}
-        onClick={() => {
-          if (compactLayout) {
-            setMobileNavOpen((open) => !open);
-          } else {
-            setSidebarCollapsed((collapsed) => !collapsed);
-          }
-        }}
-        controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
-      />
       <Sidebar
         summary={summary}
         status={status}
         activeAlbum={album}
-        galleryPath={galleryPath}
-        galleryCount={total}
         onChoose={chooseAlbum}
+        onHome={goHome}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
         onClose={() => setMobileNavOpen(false)}
@@ -1466,6 +1226,7 @@ function App() {
           <GallerySkeleton />
         ) : images.length ? (
           <MasonryGallery
+            ref={masonryLayoutRef}
             images={images}
             initialColumnCount={compactLayout ? 2 : 5}
             preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
@@ -1496,7 +1257,6 @@ function App() {
         <ImageViewer
           images={viewerImages}
           activeIndex={viewerIndex}
-          total={Math.max(summary?.total ?? total, viewerImages.length)}
           hasMore={viewerCanLoadMore}
           loadingMore={loadingMore || similarLoadingMore}
           onNavigate={navigateViewer}
@@ -1513,370 +1273,6 @@ function App() {
           onOpenSimilar={openSimilarImage}
         />
       )}
-    </div>
-  );
-}
-
-type MasonryMetrics = {
-  width: number;
-  columnCount: number;
-  gap: number;
-};
-
-function useMasonryMetrics(
-  ref: RefObject<HTMLDivElement | null>,
-  initialColumnCount: number,
-  onBeforeChange?: () => void,
-): MasonryMetrics {
-  const [metrics, setMetrics] = useState<MasonryMetrics>({
-    width: 0,
-    columnCount: initialColumnCount,
-    gap: 6,
-  });
-  const metricsRef = useRef(metrics);
-  const beforeChangeRef = useRef(onBeforeChange);
-  beforeChangeRef.current = onBeforeChange;
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    let frame = 0;
-    let pendingWidth = element.clientWidth;
-    const update = (width: number) => {
-      if (width <= 0) return;
-      const minimumCardWidth = 218;
-      const declaredGap = Number.parseFloat(
-        getComputedStyle(element).getPropertyValue("--masonry-gap"),
-      );
-      const gap = Number.isFinite(declaredGap) ? declaredGap : 6;
-      const next = Math.floor((width + gap) / (minimumCardWidth + gap));
-      const roundedWidth = Math.round(width * 100) / 100;
-      const columnCount = Math.min(6, Math.max(2, next));
-      const current = metricsRef.current;
-      if (
-        current.width === roundedWidth
-        && current.columnCount === columnCount
-        && current.gap === gap
-      ) return;
-      if (current.width > 0) beforeChangeRef.current?.();
-      const nextMetrics = { width: roundedWidth, columnCount, gap };
-      metricsRef.current = nextMetrics;
-      setMetrics(nextMetrics);
-    };
-    const schedule = (width: number) => {
-      pendingWidth = width;
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        update(pendingWidth);
-      });
-    };
-
-    update(pendingWidth);
-    const observer = new ResizeObserver(([entry]) => schedule(entry.contentRect.width));
-    observer.observe(element);
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, [ref]);
-  return metrics;
-}
-
-const MasonryGallery = memo(function MasonryGallery({
-  images,
-  initialColumnCount,
-  preserveViewport,
-  onOpen,
-}: {
-  images: GalleryImage[];
-  initialColumnCount: number;
-  preserveViewport: boolean;
-  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const resizeAnchorRef = useRef<MasonryViewportAnchor | null>(null);
-  const stableViewportAnchorRef = useRef<MasonryViewportAnchor | null>(null);
-  const resizeGuardUntilRef = useRef(0);
-  const [activeNameId, setActiveNameId] = useState<string | null>(null);
-  const captureResizeAnchor = useCallback(() => {
-    const masonry = ref.current;
-    resizeAnchorRef.current = preserveViewport && masonry
-      ? stableViewportAnchorRef.current ?? captureMasonryViewportAnchor(masonry)
-      : null;
-  }, [preserveViewport]);
-  const { width, columnCount, gap } = useMasonryMetrics(
-    ref,
-    initialColumnCount,
-    captureResizeAnchor,
-  );
-
-  useLayoutEffect(() => {
-    const anchor = resizeAnchorRef.current;
-    const masonry = ref.current;
-    let correctionFrame = 0;
-    resizeAnchorRef.current = null;
-    if (anchor && masonry && preserveViewport) {
-      restoreMasonryViewportAnchor(masonry, anchor);
-      correctionFrame = window.requestAnimationFrame(() => {
-        restoreMasonryViewportAnchor(masonry, anchor);
-      });
-    }
-    stableViewportAnchorRef.current = preserveViewport && masonry
-      ? captureMasonryViewportAnchor(masonry)
-      : null;
-    return () => window.cancelAnimationFrame(correctionFrame);
-  }, [columnCount, gap, images, preserveViewport, width]);
-
-  useEffect(() => {
-    const masonry = ref.current;
-    if (!masonry || !preserveViewport) {
-      stableViewportAnchorRef.current = null;
-      return;
-    }
-    let frame = 0;
-    const rememberViewportAnchor = () => {
-      frame = 0;
-      if (
-        resizeAnchorRef.current
-        || performance.now() < resizeGuardUntilRef.current
-      ) return;
-      stableViewportAnchorRef.current = captureMasonryViewportAnchor(masonry);
-    };
-    const scheduleViewportAnchor = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(rememberViewportAnchor);
-    };
-    const rememberFocusedAnchor = () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      rememberViewportAnchor();
-    };
-    const guardViewportResize = () => {
-      resizeGuardUntilRef.current = performance.now() + 120;
-      if (frame) {
-        window.cancelAnimationFrame(frame);
-        frame = 0;
-      }
-    };
-
-    rememberViewportAnchor();
-    window.addEventListener("scroll", scheduleViewportAnchor, { passive: true });
-    window.addEventListener("resize", guardViewportResize);
-    window.visualViewport?.addEventListener("resize", guardViewportResize);
-    masonry.addEventListener("focusin", rememberFocusedAnchor);
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.removeEventListener("scroll", scheduleViewportAnchor);
-      window.removeEventListener("resize", guardViewportResize);
-      window.visualViewport?.removeEventListener("resize", guardViewportResize);
-      masonry.removeEventListener("focusin", rememberFocusedAnchor);
-    };
-  }, [preserveViewport]);
-
-  const showName = useCallback((id: string) => setActiveNameId(id), []);
-
-  const layout = useMemo(() => {
-    if (width <= 0) return { height: 0, items: [] };
-    const cardWidth = Math.max(1, (width - gap * (columnCount - 1)) / columnCount);
-    const heights = Array(columnCount).fill(0) as number[];
-    const items = images.map((image, index) => {
-      const target = heights.indexOf(Math.min(...heights));
-      const cardHeight = Math.max(
-        64,
-        cardWidth * image.height / Math.max(image.width, 1),
-      );
-      const top = heights[target];
-      heights[target] = top + cardHeight + gap;
-      return {
-        image,
-        index,
-        style: {
-          left: target * (cardWidth + gap),
-          top,
-          width: cardWidth,
-          height: cardHeight,
-        } as CSSProperties,
-      };
-    });
-    return {
-      items,
-      height: items.length ? Math.max(...heights) - gap : 0,
-    };
-  }, [columnCount, gap, images, width]);
-
-  return (
-    <div
-      ref={ref}
-      className="masonry"
-      data-columns={columnCount}
-      style={{ height: layout.height } as CSSProperties}
-    >
-      {layout.items.map(({ image, index, style }) => (
-        <ImageCard
-          key={image.id}
-          image={image}
-          layoutStyle={style}
-          eager={index < columnCount}
-          highPriority={index === 0}
-          nameVisible={activeNameId === image.id}
-          onNameTouch={showName}
-          onOpen={onOpen}
-        />
-      ))}
-    </div>
-  );
-});
-
-const ImageCard = memo(function ImageCard({
-  image,
-  layoutStyle,
-  eager,
-  highPriority,
-  nameVisible,
-  onNameTouch,
-  onOpen,
-}: {
-  image: GalleryImage;
-  layoutStyle: CSSProperties;
-  eager: boolean;
-  highPriority: boolean;
-  nameVisible: boolean;
-  onNameTouch: (id: string) => void;
-  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
-}) {
-  const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
-  const [loaded, setLoaded] = useState(alreadyReady);
-  const [failed, setFailed] = useState(false);
-  const [retrying, setRetrying] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  const [loadRequested, setLoadRequested] = useState(eager || alreadyReady);
-  const cardRef = useRef<HTMLElement>(null);
-  const imageRef = useRef<HTMLImageElement>(null);
-  const retryTimerRef = useRef(0);
-
-  useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
-  useEffect(() => {
-    if (eager) {
-      setLoadRequested(true);
-      return;
-    }
-    if (loadRequested) return;
-    const card = cardRef.current;
-    if (!card) return;
-    return observeCardLoad(card, () => setLoadRequested(true));
-  }, [eager, loadRequested]);
-
-  const thumbnailUrl = viewerThumbnailUrl(image);
-  const retryQuery = attempt ? `retry=${attempt}` : "";
-  const imageUrl = retryQuery ? `${thumbnailUrl}?${retryQuery}` : thumbnailUrl;
-
-  const markLoaded = useCallback(() => {
-    window.clearTimeout(retryTimerRef.current);
-    rememberReadyThumbnail(image.id);
-    setLoaded(true);
-    setFailed(false);
-    setRetrying(false);
-  }, [image.id]);
-
-  useLayoutEffect(() => {
-    const element = imageRef.current;
-    if (element?.complete && element.naturalWidth > 0) markLoaded();
-  }, [imageUrl, loadRequested, markLoaded]);
-
-  const handleError = () => {
-    window.clearTimeout(retryTimerRef.current);
-    READY_THUMBNAIL_IDS.delete(image.id);
-    setLoaded(false);
-    const delay = IMAGE_RETRY_DELAYS_MS[attempt];
-    if (delay === undefined) {
-      setRetrying(false);
-      setFailed(true);
-      return;
-    }
-    setFailed(false);
-    setRetrying(true);
-    retryTimerRef.current = window.setTimeout(() => {
-      setAttempt((current) => current + 1);
-      setRetrying(false);
-    }, delay);
-  };
-
-  return (
-    <figure
-      ref={cardRef}
-      className="image-card"
-      title={image.name}
-      data-image-id={image.id}
-      data-name-visible={nameVisible}
-      data-loaded={loaded}
-      data-failed={failed}
-      data-loading={loadRequested && !loaded && !failed}
-      data-retrying={retrying}
-      data-eager={eager}
-      data-high-priority={highPriority}
-      style={{
-        ...layoutStyle,
-        aspectRatio: `${image.width} / ${image.height}`,
-      } as CSSProperties}
-      onPointerEnter={() => preloadOriginalImage(image)}
-      onPointerDown={(event) => {
-        preloadOriginalImage(image);
-        if (event.pointerType !== "mouse") onNameTouch(image.id);
-      }}
-      onFocus={() => preloadOriginalImage(image)}
-      onClick={(event) => onOpen(
-        image.id,
-        event.currentTarget,
-        event.detail > 0 ? event.clientY : undefined,
-      )}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onOpen(image.id, event.currentTarget);
-      }}
-      role="button"
-      tabIndex={0}
-      aria-label={`查看 ${image.name}`}
-      aria-haspopup="dialog"
-    >
-      {!failed && loadRequested ? (
-        <img
-          ref={imageRef}
-          src={imageUrl}
-          alt={image.name}
-          loading="eager"
-          decoding="async"
-          fetchPriority={highPriority ? "high" : "auto"}
-          width={image.width}
-          height={image.height}
-          draggable={false}
-          className={loaded ? "loaded" : ""}
-          onLoad={markLoaded}
-          onError={handleError}
-        />
-      ) : failed ? (
-        <span className="image-fallback" role="img" aria-label={`${image.name} 加载失败`}>
-          <ImageIcon size={24} />
-        </span>
-      ) : null}
-      <span className="image-name">{image.name}</span>
-    </figure>
-  );
-});
-
-function GallerySkeleton() {
-  const ratios = [1.4, 0.72, 1, 1.55, 0.8, 1.2, 0.67, 1.35, 0.9, 1.6, 0.76, 1.1];
-  return (
-    <div className="skeleton-grid" aria-label="正在加载图库">
-      {ratios.map((ratio, index) => (
-        <span
-          key={index}
-          aria-hidden="true"
-          style={{
-            aspectRatio: String(ratio),
-            "--skeleton-order": index,
-          } as CSSProperties}
-        />
-      ))}
     </div>
   );
 }

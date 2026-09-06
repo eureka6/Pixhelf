@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 
+import { version as appVersion } from "../package.json";
+import logoMark from "./assets/pixhelf-mark.svg?inline";
 import { formatCount } from "./format";
 import {
   Check,
   Dices,
   Folder,
+  House,
   Images,
   LoaderCircle,
-  PanelLeftClose,
-  PanelLeftOpen,
+  Menu,
   Search,
   X,
 } from "./icons";
@@ -17,6 +19,8 @@ import type { GallerySummary, ThumbnailStatus } from "./types";
 
 export function Header({
   search,
+  searchOpen,
+  onSearchOpenChange,
   searchMode,
   onSearchChange,
   onExplore,
@@ -25,8 +29,11 @@ export function Header({
   onHome,
   onToggleNavigation,
   navigationOpen,
+  compactLayout,
 }: {
   search: string;
+  searchOpen: boolean;
+  onSearchOpenChange: (open: boolean) => void;
   searchMode: "filename" | "indexing" | "semantic";
   onSearchChange: (value: string) => void;
   onExplore: () => void;
@@ -35,10 +42,11 @@ export function Header({
   onHome: () => void;
   onToggleNavigation: () => void;
   navigationOpen: boolean;
+  compactLayout: boolean;
 }) {
-  const [searchOpen, setSearchOpen] = useState(false);
   const [exploreMotionKey, setExploreMotionKey] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const mobileNavigationOpen = compactLayout && navigationOpen;
   const semanticSearch = searchMode === "semantic";
   const searchIndexing = searchMode === "indexing";
   const searchPlaceholder = semanticSearch
@@ -56,56 +64,47 @@ export function Header({
   }, [searchOpen]);
 
   useEffect(() => {
-    if (navigationOpen) {
+    if (mobileNavigationOpen) {
       searchInputRef.current?.blur();
-      setSearchOpen(false);
+      onSearchOpenChange(false);
     }
-  }, [navigationOpen]);
+  }, [mobileNavigationOpen, onSearchOpenChange]);
 
   const handleSearchOpenChange = (open: boolean) => {
-    if (open && navigationOpen) onToggleNavigation();
-    setSearchOpen(open);
+    if (open && mobileNavigationOpen) onToggleNavigation();
+    onSearchOpenChange(open);
   };
   const handleExplore = () => {
     searchInputRef.current?.blur();
-    setSearchOpen(false);
-    if (navigationOpen) onToggleNavigation();
+    onSearchOpenChange(false);
+    if (mobileNavigationOpen) onToggleNavigation();
     setExploreMotionKey((value) => value + 1);
     onExplore();
   };
   const handleHome = () => {
     searchInputRef.current?.blur();
-    setSearchOpen(false);
     onHome();
   };
-
   return (
     <header className="topbar" data-search-open={searchOpen}>
       <div className="topbar-leading">
-        <a
-          className="brand"
-          href="/"
-          aria-label="返回 Pixhelf 主页"
-          title="返回主页"
-          onClick={(event) => {
-            if (
-              event.button !== 0
-              || event.metaKey
-              || event.ctrlKey
-              || event.shiftKey
-              || event.altKey
-            ) {
-              return;
-            }
-            event.preventDefault();
-            handleHome();
-          }}
-        >
-          <span className="brand-mark"><Images size={21} /></span>
-          <span>Pixhelf</span>
-        </a>
+        <SidebarToggleButton
+          className="gallery-sidebar-toggle"
+          expanded={navigationOpen}
+          onClick={onToggleNavigation}
+          controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
+        />
       </div>
       <div className="topbar-actions" role="toolbar" aria-label="图库工具">
+        <button
+          type="button"
+          className="icon-button toolbar-action-button topbar-home"
+          onClick={handleHome}
+          aria-label="主页"
+          title="主页"
+        >
+          <House size={18} />
+        </button>
         <button
           type="button"
           className={`icon-button toolbar-action-button explore-toggle ${exploreActive ? "is-active" : ""} ${exploreLoading ? "is-loading" : ""}`}
@@ -202,9 +201,7 @@ export function SidebarToggleButton({
       data-state={expanded ? "expanded" : "collapsed"}
       title={label}
     >
-      <span key={String(expanded)} className="sidebar-toggle-glyph" aria-hidden="true">
-        {expanded ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}
-      </span>
+      <Menu size={22} />
     </button>
   );
 }
@@ -254,13 +251,54 @@ function SidebarStatus({ status }: { status: ThumbnailStatus | null }) {
   );
 }
 
+function SidebarBrand({ onHome }: { onHome: () => void }) {
+  return (
+    <div className="sidebar-brand">
+      <div className="brand-lockup">
+        <a
+          className="brand"
+          href="/"
+          aria-label="主页"
+          title="主页"
+          onClick={(event) => {
+            if (
+              event.button !== 0
+              || event.metaKey
+              || event.ctrlKey
+              || event.shiftKey
+              || event.altKey
+            ) return;
+            event.preventDefault();
+            onHome();
+          }}
+        >
+          <span className="brand-symbol">
+            <img className="brand-mark" src={logoMark} width="32" height="32" alt="" />
+          </span>
+          <span className="brand-name">
+            Pixhelf
+          </span>
+        </a>
+        <a
+          className="brand-version"
+          href="https://github.com/eureka6/Pixhelf"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="GitHub"
+        >
+          v{appVersion}
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export function Sidebar({
   summary,
   status,
   activeAlbum,
-  galleryPath,
-  galleryCount,
   onChoose,
+  onHome,
   mobileOpen,
   mobileMounted,
   onClose,
@@ -269,9 +307,8 @@ export function Sidebar({
   summary: GallerySummary | null;
   status: ThumbnailStatus | null;
   activeAlbum: string;
-  galleryPath: string;
-  galleryCount: number;
   onChoose: (path: string) => void;
+  onHome: () => void;
   mobileOpen: boolean;
   mobileMounted: boolean;
   onClose: () => void;
@@ -279,7 +316,6 @@ export function Sidebar({
 }) {
   const navigation = (
     <>
-      <div className="sidebar-control-slot" aria-hidden="true" />
       <nav className="album-nav" aria-label="相册">
         <AlbumButton
           label="全部图片"
@@ -300,10 +336,6 @@ export function Sidebar({
         ))}
       </nav>
       <SidebarStatus status={status} />
-      <div className="sidebar-gallery-meta">
-        <span className="sidebar-gallery-path" title={galleryPath}>{galleryPath}</span>
-        <span className="sidebar-gallery-count">{formatCount(galleryCount)} 张图片</span>
-      </div>
     </>
   );
 
@@ -316,6 +348,7 @@ export function Sidebar({
         aria-hidden={desktopCollapsed}
         inert={desktopCollapsed}
       >
+        <SidebarBrand onHome={onHome} />
         {navigation}
       </aside>
       {mobileMounted && (
@@ -338,6 +371,7 @@ export function Sidebar({
             role="dialog"
             aria-label="相册导航"
           >
+            <SidebarBrand onHome={onHome} />
             {navigation}
           </aside>
         </div>

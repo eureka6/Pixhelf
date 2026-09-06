@@ -1,25 +1,51 @@
 import type { CSSProperties } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { memo } from "preact/compat";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import { LoaderCircle, RefreshCw } from "./icons";
+import { ImageIcon, LoaderCircle } from "./icons";
+import { layoutMasonryImages, MAX_MASONRY_COLUMNS } from "./masonry";
+import type { MasonryMetrics } from "./masonry";
 import type { GalleryImage } from "./types";
 import { viewerThumbnailUrl } from "./viewerAssets";
 
-function SimilarImageCard({
+const SimilarImageCard = memo(function SimilarImageCard({
   image,
+  layoutStyle,
+  nameVisible,
+  onNameTouch,
   onOpen,
 }: {
   image: GalleryImage;
+  layoutStyle: CSSProperties;
+  nameVisible: boolean;
+  onNameTouch: (id: string) => void;
   onOpen: (image: GalleryImage) => void;
 }) {
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useLayoutEffect(() => {
+    const element = imageRef.current;
+    if (element?.complete && element.naturalWidth > 0) setLoaded(true);
+  }, [image.id]);
+
   return (
     <figure
       className="viewer-similar-card"
       title={image.name}
       data-image-id={image.id}
+      data-name-visible={nameVisible}
+      data-loaded={loaded}
+      data-failed={failed}
+      data-loading={!loaded && !failed}
+      style={layoutStyle}
       role="button"
       tabIndex={0}
       aria-label={`查看相似图片 ${image.name}`}
+      onPointerDown={(event) => {
+        if (event.pointerType !== "mouse") onNameTouch(image.id);
+      }}
       onClick={() => onOpen(image)}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -27,8 +53,9 @@ function SimilarImageCard({
         onOpen(image);
       }}
     >
-      <div className="viewer-similar-card-media">
+      {!failed ? (
         <img
+          ref={imageRef}
           src={viewerThumbnailUrl(image)}
           alt={image.name}
           loading="lazy"
@@ -36,23 +63,24 @@ function SimilarImageCard({
           width={image.width}
           height={image.height}
           draggable={false}
-          onError={(event) => {
-            event.currentTarget.dataset.failed = "true";
-          }}
+          className={loaded ? "loaded" : ""}
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
         />
-        <span className="viewer-similar-card-fallback" aria-hidden="true">
-          <RefreshCw size={18} />
+      ) : (
+        <span className="image-fallback" role="img" aria-label={`${image.name} 加载失败`}>
+          <ImageIcon size={24} />
         </span>
-      </div>
-      <figcaption>{image.name}</figcaption>
+      )}
+      <figcaption className="image-name">{image.name}</figcaption>
     </figure>
   );
-}
+});
 
 export function SimilarImageMasonry({
   images,
   total,
-  columnCount,
+  metrics,
   hasMore,
   loadingMore,
   error,
@@ -61,7 +89,7 @@ export function SimilarImageMasonry({
 }: {
   images: GalleryImage[];
   total: number;
-  columnCount: number;
+  metrics: MasonryMetrics;
   hasMore: boolean;
   loadingMore: boolean;
   error: string | null;
@@ -69,14 +97,9 @@ export function SimilarImageMasonry({
   onOpen: (image: GalleryImage) => void;
 }) {
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
-  const safeColumnCount = Math.max(1, Math.floor(columnCount));
-  const columns = Array.from({ length: safeColumnCount }, () => [] as GalleryImage[]);
-  const heights = Array.from({ length: safeColumnCount }, () => 0);
-  for (const image of images) {
-    const target = heights.indexOf(Math.min(...heights));
-    columns[target]!.push(image);
-    heights[target] += image.height / Math.max(1, image.width) + 0.12;
-  }
+  const [activeNameId, setActiveNameId] = useState<string | null>(null);
+  const showName = useCallback((id: string) => setActiveNameId(id), []);
+  const layout = useMemo(() => layoutMasonryImages(images, metrics), [images, metrics]);
 
   useEffect(() => {
     const sentinel = loadMoreSentinelRef.current;
@@ -99,15 +122,18 @@ export function SimilarImageMasonry({
     <>
       <div
         className="viewer-similar-masonry"
-        data-columns={safeColumnCount}
-        style={{ "--similar-columns": safeColumnCount } as CSSProperties}
+        data-columns={metrics.columnCount}
+        style={{ height: layout.height } as CSSProperties}
       >
-        {columns.map((column, index) => (
-          <div key={index} className="viewer-similar-column">
-            {column.map((candidate) => (
-              <SimilarImageCard key={candidate.id} image={candidate} onOpen={onOpen} />
-            ))}
-          </div>
+        {layout.items.map(({ image, style }) => (
+          <SimilarImageCard
+            key={image.id}
+            image={image}
+            layoutStyle={style}
+            nameVisible={activeNameId === image.id}
+            onNameTouch={showName}
+            onOpen={onOpen}
+          />
         ))}
       </div>
       {error && (
@@ -140,7 +166,7 @@ export function SimilarImageMasonry({
 }
 
 export function SimilarImageSkeleton({ columnCount }: { columnCount: number }) {
-  const safeColumnCount = Math.max(1, Math.floor(columnCount));
+  const safeColumnCount = Math.min(MAX_MASONRY_COLUMNS, Math.max(2, Math.floor(columnCount)));
   const itemCount = Math.max(4, safeColumnCount * 2);
   return (
     <div

@@ -36,25 +36,12 @@ export function Check(props: IconProps) {
   return <Icon {...props}><path d="M20 6 9 17l-5-5" /></Icon>;
 }
 
-export function ChevronsDown(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <path d="m3.5 7.75 8.5 5.5 8.5-5.5" opacity=".42" />
-      <path d="m3.5 12.25 8.5 5.5 8.5-5.5" />
-    </Icon>
-  );
-}
-
 export function ChevronLeft(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
 }
 
 export function ChevronRight(props: IconProps) {
   return <Icon {...props}><path d="m9 18 6-6-6-6" /></Icon>;
-}
-
-export function ChevronDown(props: IconProps) {
-  return <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
 }
 
 export function ChevronUp(props: IconProps) {
@@ -84,6 +71,15 @@ export function Download(props: IconProps) {
 
 export function Folder(props: IconProps) {
   return <Icon {...props}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>;
+}
+
+export function House(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8" />
+      <path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </Icon>
+  );
 }
 
 export function ImageIcon(props: IconProps) {
@@ -120,6 +116,10 @@ export function Maximize2(props: IconProps) {
   );
 }
 
+export function Menu(props: IconProps) {
+  return <Icon {...props}><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /></Icon>;
+}
+
 export function Minimize2(props: IconProps) {
   return (
     <Icon {...props}>
@@ -127,32 +127,6 @@ export function Minimize2(props: IconProps) {
       <path d="m3 21 7-7" /><path d="M4 14h6v6" />
     </Icon>
   );
-}
-
-export function Minus(props: IconProps) {
-  return <Icon {...props}><path d="M5 12h14" /></Icon>;
-}
-
-export function PanelLeftClose(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M9 3v18" /><path d="m16 15-3-3 3-3" />
-    </Icon>
-  );
-}
-
-export function PanelLeftOpen(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <path d="M9 3v18" /><path d="m14 9 3 3-3 3" />
-    </Icon>
-  );
-}
-
-export function Plus(props: IconProps) {
-  return <Icon {...props}><path d="M5 12h14" /><path d="M12 5v14" /></Icon>;
 }
 
 export function RefreshCw(props: IconProps) {

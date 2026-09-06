@@ -65,7 +65,7 @@ docker compose up -d
 
 模型位于独立的压缩 OCI 层中。第一次拉取会下载模型；后续更新只要模型版本不变，Docker 就会复用本地模型层，只下载新的应用层。amd64 与 arm64 镜像共享同一模型层。
 
-镜像只发布版本号与 `latest` 两类标签。使用 `latest` 自动跟随稳定版本；需要固定版本时使用 `eureka6688/pixhelf:0.2.3`。带 `v` 的标签仅用于 Git 和 Forgejo Release。
+镜像只发布版本号与 `latest` 两类标签。使用 `latest` 自动跟随稳定版本；需要固定版本时使用 `eureka6688/pixhelf:0.2.5`。带 `v` 的标签仅用于 Git 和 Forgejo Release。
 
 ### Docker Run
 

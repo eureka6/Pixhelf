@@ -5,7 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  ChevronsDown,
   Download,
   LoaderCircle,
   Maximize2,
@@ -15,6 +14,7 @@ import {
   X,
 } from "./icons";
 import { PhotoInformation } from "./PhotoInformation";
+import { useMasonryMetrics } from "./masonry";
 import { SimilarImageMasonry, SimilarImageSkeleton } from "./SimilarImages";
 import type { GalleryImage } from "./types";
 import {
@@ -58,6 +58,7 @@ const DOUBLE_TAP_SCALE = 2.5;
 const DOUBLE_TAP_DELAY_MS = 280;
 const VIEWER_SCROLL_EPSILON = 2;
 const WHEEL_HANDOFF_DELAY_MS = 220;
+const DETAILS_TOOLBAR_IDLE_MS = 2200;
 const MAX_RENDER_EDGE = 4096;
 const MOBILE_SWIPE_MOTION_MS = 170;
 const MOBILE_SWIPE_CLEANUP_MS = MOBILE_SWIPE_MOTION_MS + 50;
@@ -137,7 +138,6 @@ type IdleScheduler = Window & {
 type ImageViewerProps = {
   images: GalleryImage[];
   activeIndex: number;
-  total: number;
   hasMore: boolean;
   loadingMore: boolean;
   onNavigate: (direction: -1 | 1) => void;
@@ -157,7 +157,6 @@ type ImageViewerProps = {
 export function ImageViewer({
   images,
   activeIndex,
-  total,
   hasMore,
   loadingMore,
   onNavigate,
@@ -174,15 +173,10 @@ export function ImageViewer({
   onOpenSimilar,
 }: ImageViewerProps) {
   const image = images[activeIndex]!;
-  const viewport = useViewportSize();
+  const stageRef = useRef<HTMLElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const viewport = useViewportSize(surfaceRef);
   const compactViewport = viewport.width <= 720;
-  const similarColumnCount = viewport.width < 520
-    ? 2
-    : viewport.width < 960
-      ? 3
-      : viewport.width < 1280
-        ? 4
-        : 5;
   const mediaDimensions = viewerMediaDimensions(image, viewport);
   const viewportRender = viewportRenderDimensions(image, viewport);
   const viewportBitmapCapable = supportsViewerViewportBitmaps();
@@ -200,8 +194,9 @@ export function ImageViewer({
   const dialogRef = useRef<HTMLDivElement>(null);
   const detailsSectionRef = useRef<HTMLElement>(null);
   const similarSectionRef = useRef<HTMLElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const surfaceRef = useRef<HTMLDivElement>(null);
+  const cancelSimilarNavigationRef = useRef<(() => void) | null>(null);
+  const similarMetrics = useMasonryMetrics(similarSectionRef, compactViewport ? 2 : 5);
+  const gestureSurfaceRef = useRef<HTMLDivElement>(null);
   const mediaRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointersRef = useRef(new Map<number, PointerPoint>());
@@ -235,6 +230,8 @@ export function ImageViewer({
   const preparedSwipeSnapshotRef = useRef<PreparedSwipeSnapshot | null>(null);
   const [dragging, setDragging] = useState(false);
   const [scrollPage, setScrollPage] = useState<ViewerPage>("image");
+  const [detailsToolbarInRange, setDetailsToolbarInRange] = useState(false);
+  const [detailsToolbarVisible, setDetailsToolbarVisible] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [fullscreenAvailable, setFullscreenAvailable] = useState(
     () => typeof document !== "undefined"
@@ -405,10 +402,7 @@ export function ImageViewer({
   const forceViewerScroll = (top: number) => {
     const viewer = dialogRef.current;
     if (!viewer) return;
-    const previousBehavior = viewer.style.scrollBehavior;
-    viewer.style.scrollBehavior = "auto";
-    viewer.scrollTop = top;
-    viewer.style.scrollBehavior = previousBehavior;
+    viewer.scrollTo({ top, behavior: "instant" });
     scrollTopRef.current = viewer.scrollTop;
     const page = syncScrollPage(viewer.scrollTop) ?? scrollPageRef.current;
     rememberViewerScroll(viewer, page);
@@ -500,19 +494,71 @@ export function ImageViewer({
       behavior: reducedMotion() ? "auto" : "smooth",
     });
     if (focus) {
-      window.requestAnimationFrame(() => closeButtonRef.current?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => dialogRef.current?.focus({ preventScroll: true }));
     }
   };
 
   const scrollToSimilar = () => {
+    cancelSimilarNavigationRef.current?.();
     commitTransform(DEFAULT_TRANSFORM);
     wheelZoomBlockedUntilRef.current = performance.now() + WHEEL_HANDOFF_DELAY_MS;
-    window.requestAnimationFrame(() => {
-      similarSectionRef.current?.scrollIntoView({
-        behavior: reducedMotion() ? "auto" : "smooth",
-        block: "start",
+    const viewer = dialogRef.current;
+    const similar = similarSectionRef.current;
+    if (!viewer || !similar) return;
+
+    let frame = 0;
+    let target: number | null = null;
+    let arrived = false;
+    const trackArrival = () => {
+      arrived = target !== null && Math.abs(viewer.scrollTop - target) <= VIEWER_SCROLL_EPSILON;
+    };
+    const align = () => {
+      frame = 0;
+      if (similar.dataset.similarActive !== "true") return;
+      const margin = Number.parseFloat(getComputedStyle(similar).scrollMarginTop) || 0;
+      const next = clamp(
+        viewer.scrollTop + similar.getBoundingClientRect().top
+          - viewer.getBoundingClientRect().top - margin,
+        0,
+        Math.max(0, viewer.scrollHeight - viewer.clientHeight),
+      );
+      if (target !== null && Math.abs(next - target) <= VIEWER_SCROLL_EPSILON) return;
+      const first = target === null;
+      target = next;
+      // Keep the destination steady when metadata finishes loading after arrival.
+      viewer.scrollTo({
+        top: next,
+        behavior: arrived || reducedMotion() ? "instant" : "smooth",
       });
-    });
+      if (first) similar.focus({ preventScroll: true });
+      trackArrival();
+    };
+    const schedule = () => {
+      if (!frame) frame = window.requestAnimationFrame(align);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(viewer);
+    observer.observe(similar);
+    const information = detailsSectionRef.current?.querySelector(".viewer-photo-information");
+    if (information) observer.observe(information);
+
+    const interruptEvents = ["pointerdown", "touchstart", "wheel", "keydown"] as const;
+    const cancel = () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      viewer.removeEventListener("scroll", trackArrival);
+      for (const type of interruptEvents) viewer.removeEventListener(type, cancel, true);
+      if (target !== null && !arrived) {
+        viewer.scrollTo({ top: viewer.scrollTop, behavior: "instant" });
+      }
+      cancelSimilarNavigationRef.current = null;
+    };
+    cancelSimilarNavigationRef.current = cancel;
+    viewer.addEventListener("scroll", trackArrival, { passive: true });
+    for (const type of interruptEvents) {
+      viewer.addEventListener(type, cancel, { capture: true, passive: true });
+    }
+    schedule();
   };
 
   const parkViewerControlFocus = () => {
@@ -631,6 +677,7 @@ export function ImageViewer({
     }, MOBILE_SWIPE_CLEANUP_MS);
   };
 
+  // A new render size reuses the current pixels and gesture state.
   useLayoutEffect(() => {
     window.clearTimeout(retryTimerRef.current);
     window.clearTimeout(sourceUpgradeTimerRef.current);
@@ -666,8 +713,6 @@ export function ImageViewer({
   }, [
     image.id,
     sourceStrategy,
-    viewportRender.height,
-    viewportRender.width,
   ]);
 
   useLayoutEffect(() => {
@@ -691,6 +736,11 @@ export function ImageViewer({
         previous.detailsTop || previous.viewportHeight,
       );
       const nextDetailsTop = detailsSectionRef.current?.offsetTop ?? viewport.height;
+      // Preserve an in-flight scroll when resizing has not moved the page boundary.
+      if (nextDetailsTop === previousDetailsTop) {
+        rememberViewerScroll(viewer);
+        return;
+      }
       const wasInDetails = previous.page === "details"
         || previous.scrollTop >= previousDetailsTop - VIEWER_SCROLL_EPSILON;
       const nextTop = wasInDetails
@@ -705,6 +755,39 @@ export function ImageViewer({
     }
   }, [image.id, viewport.width, viewport.height]);
 
+  useLayoutEffect(() => {
+    const viewer = dialogRef.current;
+    const stage = stageRef.current;
+    const surface = surfaceRef.current;
+    if (!viewer || !stage || !surface) return;
+    const visualViewport = window.visualViewport;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      if (pointersRef.current.size) return;
+      const visibleHeight = Math.min(
+        stage.clientHeight,
+        visualViewport?.height ?? viewer.clientHeight,
+      );
+      const offset = Math.max(0, (visibleHeight - surface.clientHeight) / 2);
+      surface.style.transition = viewer.style.getPropertyValue("--viewer-frame-offset")
+        ? ""
+        : "none";
+      viewer.style.setProperty("--viewer-frame-offset", `${offset}px`);
+    };
+    const schedule = () => {
+      if (!frame) frame = window.requestAnimationFrame(update);
+    };
+    update();
+    window.addEventListener("resize", schedule);
+    visualViewport?.addEventListener("resize", schedule);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      visualViewport?.removeEventListener("resize", schedule);
+    };
+  }, [dragging, viewport.width, viewport.height]);
+
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -717,7 +800,7 @@ export function ImageViewer({
     document.documentElement.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
     const frame = window.requestAnimationFrame(() => {
-      closeButtonRef.current?.focus({ preventScroll: true });
+      dialogRef.current?.focus({ preventScroll: true });
     });
 
     return () => {
@@ -728,6 +811,78 @@ export function ImageViewer({
       if (previouslyFocused?.isConnected) previouslyFocused.focus({ preventScroll: true });
     };
   }, []);
+
+  useLayoutEffect(() => () => cancelSimilarNavigationRef.current?.(), [image.id]);
+
+  useEffect(() => {
+    const viewer = dialogRef.current;
+    const details = detailsSectionRef.current;
+    const similar = similarSectionRef.current;
+    const toolbar = details?.querySelector<HTMLElement>(".viewer-details-toolbar");
+    if (!viewer || !details || !similar || !toolbar) return;
+
+    let idleTimer = 0;
+    let hovered = false;
+    const reveal = () => {
+      window.clearTimeout(idleTimer);
+      const viewerTop = viewer.getBoundingClientRect().top;
+      const similarBounds = similar.getBoundingClientRect();
+      const scrollMargin = Number.parseFloat(getComputedStyle(similar).scrollMarginTop) || 0;
+      const inRange = similar.dataset.similarActive === "true"
+        && viewer.scrollTop > VIEWER_SCROLL_EPSILON
+        && similarBounds.top <= viewerTop + scrollMargin + VIEWER_SCROLL_EPSILON
+        && similarBounds.bottom > viewerTop;
+      setDetailsToolbarInRange(inRange);
+      if (!inRange) {
+        hovered = false;
+        setDetailsToolbarVisible(false);
+        return;
+      }
+      setDetailsToolbarVisible(true);
+      idleTimer = window.setTimeout(() => {
+        if (!hovered && !toolbar.querySelector(":focus-visible")) {
+          setDetailsToolbarVisible(false);
+        }
+      }, DETAILS_TOOLBAR_IDLE_MS);
+    };
+    const enterToolbar = (event: PointerEvent) => {
+      if (event.pointerType === "touch") return;
+      hovered = true;
+      reveal();
+    };
+    const leaveToolbar = () => {
+      hovered = false;
+      reveal();
+    };
+
+    const layoutObserver = new ResizeObserver(reveal);
+    layoutObserver.observe(viewer);
+    layoutObserver.observe(similar);
+    const information = details.querySelector(".viewer-photo-information");
+    if (information) layoutObserver.observe(information);
+
+    reveal();
+    viewer.addEventListener("scroll", reveal, { passive: true });
+    details.addEventListener("pointermove", reveal, { passive: true });
+    details.addEventListener("pointerdown", reveal, { passive: true });
+    details.addEventListener("keydown", reveal);
+    toolbar.addEventListener("pointerenter", enterToolbar);
+    toolbar.addEventListener("pointerleave", leaveToolbar);
+    toolbar.addEventListener("focusin", reveal);
+    toolbar.addEventListener("focusout", reveal);
+    return () => {
+      window.clearTimeout(idleTimer);
+      layoutObserver.disconnect();
+      viewer.removeEventListener("scroll", reveal);
+      details.removeEventListener("pointermove", reveal);
+      details.removeEventListener("pointerdown", reveal);
+      details.removeEventListener("keydown", reveal);
+      toolbar.removeEventListener("pointerenter", enterToolbar);
+      toolbar.removeEventListener("pointerleave", leaveToolbar);
+      toolbar.removeEventListener("focusin", reveal);
+      toolbar.removeEventListener("focusout", reveal);
+    };
+  }, [image.id]);
 
   useEffect(() => {
     const updateFullscreenState = () => {
@@ -774,11 +929,14 @@ export function ImageViewer({
           dialogRef.current?.querySelectorAll<HTMLElement>(
             'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
           ) ?? [],
-        ).filter((element) => !element.hasAttribute("inert"));
+        ).filter((element) => !element.closest("[inert]") && element.getClientRects().length > 0);
         if (!focusable.length) return;
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
+        if (document.activeElement === dialogRef.current) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey && document.activeElement === first) {
           event.preventDefault();
           last.focus();
         } else if (!event.shiftKey && document.activeElement === last) {
@@ -1181,9 +1339,14 @@ export function ImageViewer({
     if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
     if (pointerType !== "mouse" && pointersRef.current.size === 0) clearSwipeMotion();
     if (pointersRef.current.size === 0) {
+      const viewer = dialogRef.current;
+      if (viewer && pointerType !== "touch") forceViewerScroll(viewer.scrollTop);
       const surface = surfaceRef.current;
       const media = mediaRef.current;
       if (surface && media) {
+        const offset = new DOMMatrix(getComputedStyle(surface).transform).f;
+        surface.style.transition = "none";
+        dialogRef.current?.style.setProperty("--viewer-frame-offset", `${offset}px`);
         gestureGeometryRef.current = {
           surfaceWidth: surface.clientWidth,
           surfaceHeight: surface.clientHeight,
@@ -1298,13 +1461,12 @@ export function ImageViewer({
         y: 0,
       });
     } else if (gestureModeRef.current === "page") {
+      // Native touch scrolling supplies momentum and can be stopped by the next contact.
+      if (start.pointerType === "touch") return;
       const viewer = dialogRef.current;
       if (viewer) {
-        const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer.clientHeight;
-        viewer.scrollTop = clamp(start.scrollTop - deltaY, 0, detailsTop);
-        scrollTopRef.current = viewer.scrollTop;
-        const page = syncScrollPage(viewer.scrollTop) ?? scrollPageRef.current;
-        rememberViewerScroll(viewer, page);
+        const maximumScroll = Math.max(0, viewer.scrollHeight - viewer.clientHeight);
+        forceViewerScroll(clamp(start.scrollTop - deltaY, 0, maximumScroll));
         if (transformRef.current.x || transformRef.current.y) stageTransform(DEFAULT_TRANSFORM);
         return;
       }
@@ -1375,15 +1537,6 @@ export function ImageViewer({
     const wasPinched = pinchedRef.current;
     pinchedRef.current = false;
     if (wasPinched) {
-      const viewer = dialogRef.current;
-      const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 0;
-      const currentScroll = viewer?.scrollTop ?? 0;
-      if (currentScroll > VIEWER_SCROLL_EPSILON && detailsTop > 0) {
-        if (currentScroll >= detailsTop * 0.18) scrollToDetails();
-        else scrollToImage();
-        gestureGeometryRef.current = null;
-        return;
-      }
       commitTransform(constrainTransform(transformRef.current));
       gestureGeometryRef.current = null;
       return;
@@ -1432,7 +1585,6 @@ export function ImageViewer({
       (gestureGeometryRef.current?.surfaceHeight ?? surface?.clientHeight ?? 640) * 0.12,
     );
     const verticalFlick = deltaY > 38 && deltaY / elapsed > 0.52;
-    const detailsFlick = deltaY < -38 && -deltaY / elapsed > 0.52;
 
     if (
       gestureMode === "navigate" &&
@@ -1451,14 +1603,6 @@ export function ImageViewer({
       }
     }
     if (gestureMode === "page") {
-      const viewer = dialogRef.current;
-      const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 640;
-      const currentScroll = viewer?.scrollTop ?? 0;
-      if (detailsFlick || currentScroll >= detailsTop * 0.18) {
-        scrollToDetails();
-      } else {
-        scrollToImage();
-      }
       gestureGeometryRef.current = null;
       return;
     }
@@ -1488,17 +1632,6 @@ export function ImageViewer({
     gestureModeRef.current = null;
     pinchedRef.current = false;
     setDragging(false);
-    const viewer = dialogRef.current;
-    const detailsTop = detailsSectionRef.current?.offsetTop ?? viewer?.clientHeight ?? 0;
-    if ((viewer?.scrollTop ?? 0) > 1 && detailsTop > 0) {
-      if ((viewer?.scrollTop ?? 0) >= detailsTop * 0.18) {
-        scrollToDetails();
-      } else {
-        scrollToImage();
-      }
-      gestureGeometryRef.current = null;
-      return;
-    }
     commitTransform(constrainTransform(transformRef.current));
     gestureGeometryRef.current = null;
   };
@@ -1555,7 +1688,7 @@ export function ImageViewer({
   };
 
   useEffect(() => {
-    const surface = surfaceRef.current;
+    const surface = gestureSurfaceRef.current;
     if (!surface) return;
 
     const touchPoint = (touch: Touch): PointerPoint => ({
@@ -1563,25 +1696,28 @@ export function ImageViewer({
       y: touch.clientY,
     });
     const handleTouchStart = (event: TouchEvent) => {
-      event.preventDefault();
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch");
       }
+      if (event.cancelable && (pointersRef.current.size > 1 || transformRef.current.scale > MIN_SCALE)) {
+        event.preventDefault();
+      }
     };
     const handleTouchMove = (event: TouchEvent) => {
-      event.preventDefault();
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.move(touch.identifier, touchPoint(touch));
       }
+      if (event.cancelable && gestureModeRef.current && gestureModeRef.current !== "page") {
+        event.preventDefault();
+      }
     };
     const handleTouchEnd = (event: TouchEvent) => {
-      event.preventDefault();
+      if (event.cancelable && gestureModeRef.current !== "page") event.preventDefault();
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.finish(touch.identifier, touchPoint(touch), "touch");
       }
     };
-    const handleTouchCancel = (event: TouchEvent) => {
-      event.preventDefault();
+    const handleTouchCancel = () => {
       gestureHandlersRef.current?.cancel();
     };
 
@@ -1643,7 +1779,6 @@ export function ImageViewer({
     zoomAt(nextScale, { x: event.clientX, y: event.clientY });
   };
 
-  const displayPosition = Math.min(total, activeIndex + 1);
   const liveTransform = transformRef.current;
   const viewerStyle = {
     "--viewer-dismiss-progress": String(
@@ -1697,17 +1832,16 @@ export function ImageViewer({
       )}
       <button
         type="button"
-        className={`viewer-control viewer-similar-trigger${similarActive ? " is-active" : ""}`}
+        className="viewer-control viewer-similar-trigger"
         onClick={() => {
           onSearchSimilar(image);
           scrollToSimilar();
         }}
-        aria-label="以图搜图，查找相似图片"
-        aria-pressed={similarActive}
-        data-state={similarActive ? "active" : "idle"}
-        title="以图搜图"
+        aria-label="相似图片"
+        aria-busy={similarLoading}
+        title="相似图片"
       >
-        <ScanSearch size={19} />
+        {similarLoading ? <LoaderCircle className="spin" size={19} /> : <ScanSearch size={19} />}
       </button>
       <a
         className="viewer-control"
@@ -1732,7 +1866,6 @@ export function ImageViewer({
         </button>
       )}
       <button
-        ref={details ? undefined : closeButtonRef}
         type="button"
         className={`viewer-control ${details ? "viewer-details-close" : "viewer-close"}`}
         onClick={onClose}
@@ -1777,7 +1910,7 @@ export function ImageViewer({
       onScroll={handleViewerScroll}
       style={viewerStyle}
     >
-      <section className="viewer-stage" aria-label="图片浏览区域">
+      <section ref={stageRef} className="viewer-stage" aria-label="图片浏览区域">
         <div className="viewer-backdrop" aria-hidden="true" />
 
       <header className="viewer-header">
@@ -1785,7 +1918,7 @@ export function ImageViewer({
       </header>
 
       <div
-        ref={surfaceRef}
+        ref={gestureSurfaceRef}
         className="viewer-gesture-surface"
         onPointerDown={beginPointer}
         onPointerMove={movePointer}
@@ -1801,71 +1934,13 @@ export function ImageViewer({
           );
         }}
       >
-        <div className="viewer-media-center">
-          <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}>
-            <img
-              key={`thumbnail-${image.id}`}
-              className="viewer-thumbnail"
-              src={viewerThumbnailUrl(image)}
-              width={image.width}
-              height={image.height}
-              alt=""
-              aria-hidden="true"
-              loading="eager"
-              decoding="async"
-              fetchPriority="high"
-              draggable={false}
-              onLoad={() => setThumbnailState({
-                id: image.id,
-                loaded: true,
-                failed: false,
-              })}
-              onError={() => setThumbnailState({
-                id: image.id,
-                loaded: false,
-                failed: true,
-              })}
-            />
-            {useCanvasRenderer ? (
-              <canvas
-                ref={canvasRef}
-                key={`${fullSource}-${viewportRender.width}x${viewportRender.height}`}
-                className="viewer-original viewer-original-canvas"
-                role="img"
-                aria-label={image.name}
-                data-original-url={fullSource}
-              />
-            ) : (
+        <div ref={surfaceRef} className="viewer-image-frame">
+          <div className="viewer-media-center">
+            <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}>
               <img
-                key={fullSource}
-                className="viewer-original"
-                src={fullSource}
-                width={image.width}
-                height={image.height}
-                alt={image.name}
-                loading="eager"
-                decoding="async"
-                fetchPriority="high"
-                draggable={false}
-                onLoad={(event) => {
-                  const original = event.currentTarget;
-                  window.clearTimeout(retryTimerRef.current);
-                  const decoded = typeof original.decode === "function"
-                    ? original.decode().catch(() => undefined)
-                    : Promise.resolve();
-                  void decoded.then(() => {
-                    displayedOriginalsRef.current.add(fullSource);
-                    markOriginalReady(image.id, currentLoadState.attempt);
-                  });
-                }}
-                onError={handleOriginalError}
-              />
-            )}
-            {useViewportBitmapRenderer && currentFullResolution.requested && (
-              <img
-                key={`native-original-${fullSource}`}
-                className="viewer-original viewer-native-original"
-                src={fullSource}
+                key={`thumbnail-${image.id}`}
+                className="viewer-thumbnail"
+                src={viewerThumbnailUrl(image)}
                 width={image.width}
                 height={image.height}
                 alt=""
@@ -1874,23 +1949,83 @@ export function ImageViewer({
                 decoding="async"
                 fetchPriority="high"
                 draggable={false}
-                onLoad={() => {
-                  displayedOriginalsRef.current.add(fullSource);
-                  setFullResolutionState({
-                    id: image.id,
-                    requested: true,
-                    loaded: true,
-                    failed: false,
-                  });
-                }}
-                onError={() => setFullResolutionState({
+                onLoad={() => setThumbnailState({
                   id: image.id,
-                  requested: true,
+                  loaded: true,
+                  failed: false,
+                })}
+                onError={() => setThumbnailState({
+                  id: image.id,
                   loaded: false,
                   failed: true,
                 })}
               />
-            )}
+              {useCanvasRenderer ? (
+                <canvas
+                  ref={canvasRef}
+                  key={fullSource}
+                  className="viewer-original viewer-original-canvas"
+                  role="img"
+                  aria-label={image.name}
+                  data-original-url={fullSource}
+                />
+              ) : (
+                <img
+                  key={fullSource}
+                  className="viewer-original"
+                  src={fullSource}
+                  width={image.width}
+                  height={image.height}
+                  alt={image.name}
+                  loading="eager"
+                  decoding="async"
+                  fetchPriority="high"
+                  draggable={false}
+                  onLoad={(event) => {
+                    const original = event.currentTarget;
+                    window.clearTimeout(retryTimerRef.current);
+                    const decoded = typeof original.decode === "function"
+                      ? original.decode().catch(() => undefined)
+                      : Promise.resolve();
+                    void decoded.then(() => {
+                      displayedOriginalsRef.current.add(fullSource);
+                      markOriginalReady(image.id, currentLoadState.attempt);
+                    });
+                  }}
+                  onError={handleOriginalError}
+                />
+              )}
+              {useViewportBitmapRenderer && currentFullResolution.requested && (
+                <img
+                  key={`native-original-${fullSource}`}
+                  className="viewer-original viewer-native-original"
+                  src={fullSource}
+                  width={image.width}
+                  height={image.height}
+                  alt=""
+                  aria-hidden="true"
+                  loading="eager"
+                  decoding="async"
+                  fetchPriority="high"
+                  draggable={false}
+                  onLoad={() => {
+                    displayedOriginalsRef.current.add(fullSource);
+                    setFullResolutionState({
+                      id: image.id,
+                      requested: true,
+                      loaded: true,
+                      failed: false,
+                    });
+                  }}
+                  onError={() => setFullResolutionState({
+                    id: image.id,
+                    requested: true,
+                    loaded: false,
+                    failed: true,
+                  })}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1918,18 +2053,6 @@ export function ImageViewer({
           : <ChevronRight size={23} strokeWidth={1.8} />}
       </button>
 
-      <div className="viewer-bottom-bar">
-        <button
-          type="button"
-          className="viewer-scroll-cue"
-          onClick={() => scrollToDetails(true)}
-          aria-label="向下滚动到图片详情"
-          title="查看图片详情"
-        >
-          <ChevronsDown size={38} strokeWidth={1.55} />
-        </button>
-      </div>
-
       {currentLoadState.failed && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>
           <RefreshCw size={15} />
@@ -1942,15 +2065,15 @@ export function ImageViewer({
         ref={detailsSectionRef}
         className="viewer-details-page"
         tabIndex={-1}
-        aria-labelledby="image-viewer-details-title"
+        aria-label="图片详情"
         data-details-image-name={image.name}
       >
         <div className="viewer-details-inner">
-          <header className="viewer-details-header">
-            <div className="viewer-details-heading">
-              <h2 id="image-viewer-details-title">图片详情</h2>
-              <span>{displayPosition} / {total}</span>
-            </div>
+          <header
+            className="viewer-details-header"
+            data-visible={detailsToolbarVisible}
+            inert={!detailsToolbarInRange}
+          >
             {renderActionSuite(true)}
           </header>
 
@@ -1960,6 +2083,7 @@ export function ImageViewer({
             <section
                 ref={similarSectionRef}
                 className={`viewer-similar-section${similarActive ? "" : " is-idle"}`}
+                tabIndex={-1}
                 aria-labelledby={similarActive ? "viewer-similar-title" : undefined}
                 data-similar-active={similarActive}
               >
@@ -1973,7 +2097,7 @@ export function ImageViewer({
                     </div>
 
                     {similarLoading && !similarImages.length ? (
-                      <SimilarImageSkeleton columnCount={similarColumnCount} />
+                      <SimilarImageSkeleton columnCount={similarMetrics.columnCount} />
                     ) : similarError && !similarImages.length ? (
                       <div className="viewer-similar-error" role="alert">
                         <span>{similarError}</span>
@@ -1986,7 +2110,7 @@ export function ImageViewer({
                       <SimilarImageMasonry
                         images={similarImages}
                         total={similarTotal}
-                        columnCount={similarColumnCount}
+                        metrics={similarMetrics}
                         hasMore={similarHasMore}
                         loadingMore={similarLoadingMore}
                         error={similarError}

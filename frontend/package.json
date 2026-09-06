@@ -1,13 +1,16 @@
 {
   "name": "pixhelf-frontend",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.5",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "visual-check": "node scripts/visual-check.mjs"
+    "visual-check": "node scripts/visual-check.mjs",
+    "sidebar-resize-check": "node scripts/sidebar-resize-check.mjs",
+    "viewer-resize-check": "node scripts/viewer-resize-check.mjs",
+    "viewer-similar-check": "node scripts/viewer-similar-check.mjs"
   },
   "dependencies": {
     "preact": "^10.27.1"

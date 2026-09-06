@@ -1,4 +1,7 @@
 import { chromium } from "playwright-core";
+import { readFileSync } from "node:fs";
+
+const appVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 const executablePath =
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ??
@@ -14,6 +17,96 @@ const browser = await chromium.launch({
 });
 
 const results = [];
+
+async function closeNavigation(page) {
+  const motion = await page.evaluate(async () => {
+    const menu = document.querySelector(".gallery-sidebar-toggle");
+    const panel = document.querySelector(".mobile-sidebar") ?? document.querySelector(".desktop-sidebar");
+    const brand = panel.querySelector(".brand-lockup");
+    const home = document.querySelector(".topbar-home");
+    const homeBounds = home.getBoundingClientRect();
+    const result = { samples: 0, minimumBrandMenuGap: null, homeStable: true };
+    menu.click();
+    const start = performance.now();
+    while (performance.now() - start < 380) {
+      await new Promise(requestAnimationFrame);
+      const homeRect = home.getBoundingClientRect();
+      const homeStyle = getComputedStyle(home);
+      result.homeStable &&= homeStyle.visibility === "visible" && homeStyle.opacity === "1"
+        && homeRect.x === homeBounds.x && homeRect.y === homeBounds.y
+        && homeRect.width === homeBounds.width && homeRect.height === homeBounds.height
+        && home.getAnimations({ subtree: true }).length === 0;
+      const rect = brand.getBoundingClientRect();
+      const style = getComputedStyle(brand);
+      if (
+        !brand.isConnected || style.visibility !== "visible" || Number(style.opacity) < .02
+        || panel.getBoundingClientRect().right <= rect.left
+      ) continue;
+      const gap = rect.left - menu.getBoundingClientRect().right;
+      result.samples++;
+      result.minimumBrandMenuGap = Math.min(result.minimumBrandMenuGap ?? gap, gap);
+    }
+    return result;
+  });
+  if (!motion.samples || motion.minimumBrandMenuGap < 8 || !motion.homeStable) {
+    throw new Error(`sidebar toggle disrupts the header: ${JSON.stringify(motion)}`);
+  }
+  return motion;
+}
+
+async function checkHomeNavigation(page, target, selector) {
+  const sidebar = target.name === "mobile" ? ".mobile-sidebar" : ".desktop-sidebar";
+  const toolbarButton = selector === ".topbar-home";
+  if (target.name === "mobile" && !toolbarButton) {
+    await page.locator(".gallery-sidebar-toggle").click();
+    await page.locator(`${sidebar} .brand`).waitFor({ state: "visible" });
+  }
+  const shell = await page.locator(".app-shell").elementHandle();
+  const homeRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === "/api/images" && url.searchParams.get("offset") === "0";
+  });
+  await page.locator(toolbarButton ? selector : `${sidebar} ${selector}`).click();
+  const request = await homeRequest;
+  const response = await request.response();
+  const url = new URL(request.url());
+  if (
+    !response?.ok() || request.isNavigationRequest()
+    || url.searchParams.get("sort") !== "name-asc"
+    || url.searchParams.has("album") || url.searchParams.has("search")
+  ) throw new Error(`${selector} did not load the homepage: ${request.url()}`);
+  await response.finished();
+  await page.waitForFunction(() =>
+    document.querySelector(".content")?.getAttribute("aria-busy") === "false"
+    && !document.querySelector(".skeleton-grid")
+    && document.querySelector("[data-image-id]")
+  );
+  const shellPreserved = await shell.evaluate((element) => element.isConnected);
+  await shell.dispose();
+  if (!shellPreserved) throw new Error(`${selector} navigation replaced the application shell`);
+  if (target.name === "mobile") {
+    await page.locator(".mobile-nav-layer").waitFor({ state: "detached" });
+  }
+  return { selector, shellPreserved, status: response.status(), request: url.pathname + url.search };
+}
+
+async function revealSimilarToolbar(page) {
+  const informationToolbar = await page.locator(".viewer-details-header").evaluate((header) => ({
+    inert: header.inert,
+    visible: header.dataset.visible,
+  }));
+  if (!informationToolbar.inert || informationToolbar.visible !== "false") {
+    throw new Error(`details toolbar appeared over image information: ${JSON.stringify(informationToolbar)}`);
+  }
+  await page.locator(".viewer-similar-heading").waitFor({ state: "visible" });
+  await page.locator(".viewer-similar-section").evaluate((section) => {
+    section.scrollIntoView({ block: "start", behavior: "instant" });
+  });
+  await page.waitForFunction(() => {
+    const header = document.querySelector(".viewer-details-header");
+    return header && !header.inert && header.dataset.visible === "true";
+  });
+}
 
 try {
   const targets = [
@@ -47,20 +140,19 @@ try {
     await page.screenshot({ path: `/tmp/pixhelf-${target.name}.png` });
 
     const layout = await page.evaluate(() => {
-      const path = document.querySelector(".desktop-sidebar .sidebar-gallery-path");
-      const count = document.querySelector(".desktop-sidebar .sidebar-gallery-count");
       const search = document.querySelector(".topbar-search");
       const topbar = document.querySelector(".topbar");
       const sidebarStatus = document.querySelector(".desktop-sidebar .sidebar-status");
-      const sidebarMeta = document.querySelector(".desktop-sidebar .sidebar-gallery-meta");
-      const pathRect = path?.getBoundingClientRect();
-      const countRect = count?.getBoundingClientRect();
       const searchRect = search?.getBoundingClientRect();
       const exploreRect = document.querySelector(".explore-toggle")?.getBoundingClientRect();
+      const home = document.querySelector(".topbar-home");
+      const homeRect = home?.getBoundingClientRect();
       const topbarRect = topbar?.getBoundingClientRect();
       const statusRect = sidebarStatus?.getBoundingClientRect();
-      const metaRect = sidebarMeta?.getBoundingClientRect();
       const galleryToggle = document.querySelector(".gallery-sidebar-toggle");
+      const toggleRect = galleryToggle?.getBoundingClientRect();
+      const brandRect = document.querySelector(".brand-lockup")?.getBoundingClientRect();
+      const brandImage = document.querySelector("img.brand-mark");
       return {
         viewport: [innerWidth, innerHeight],
         bodyWidth: document.documentElement.scrollWidth,
@@ -79,10 +171,33 @@ try {
         dialogs: document.querySelectorAll('[role="dialog"]').length,
         topbarPosition: topbar ? getComputedStyle(topbar).position : "",
         topbarTop: topbarRect?.top ?? -1,
+        topbarHeight: topbarRect?.height ?? -1,
+        topbarSurfaceLeft: topbar ? Number.parseFloat(getComputedStyle(topbar, "::before").left) : -1,
+        sidebarTop: document.querySelector(".desktop-sidebar")?.getBoundingClientRect().top ?? -1,
         topbarSearches: document.querySelectorAll(
           ".topbar-actions > .topbar-search",
         ).length,
+        brandMarks: document.querySelectorAll(".brand-mark").length,
         brandHomeLinks: document.querySelectorAll('a.brand[href="/"]').length,
+        brandText: document.querySelector(".brand")?.textContent?.trim() ?? "",
+        brandTitle: document.querySelector(".brand")?.getAttribute("title"),
+        brandLabel: document.querySelector(".brand")?.getAttribute("aria-label"),
+        brandName: document.querySelector(".brand-name")?.textContent,
+        brandNameHref: document.querySelector(".brand-name")?.closest("a")?.getAttribute("href"),
+        brandVersion: document.querySelector(".brand-version")?.textContent,
+        brandVersionSize: Number.parseFloat(getComputedStyle(document.querySelector(".brand-version")).fontSize),
+        brandRepository: document.querySelector(".brand-version")?.getAttribute("href"),
+        sidebarBrands: document.querySelectorAll(".sidebar .brand-lockup").length,
+        topbarBrands: document.querySelectorAll(".topbar .brand-lockup").length,
+        brandDisplayed: Boolean(brandRect?.width),
+        topbarHomeButtons: document.querySelectorAll(".topbar-actions > button.topbar-home").length,
+        leadingHomeButtons: document.querySelectorAll(".topbar-leading .topbar-home, .topbar-home-slot").length,
+        homeLabel: home?.getAttribute("aria-label"),
+        homeExploreGap: homeRect && exploreRect ? exploreRect.left - homeRect.right : -1,
+        homeStatic: home ? getComputedStyle(home).transitionProperty === "none" : false,
+        brandLoaded: Boolean(brandImage?.complete && brandImage.naturalWidth > 0),
+        brandMenuGap: brandRect && toggleRect ? brandRect.left - toggleRect.right : -1,
+        sidebarControlSlots: document.querySelectorAll(".sidebar-control-slot").length,
         gallerySidebarToggles: document.querySelectorAll(".gallery-sidebar-toggle").length,
         galleryToggleOpacity: galleryToggle
           ? Number.parseFloat(getComputedStyle(galleryToggle).opacity)
@@ -109,13 +224,7 @@ try {
         cardNameWhiteSpace: getComputedStyle(
           document.querySelector(".image-name"),
         ).whiteSpace,
-        sidebarMetaBottomGap: metaRect ? innerHeight - metaRect.bottom : -1,
-        sidebarMetaStatusGap: statusRect && metaRect ? metaRect.top - statusRect.bottom : -1,
-        galleryPath: path?.textContent ?? "",
-        galleryCount: count?.textContent ?? "",
-        galleryMetaRowDelta: pathRect && countRect
-          ? Math.abs(pathRect.top - countRect.top)
-          : -1,
+        sidebarStatusBottomGap: statusRect ? innerHeight - statusRect.bottom : -1,
       };
     });
 
@@ -326,28 +435,6 @@ try {
       zoomControls: document.querySelectorAll(
         ".viewer-zoom-controls, .viewer-zoom-value",
       ).length,
-      scrollCueArrowOnly: (() => {
-        const cue = document.querySelector(".viewer-scroll-cue");
-        return cue?.textContent?.trim() === ""
-          && cue.children.length === 1
-          && cue.firstElementChild?.tagName === "svg"
-          && cue.querySelectorAll("path").length === 2;
-      })(),
-      scrollCuePresentation: (() => {
-        const cue = document.querySelector(".viewer-scroll-cue");
-        if (!cue) return null;
-        const style = getComputedStyle(cue);
-        const cueBounds = cue.getBoundingClientRect();
-        return {
-          surfaced: style.backgroundColor !== "rgba(0, 0, 0, 0)"
-            || style.backgroundImage !== "none",
-          borderless: Number.parseFloat(style.borderTopWidth) === 0,
-          glass: style.backdropFilter !== "none" || style.webkitBackdropFilter !== "none",
-          noInsetRing: !style.boxShadow.includes("inset"),
-          circular: Number.parseFloat(style.borderTopLeftRadius) >= cueBounds.height / 2 - 1,
-          width: cueBounds.width,
-        };
-      })(),
       navigationGlass: [...document.querySelectorAll(".viewer-nav")].every((control) => {
         const style = getComputedStyle(control);
         return Number.parseFloat(style.borderTopWidth) === 0
@@ -444,7 +531,7 @@ try {
         ).size,
         previewRequests: resourcePaths.filter((path) => path.endsWith("/preview")).length,
         rootInert: document.querySelector("#root")?.inert ?? false,
-        closeFocused: document.activeElement?.classList.contains("viewer-close") ?? false,
+        viewerFocused: document.activeElement === overlay,
         mediaContained: media
           ? media.left >= -1 && media.top >= -1 && media.right <= innerWidth + 1 &&
             media.bottom <= innerHeight + 1
@@ -455,10 +542,17 @@ try {
             details.height >= innerHeight - 1 &&
             overlay.scrollHeight >= innerHeight * 2 - 1
           : false,
-        position: document.querySelector(".viewer-details-heading span")?.textContent ?? "",
       };
     });
     Object.assign(viewer, viewerChrome);
+    await page.keyboard.press("Shift");
+    const initialFocus = await page.locator(".image-viewer").evaluate((overlay) => ({
+      onViewer: document.activeElement === overlay,
+      visibleControlFocusRings: overlay.querySelectorAll(".viewer-control:focus-visible").length,
+    }));
+    if (!initialFocus.onViewer || initialFocus.visibleControlFocusRings !== 0) {
+      throw new Error(`viewer opening selected a control: ${JSON.stringify(initialFocus)}`);
+    }
     const sideButtonStart = await page.evaluate(() => {
       const activeId = document.querySelector(".image-viewer")?.getAttribute("data-image-id") ?? "";
       const ids = [...document.querySelectorAll(".masonry .image-card")]
@@ -565,8 +659,7 @@ try {
         focusedOnViewer: document.activeElement === overlay,
         visibleControlFocusRings: document.querySelectorAll(
           ".image-viewer .viewer-control:focus-visible, "
-          + ".image-viewer .viewer-nav:focus-visible, "
-          + ".image-viewer .viewer-scroll-cue:focus-visible",
+          + ".image-viewer .viewer-nav:focus-visible",
         ).length,
         mediaAnimations: media?.getAnimations().length ?? -1,
         expectedId,
@@ -703,8 +796,7 @@ try {
         parkedOnViewer: document.activeElement === overlay,
         visibleControlFocusRings: document.querySelectorAll(
           ".image-viewer .viewer-control:focus-visible, "
-          + ".image-viewer .viewer-nav:focus-visible, "
-          + ".image-viewer .viewer-scroll-cue:focus-visible",
+          + ".image-viewer .viewer-nav:focus-visible",
         ).length,
       };
     });
@@ -732,7 +824,7 @@ try {
           detailsReachedByWheel: (overlay?.scrollTop ?? 0) > innerHeight * 0.5,
           pageAfterDetails: overlay?.getAttribute("data-page") ?? "",
           detailsName: details?.getAttribute("data-details-image-name") ?? "",
-          detailsHeading: document.querySelector(".viewer-details-heading h2")?.textContent ?? "",
+          detailsLabel: details?.getAttribute("aria-label") ?? "",
           stageScrolledAway: stage ? stage.top < -innerHeight * 0.5 : false,
           detailsVisible: detailsRect
             ? detailsRect.top < innerHeight * 0.5 && detailsRect.bottom > innerHeight * 0.5
@@ -742,6 +834,7 @@ try {
           ).length,
         };
       }));
+      await revealSimilarToolbar(page);
       await page.locator(".viewer-details-return").click();
       await page.waitForFunction(() =>
         (document.querySelector(".image-viewer")?.scrollTop ?? 1) < 1
@@ -751,6 +844,7 @@ try {
       await page.waitForTimeout(80);
       Object.assign(viewer, await page.locator(".image-viewer").evaluate((overlay) => ({
         pageAfterReturn: overlay.dataset.page ?? "",
+        returnFocusOnViewer: document.activeElement === overlay,
         returnWheelHandoffLocked:
           overlay.scrollTop < 1 && overlay.getAttribute("data-zoomed") === "false",
       })));
@@ -909,6 +1003,42 @@ try {
         (overlay) => overlay.isConnected && overlay.dataset.page === "image",
       );
 
+      const readViewerScroll = () => page.locator(".image-viewer").evaluate((overlay) => overlay.scrollTop);
+      const returnToImage = async () => {
+        await page.keyboard.press("PageUp");
+        await page.waitForFunction(() => document.querySelector(".image-viewer")?.scrollTop < 1);
+      };
+      viewer.freeScrollStops = [];
+      for (const [distance, endEvent] of [[60, "touchEnd"], [240, "touchEnd"], [240, "touchCancel"]]) {
+        await dispatchTouch("touchStart", [{ id: 37, x: 195, y: 640 }]);
+        await page.waitForTimeout(32);
+        await dispatchTouch("touchMove", [{ id: 37, x: 195, y: 640 - distance }]);
+        await page.waitForTimeout(180);
+        const beforeRelease = await readViewerScroll();
+        await dispatchTouch(endEvent, []);
+        await page.waitForTimeout(420);
+        const afterRelease = await readViewerScroll();
+        const result = { distance, endEvent, beforeRelease, afterRelease };
+        viewer.freeScrollStops.push(result);
+        if (
+          beforeRelease < distance * 0.6 || beforeRelease > distance + 2
+          || Math.abs(afterRelease - beforeRelease) > 2
+        ) {
+          throw new Error(`viewer snapped after a paused drag: ${JSON.stringify(result)}`);
+        }
+        if (endEvent === "touchCancel") {
+          await dispatchTouch("touchStart", [{ id: 38, x: 145, y: 200 }, { id: 39, x: 245, y: 200 }]);
+          await page.waitForTimeout(32);
+          await dispatchTouch("touchMove", [{ id: 38, x: 120, y: 200 }, { id: 39, x: 270, y: 200 }]);
+          await dispatchTouch("touchEnd", []);
+          await page.waitForTimeout(420);
+          if (Math.abs(await readViewerScroll() - afterRelease) > 2) {
+            throw new Error("viewer snapped after a pinch between the image and details");
+          }
+        }
+        await returnToImage();
+      }
+
       await dispatchTouch("touchStart", [{ id: 36, x: 195, y: 690 }]);
       await page.waitForTimeout(32);
       await dispatchTouch("touchMove", [{ id: 36, x: 195, y: 510 }]);
@@ -925,8 +1055,8 @@ try {
       viewer.pageGestureIgnoredHorizontal =
         await page.locator(".image-viewer").getAttribute("data-image-name")
           === titleDuringPageGesture;
-      await dispatchTouch("touchMove", [{ id: 36, x: 195, y: 360 }]);
-      await page.waitForTimeout(32);
+      await dispatchTouch("touchMove", [{ id: 36, x: 195, y: 130 }]);
+      await page.waitForTimeout(180);
       await dispatchTouch("touchEnd", []);
       await page.waitForFunction(() =>
         (document.querySelector(".image-viewer")?.scrollTop ?? 0) > innerHeight * 0.5
@@ -942,7 +1072,7 @@ try {
           detailsReachedBySwipe: (overlay?.scrollTop ?? 0) > innerHeight * 0.5,
           pageAfterDetails: overlay?.getAttribute("data-page") ?? "",
           detailsName: details?.getAttribute("data-details-image-name") ?? "",
-          detailsHeading: document.querySelector(".viewer-details-heading h2")?.textContent ?? "",
+          detailsLabel: details?.getAttribute("aria-label") ?? "",
           stageScrolledAway: stage ? stage.top < -innerHeight * 0.5 : false,
           detailsVisible: detailsRect
             ? detailsRect.top < innerHeight * 0.5 && detailsRect.bottom > innerHeight * 0.5
@@ -952,12 +1082,16 @@ try {
           ).length,
         };
       }));
+      await revealSimilarToolbar(page);
       await page.locator(".viewer-details-return").click();
       await page.waitForFunction(() =>
         (document.querySelector(".image-viewer")?.scrollTop ?? 1) < 1
       );
       viewer.returnedToImage = true;
-      viewer.pageAfterReturn = await page.locator(".image-viewer").getAttribute("data-page");
+      Object.assign(viewer, await page.locator(".image-viewer").evaluate((overlay) => ({
+        pageAfterReturn: overlay.dataset.page ?? "",
+        returnFocusOnViewer: document.activeElement === overlay,
+      })));
 
       await dispatchTouch("touchStart", [{ id: 41, x: 195, y: 210 }]);
       await page.waitForTimeout(32);
@@ -1288,31 +1422,22 @@ try {
       secondExploreUrl.searchParams.get("seed") ?? "",
     ]);
 
-    const homeRequest = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return url.pathname === "/api/images" &&
-        url.searchParams.get("sort") === "name-asc" &&
-        url.searchParams.get("offset") === "0" &&
-        !url.searchParams.has("album") &&
-        !url.searchParams.has("search");
-    });
-    await page.locator("a.brand").click();
-    const homeResponse = await (await homeRequest).response();
-    await homeResponse?.finished();
+    const fromExplore = await checkHomeNavigation(page, target, ".topbar-home");
     await page.waitForFunction(() =>
       document.querySelector(".explore-toggle")?.getAttribute("aria-pressed") === "false" &&
       document.querySelector(".desktop-sidebar .album-link")?.classList.contains("active") &&
       document.querySelector("#gallery-search-field input")?.value === ""
     , undefined, { timeout: 60_000 });
     const homeNavigation = await page.evaluate(() => ({
-      href: document.querySelector("a.brand")?.getAttribute("href"),
-      galleryPath: document.querySelector(
-        ".desktop-sidebar .sidebar-gallery-path",
-      )?.textContent,
       allImagesActive: document.querySelector(".desktop-sidebar .album-link")
         ?.classList.contains("active") ?? false,
       searchValue: document.querySelector("#gallery-search-field input")?.value,
     }));
+    homeNavigation.fromExplore = fromExplore;
+    homeNavigation.repeatedAtHome = [];
+    for (const selector of [".brand-mark", ".brand-name", ".topbar-home", ".topbar-home"]) {
+      homeNavigation.repeatedAtHome.push(await checkHomeNavigation(page, target, selector));
+    }
 
     let mobileCardNames = null;
     if (target.name === "mobile") {
@@ -1406,12 +1531,9 @@ try {
       const toggleBefore = await page.locator(".gallery-sidebar-toggle").boundingBox();
       const firstAlbumBefore = await page.locator(".desktop-sidebar .album-link").first()
         .boundingBox();
-      const controlSlotBefore = await page.locator(".desktop-sidebar .sidebar-control-slot")
-        .boundingBox();
-      const metaBefore = await page.locator(".desktop-sidebar .sidebar-gallery-meta")
-        .boundingBox();
+      const topbarBefore = await page.locator(".topbar").boundingBox();
       const galleryBefore = await page.locator(".masonry").boundingBox();
-      await page.locator(".gallery-sidebar-toggle").click();
+      const collapseMotion = await closeNavigation(page);
       await page.waitForFunction(() =>
         document.querySelector(".app-shell")?.getAttribute("data-sidebar-collapsed") === "true"
       );
@@ -1429,9 +1551,6 @@ try {
         statusVisibility: getComputedStyle(
           document.querySelector(".desktop-sidebar .sidebar-status"),
         ).visibility,
-        metaVisibility: getComputedStyle(
-          document.querySelector(".desktop-sidebar .sidebar-gallery-meta"),
-        ).visibility,
         ariaHidden: document.querySelector(".desktop-sidebar")?.getAttribute("aria-hidden"),
         stored: localStorage.getItem("pixhelf.sidebar-collapsed"),
         columns: Number(
@@ -1442,28 +1561,29 @@ try {
         progressPanels: document.querySelectorAll(".sidebar-progress").length,
         inlineToggles: document.querySelectorAll(".desktop-sidebar-inline-toggle").length,
         galleryToggles: document.querySelectorAll(".gallery-sidebar-toggle").length,
+        topbarSurfaceLeft: Number.parseFloat(getComputedStyle(document.querySelector(".topbar"), "::before").left),
+        brandVisibility: getComputedStyle(document.querySelector(".desktop-sidebar .brand-lockup")).visibility,
+        brandInert: Boolean(document.querySelector(".desktop-sidebar .brand")?.closest("[inert]")),
       }));
+      desktopSidebar.collapseMotion = collapseMotion;
       desktopSidebar.contentBefore = contentBefore?.x ?? -1;
       desktopSidebar.contentCollapsed = contentCollapsed?.x ?? -1;
       desktopSidebar.expandedToggleWidth = toggleBefore?.width ?? -1;
       desktopSidebar.expandedToggleHeight = toggleBefore?.height ?? -1;
       desktopSidebar.collapsedToggleWidth = toggleCollapsed?.width ?? -1;
       desktopSidebar.collapsedToggleHeight = toggleCollapsed?.height ?? -1;
-      desktopSidebar.albumClearance = controlSlotBefore && firstAlbumBefore
-        ? firstAlbumBefore.y - (controlSlotBefore.y + controlSlotBefore.height)
+      desktopSidebar.albumClearance = topbarBefore && firstAlbumBefore
+        ? firstAlbumBefore.y - (topbarBefore.y + topbarBefore.height)
         : -1;
-      desktopSidebar.toggleControlInsetX = toggleBefore && controlSlotBefore
-        ? toggleBefore.x - controlSlotBefore.x
+      desktopSidebar.toggleHeaderInsetX = toggleBefore && topbarBefore
+        ? toggleBefore.x - topbarBefore.x
         : -1;
-      desktopSidebar.toggleControlInsetY = toggleBefore && controlSlotBefore
-        ? toggleBefore.y - controlSlotBefore.y
+      desktopSidebar.toggleHeaderInsetY = toggleBefore && topbarBefore
+        ? toggleBefore.y - topbarBefore.y
         : -1;
       desktopSidebar.stationaryToggleDelta = toggleBefore && toggleCollapsed
         ? Math.hypot(toggleBefore.x - toggleCollapsed.x, toggleBefore.y - toggleCollapsed.y)
         : -1;
-      desktopSidebar.metaIsBelowAlbums = metaBefore && firstAlbumBefore
-        ? metaBefore.y > firstAlbumBefore.y + firstAlbumBefore.height
-        : false;
       desktopSidebar.expandedGalleryInsetX = toggleBefore && galleryBefore
         ? toggleBefore.x - galleryBefore.x
         : -1;
@@ -1507,6 +1627,8 @@ try {
         : -1;
       desktopSidebar.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
+      desktopSidebar.restoredBrandRight = await page.locator(".desktop-sidebar .brand-lockup")
+        .evaluate((brand) => brand.getBoundingClientRect().right);
     } else {
       await page.evaluate(() => window.scrollTo({ top: 320, behavior: "auto" }));
       await page.waitForTimeout(100);
@@ -1520,21 +1642,21 @@ try {
       const navigationToggleOpen = await page.locator(".gallery-sidebar-toggle").boundingBox();
       const navigationLayer = await page.locator(".mobile-nav-layer").boundingBox();
       const navigationDrawer = await page.locator(".mobile-sidebar").boundingBox();
-      const controlSlot = await page.locator(".mobile-sidebar .sidebar-control-slot").boundingBox();
-      const mobileMeta = await page.locator(".mobile-sidebar .sidebar-gallery-meta").boundingBox();
+      const firstAlbum = await page.locator(".mobile-sidebar .album-link").first().boundingBox();
       const mobileStatus = await page.locator(".mobile-sidebar .sidebar-status").boundingBox();
       const topbar = await page.locator(".topbar").boundingBox();
       mobileNavigation = {
         opened: await page.locator(".mobile-nav-layer").count(),
+        brandVisible: await page.locator(".mobile-sidebar .brand").isVisible(),
         fixedTop: fixedTop?.y ?? -1,
         expanded: await page.locator(".gallery-sidebar-toggle").getAttribute("aria-expanded"),
         internalToggles: await page.locator(".mobile-sidebar .sidebar-toggle-button").count(),
         metaRows: await page.locator(".mobile-sidebar .sidebar-gallery-meta").count(),
-        galleryPath: await page.locator(".mobile-sidebar .sidebar-gallery-path").textContent(),
-        galleryCount: await page.locator(".mobile-sidebar .sidebar-gallery-count").textContent(),
         layerTopGap: navigationLayer && topbar
-          ? navigationLayer.y - (topbar.y + topbar.height)
+          ? navigationLayer.y - topbar.y
           : -1,
+        topbarSurfaceLeft: await page.locator(".topbar").evaluate((header) =>
+          Number.parseFloat(getComputedStyle(header, "::before").left)),
         toggleWidth: navigationToggleBefore?.width ?? -1,
         toggleHeight: navigationToggleBefore?.height ?? -1,
         expandedToggleWidth: navigationToggleOpen?.width ?? -1,
@@ -1558,23 +1680,68 @@ try {
             navigationToggleBefore.y - navigationToggleOpen.y,
           )
           : -1,
-        toggleControlInsetX: navigationToggleOpen && controlSlot
-          ? navigationToggleOpen.x - controlSlot.x
+        toggleHeaderInsetX: navigationToggleOpen && topbar
+          ? navigationToggleOpen.x - topbar.x
           : -1,
-        toggleControlInsetY: navigationToggleOpen && controlSlot
-          ? navigationToggleOpen.y - controlSlot.y
+        toggleHeaderInsetY: navigationToggleOpen && topbar
+          ? navigationToggleOpen.y - topbar.y
           : -1,
-        metaBottomGap: mobileMeta ? target.height - (mobileMeta.y + mobileMeta.height) : -1,
-        metaStatusGap: mobileMeta && mobileStatus
-          ? mobileMeta.y - (mobileStatus.y + mobileStatus.height)
+        albumClearance: firstAlbum && topbar
+          ? firstAlbum.y - (topbar.y + topbar.height)
           : -1,
+        statusBottomGap: mobileStatus ? target.height - (mobileStatus.y + mobileStatus.height) : -1,
         drawerWidth: navigationDrawer?.width ?? -1,
       };
-      await page.locator(".gallery-sidebar-toggle").click();
+      mobileNavigation.narrowLayouts = [];
+      for (const width of [320, 360, 375, target.width]) {
+        await page.setViewportSize({ width, height: target.height });
+        await page.waitForFunction(() => {
+          const header = document.querySelector(".topbar");
+          const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
+          return Math.abs(Number.parseFloat(getComputedStyle(header, "::before").left) - drawer.right) < 1;
+        });
+        const dimensions = await page.evaluate(() => {
+          const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
+          const tools = document.querySelector(".topbar-actions").getBoundingClientRect();
+          const brand = document.querySelector(".mobile-sidebar .brand-lockup").getBoundingClientRect();
+          return {
+            width: innerWidth,
+            drawerWidth: drawer.width,
+            toolsClearance: tools.left - drawer.right,
+            brandClearance: drawer.right - brand.right,
+            statusReadable: [...document.querySelectorAll(".mobile-sidebar .sidebar-status span, .mobile-sidebar .sidebar-status strong")]
+              .every((element) => element.scrollWidth <= element.clientWidth + 1),
+            toolsClickable: [...document.querySelectorAll(".topbar-actions button")].filter((button) => {
+              const rect = button.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0 && !button.closest("[inert]");
+            }).every((button) => {
+              const rect = button.getBoundingClientRect();
+              return button.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+            }),
+            brandClickable: [...document.querySelectorAll(".mobile-sidebar .brand-mark, .mobile-sidebar .brand-name, .mobile-sidebar .brand-version")].every((element) => {
+              const link = element.closest("a");
+              const rect = element.getBoundingClientRect();
+              return link.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+            }),
+            overflow: document.documentElement.scrollWidth > innerWidth,
+          };
+        });
+        mobileNavigation.narrowLayouts.push(dimensions);
+        if (
+          dimensions.toolsClearance < 5 || dimensions.brandClearance < 8
+          || !dimensions.toolsClickable || !dimensions.brandClickable
+          || !dimensions.statusReadable || dimensions.overflow
+        ) {
+          throw new Error(`mobile drawer overlaps the header: ${JSON.stringify(dimensions)}`);
+        }
+        await page.screenshot({ path: `/tmp/pixhelf-drawer-${width}.png` });
+      }
+      mobileNavigation.collapseMotion = await closeNavigation(page);
       await page.waitForSelector(".mobile-nav-layer", { state: "detached" });
       mobileNavigation.closed = await page.locator(".mobile-nav-layer").count();
       mobileNavigation.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
+      mobileNavigation.closedBrandVisible = await page.locator(".desktop-sidebar .brand").isVisible();
     }
 
     const result = {
@@ -1628,11 +1795,10 @@ try {
       viewer.detailsToolbarControls !== 5 ||
       !viewer.detailsToolbarUnified ||
       viewer.detailsInlineActions !== 0 ||
-      viewer.scrollCues !== 1 ||
+      viewer.scrollCues !== 0 ||
       viewer.headingModules !== 0 ||
       !viewer.unifiedControls ||
       viewer.zoomControls !== 0 ||
-      !viewer.scrollCueArrowOnly ||
       viewer.drawerArtifacts !== 0 ||
       viewer.scrollMode !== "continuous" ||
       !viewer.continuousLayout ||
@@ -1643,9 +1809,9 @@ try {
       viewer.fullscreenLabel !== "退出全屏" ||
       !viewer.fullscreenExited ||
       !viewer.rootInert ||
-      !viewer.closeFocused ||
+      !viewer.viewerFocused ||
+      !viewer.returnFocusOnViewer ||
       !viewer.mediaContained ||
-      !viewer.position.includes("/") ||
       viewer.zoomed !== "true" ||
       Math.abs(viewer.zoomScale - 1.5) > 0.02 ||
       !viewer.zoomKeptImagePage ||
@@ -1662,13 +1828,6 @@ try {
       viewer.switchPerformance.mediaAnimations !== 0 ||
       viewer.switchPerformance.dispatchDuration > 80 ||
       viewer.switchPerformance.firstFrameDuration > 100 ||
-      !viewerChrome.scrollCuePresentation?.surfaced ||
-      !viewerChrome.scrollCuePresentation?.borderless ||
-      !viewerChrome.scrollCuePresentation?.glass ||
-      !viewerChrome.scrollCuePresentation?.noInsetRing ||
-      !viewerChrome.scrollCuePresentation?.circular ||
-      viewerChrome.scrollCuePresentation.width < 44 ||
-      viewerChrome.scrollCuePresentation.width > 52 ||
       !viewerChrome.navigationGlass ||
       viewerChrome.floatingToolbar?.mode !== "floating" ||
       !viewerChrome.floatingToolbar?.headerTransparent ||
@@ -1678,7 +1837,7 @@ try {
         viewer.detailsName !== viewer.keyboardNavigation ||
         !viewer.zoomWheelHandoffLocked ||
         viewer.pageAfterDetails !== "details" ||
-        viewer.detailsHeading !== "图片详情" ||
+        viewer.detailsLabel !== "图片详情" ||
         !viewer.stageScrolledAway ||
         !viewer.detailsVisible ||
         viewer.drawerArtifactsAfterScroll !== 0 ||
@@ -1728,9 +1887,9 @@ try {
         !viewer.pageGestureIgnoredHorizontal ||
         !viewer.detailsFollowedTouch ||
         !viewer.detailsReachedBySwipe ||
-        viewer.pageAfterDetails !== "details" ||
+        viewer.pageAfterDetails !== "transition" ||
         viewer.detailsName !== viewer.shortSwipeNavigation.imageName ||
-        viewer.detailsHeading !== "图片详情" ||
+        viewer.detailsLabel !== "图片详情" ||
         !viewer.stageScrolledAway ||
         !viewer.detailsVisible ||
         viewer.drawerArtifactsAfterScroll !== 0 ||
@@ -1766,16 +1925,37 @@ try {
       exploration.firstSeed === exploration.secondSeed ||
       exploration.exploreMarker !== "none" ||
       exploration.searchMarker !== "none" ||
-      homeNavigation.href !== "/" ||
-      homeNavigation.galleryPath !== "/" ||
       !homeNavigation.allImagesActive ||
       homeNavigation.searchValue !== "" ||
       layout.topbarSearches !== 1 ||
+      Math.abs(layout.topbarHeight - (target.name === "mobile" ? 52 : 54)) > 1 ||
+      layout.brandMarks !== 1 ||
       layout.brandHomeLinks !== 1 ||
+      layout.brandText !== "Pixhelf" ||
+      layout.brandTitle !== "主页" ||
+      layout.brandLabel !== "主页" ||
+      layout.brandName?.trim() !== "Pixhelf" ||
+      layout.brandNameHref !== "/" ||
+      layout.brandVersion !== `v${appVersion}` ||
+      layout.brandVersionSize !== 11 ||
+      layout.brandRepository !== "https://github.com/eureka6/Pixhelf" ||
+      layout.sidebarBrands !== 1 ||
+      layout.topbarBrands !== 0 ||
+      layout.brandDisplayed !== (target.name === "desktop") ||
+      layout.topbarHomeButtons !== 1 ||
+      layout.leadingHomeButtons !== 0 ||
+      layout.homeLabel !== "主页" ||
+      layout.homeExploreGap < 4 ||
+      layout.homeExploreGap > 8 ||
+      !layout.homeStatic ||
+      !layout.brandLoaded ||
+      (target.name === "desktop" && (
+        layout.brandMenuGap < 8 || layout.brandMenuGap > 12
+      )) ||
+      layout.sidebarControlSlots !== 0 ||
       layout.gallerySidebarToggles !== 1 ||
-      layout.galleryToggleOpacity < 0.4 ||
-      layout.galleryToggleOpacity > 0.75 ||
-      layout.topbarSidebarToggles !== 0 ||
+      layout.galleryToggleOpacity !== 1 ||
+      layout.topbarSidebarToggles !== 1 ||
       layout.contentSearches !== 0 ||
       layout.contentInfoRows !== 0 ||
       layout.sortControls !== 0 ||
@@ -1785,7 +1965,7 @@ try {
       layout.exploreSearchGap < 4 ||
       layout.exploreSearchGap > 8 ||
       layout.sidebarStatuses !== 1 ||
-      layout.sidebarGalleryMetas !== 1 ||
+      layout.sidebarGalleryMetas !== 0 ||
       (target.name === "desktop" && (
         !resizeStability ||
         !resizeStability.cardsPreserved ||
@@ -1798,47 +1978,47 @@ try {
         resizeStability.anchorDeltas.length !== 4 ||
         resizeStability.anchorDeltas.some((delta) => !Number.isFinite(delta) || delta > 2)
       )) ||
-      !layout.galleryPath.startsWith("/") ||
-      !layout.galleryCount.endsWith("张图片") ||
-      layout.galleryMetaRowDelta < 0 ||
-      layout.galleryMetaRowDelta > 2 ||
       (target.name === "desktop" && (
         !desktopSidebar ||
         desktopSidebar.expanded !== "false" ||
+        desktopSidebar.brandVisibility !== "hidden" ||
+        !desktopSidebar.brandInert ||
+        desktopSidebar.restoredBrandRight <= 0 ||
         desktopSidebar.visibility !== "visible" ||
         desktopSidebar.navigationVisibility !== "hidden" ||
         desktopSidebar.statusVisibility !== "hidden" ||
-        desktopSidebar.metaVisibility !== "hidden" ||
         desktopSidebar.ariaHidden !== "true" ||
         desktopSidebar.stored !== "true" ||
-        desktopSidebar.columns !== 6 ||
+        desktopSidebar.columns !== 5 ||
         desktopSidebar.redundantHeadings !== 0 ||
         desktopSidebar.pathDetails !== 0 ||
         desktopSidebar.progressPanels !== 0 ||
         desktopSidebar.inlineToggles !== 0 ||
         desktopSidebar.galleryToggles !== 1 ||
-        Math.abs(desktopSidebar.expandedToggleWidth - (desktopSidebar.contentBefore - 20)) > 1 ||
-        Math.abs(desktopSidebar.expandedToggleHeight - 36) > 1 ||
+        Math.abs(desktopSidebar.expandedToggleWidth - 40) > 1 ||
+        Math.abs(desktopSidebar.expandedToggleHeight - 40) > 1 ||
         Math.abs(desktopSidebar.collapsedToggleWidth - 40) > 1 ||
-        Math.abs(desktopSidebar.collapsedToggleHeight - 36) > 1 ||
+        Math.abs(desktopSidebar.collapsedToggleHeight - 40) > 1 ||
         desktopSidebar.albumClearance < 8 ||
-        desktopSidebar.toggleControlInsetX < 8 ||
-        desktopSidebar.toggleControlInsetX > 12 ||
-        desktopSidebar.toggleControlInsetY < 4 ||
-        desktopSidebar.toggleControlInsetY > 8 ||
+        desktopSidebar.albumClearance > 12 ||
+        desktopSidebar.toggleHeaderInsetX < 16 ||
+        desktopSidebar.toggleHeaderInsetX > 20 ||
+        desktopSidebar.toggleHeaderInsetY < 5 ||
+        desktopSidebar.toggleHeaderInsetY > 9 ||
+        Math.abs(layout.sidebarTop) > 1 ||
+        Math.abs(layout.topbarSurfaceLeft - desktopSidebar.contentBefore) > 1 ||
+        Math.abs(desktopSidebar.topbarSurfaceLeft) > 1 ||
         desktopSidebar.stationaryToggleDelta < 0 ||
         desktopSidebar.stationaryToggleDelta > 1 ||
-        !desktopSidebar.metaIsBelowAlbums ||
         desktopSidebar.expandedGalleryOverlap ||
-        !desktopSidebar.galleryOverlap ||
+        desktopSidebar.galleryOverlap ||
         Math.abs(desktopSidebar.sidebarRight) > 1 ||
         desktopSidebar.contentBefore < 200 ||
         Math.abs(desktopSidebar.contentCollapsed) > 1 ||
         desktopSidebar.restoredToggleDelta < 0 ||
         desktopSidebar.restoredToggleDelta > 1 ||
-        layout.sidebarMetaBottomGap < 0 ||
-        layout.sidebarMetaBottomGap > 1 ||
-        Math.abs(layout.sidebarMetaStatusGap) > 1 ||
+        layout.sidebarStatusBottomGap < 0 ||
+        layout.sidebarStatusBottomGap > 1 ||
         desktopSidebar.restored !== "true"
       )) ||
       (target.name === "mobile" && (
@@ -1849,24 +2029,27 @@ try {
         mobileNavigation?.opened !== 1 ||
         Math.abs(mobileNavigation.fixedTop) > 1 ||
         mobileNavigation.expanded !== "true" ||
+        !mobileNavigation.brandVisible ||
+        mobileNavigation.closedBrandVisible ||
         mobileNavigation.internalToggles !== 0 ||
-        mobileNavigation.metaRows !== 1 ||
-        !mobileNavigation.galleryPath?.startsWith("/") ||
-        !mobileNavigation.galleryCount?.endsWith("张图片") ||
+        mobileNavigation.metaRows !== 0 ||
         Math.abs(mobileNavigation.layerTopGap) > 1 ||
-        Math.abs(mobileNavigation.toggleWidth - 40) > 1 ||
-        Math.abs(mobileNavigation.toggleHeight - 36) > 1 ||
-        Math.abs(mobileNavigation.expandedToggleWidth - (mobileNavigation.drawerWidth - 20)) > 1 ||
-        !mobileNavigation.galleryOverlap ||
+        Math.abs(layout.topbarSurfaceLeft) > 1 ||
+        Math.abs(mobileNavigation.topbarSurfaceLeft - mobileNavigation.drawerWidth) > 1 ||
+        Math.abs(mobileNavigation.toggleWidth - 42) > 1 ||
+        Math.abs(mobileNavigation.toggleHeight - 42) > 1 ||
+        Math.abs(mobileNavigation.expandedToggleWidth - 42) > 1 ||
+        mobileNavigation.galleryOverlap ||
         mobileNavigation.stationaryToggleDelta < 0 ||
         mobileNavigation.stationaryToggleDelta > 1 ||
-        mobileNavigation.toggleControlInsetX < 8 ||
-        mobileNavigation.toggleControlInsetX > 12 ||
-        mobileNavigation.toggleControlInsetY < 4 ||
-        mobileNavigation.toggleControlInsetY > 8 ||
-        mobileNavigation.metaBottomGap < 0 ||
-        mobileNavigation.metaBottomGap > 1 ||
-        Math.abs(mobileNavigation.metaStatusGap) > 1 ||
+        mobileNavigation.toggleHeaderInsetX < 10 ||
+        mobileNavigation.toggleHeaderInsetX > 14 ||
+        mobileNavigation.toggleHeaderInsetY < 4 ||
+        mobileNavigation.toggleHeaderInsetY > 8 ||
+        mobileNavigation.albumClearance < 8 ||
+        mobileNavigation.albumClearance > 12 ||
+        mobileNavigation.statusBottomGap < 0 ||
+        mobileNavigation.statusBottomGap > 1 ||
         mobileNavigation.drawerWidth < 200 ||
         mobileNavigation.closed !== 0 ||
         mobileNavigation.restored !== "false" ||

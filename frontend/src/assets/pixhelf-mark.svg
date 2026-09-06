@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <title>Pixhelf</title>
+  <path d="M13 4h15a8 8 0 0 1 8 8H20.5L13 19.5V4Z" fill="#293E37"/>
+  <path d="M36 13v15a8 8 0 0 1-8 8V20.5L20.5 13H36Z" fill="#2C8977"/>
+  <path d="M27 36H12a8 8 0 0 1-8-8h15.5l7.5-7.5V36Z" fill="#87BDA5"/>
+  <path d="M4 27V12a8 8 0 0 1 8-8v15.5l7.5 7.5H4Z" fill="#293E37"/>
+</svg>

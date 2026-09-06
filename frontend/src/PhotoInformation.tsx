@@ -280,39 +280,23 @@ function usePhotoDetails(imageId: string) {
   };
 }
 
-function informationStatus(
-  details: PhotoDetails | null,
-  loading: boolean,
-  errorMessage: string | null,
-): string {
-  if (errorMessage) return "部分信息读取失败";
-  if (loading) return "正在读取 EXIF 与直方图";
-  return details?.exif.length ? "EXIF · 直方图" : "基本资料 · 直方图";
-}
-
 export const PhotoInformation = memo(function PhotoInformation({
   image,
 }: PhotoInformationProps) {
   const { details, loading, errorMessage, retry } = usePhotoDetails(image.id);
 
   return (
-    <div className="viewer-photo-information">
-      <section
-        className="viewer-details-section"
-        aria-labelledby="viewer-image-information-title"
-      >
-        <div className="viewer-details-section-heading">
-          <h3 id="viewer-image-information-title">图片信息</h3>
-          <span>{informationStatus(details, loading, errorMessage)}</span>
-        </div>
-        <ImageInformationPanel
-          image={image}
-          details={details}
-          loading={loading}
-          errorMessage={errorMessage}
-          onRetry={retry}
-        />
-      </section>
-    </div>
+    <section className="viewer-photo-information" aria-label="图片信息">
+      <header className="viewer-photo-heading">
+        <h3>图片详情</h3>
+      </header>
+      <ImageInformationPanel
+        image={image}
+        details={details}
+        loading={loading}
+        errorMessage={errorMessage}
+        onRetry={retry}
+      />
+    </section>
   );
 });

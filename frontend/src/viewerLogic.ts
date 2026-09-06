@@ -1,4 +1,5 @@
-import { useEffect, useState } from "preact/hooks";
+import type { RefObject } from "preact";
+import { useLayoutEffect, useState } from "preact/hooks";
 
 import type { GalleryImage } from "./types";
 import { getViewerOriginalStatus, viewerOriginalUrl } from "./viewerAssets";
@@ -50,28 +51,25 @@ function readViewportSize(): ViewportSize {
   };
 }
 
-export function useViewportSize(): ViewportSize {
+export function useViewportSize(frameRef: RefObject<HTMLElement | null>): ViewportSize {
   const [size, setSize] = useState(readViewportSize);
-  useEffect(() => {
-    const viewport = window.visualViewport;
-    let frame = 0;
-    const schedule = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        setSize(readViewportSize());
-      });
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const measure = () => {
+      const width = frame.clientWidth;
+      const height = frame.clientHeight;
+      if (width <= 0 || height <= 0) return;
+      setSize((previous) => previous.width === width && previous.height === height
+        ? previous
+        : { width, height });
     };
-    window.addEventListener("resize", schedule);
-    window.addEventListener("orientationchange", schedule);
-    viewport?.addEventListener("resize", schedule);
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("orientationchange", schedule);
-      viewport?.removeEventListener("resize", schedule);
-    };
-  }, []);
+    // Browser chrome changes the visible area without resizing the image frame.
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [frameRef]);
   return size;
 }
 
