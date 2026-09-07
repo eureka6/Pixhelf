@@ -87,7 +87,7 @@ services:
 
 ### 独立程序
 
-从 [Releases](https://git.pixhelf.com/adminroot/pixhelf/releases) 下载对应架构的程序，以 amd64 为例：
+下载对应架构的程序后运行，以 amd64 为例：
 
 ```bash
 chmod +x pixhelf-amd64-linux
