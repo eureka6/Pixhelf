@@ -2097,7 +2097,7 @@ export function ImageViewer({
                     </div>
 
                     {similarLoading && !similarImages.length ? (
-                      <SimilarImageSkeleton columnCount={similarMetrics.columnCount} />
+                      <SimilarImageSkeleton metrics={similarMetrics} />
                     ) : similarError && !similarImages.length ? (
                       <div className="viewer-similar-error" role="alert">
                         <span>{similarError}</span>

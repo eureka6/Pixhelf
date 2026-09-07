@@ -16,14 +16,18 @@ import {
 } from "./galleryViewport";
 import type { MasonryViewportAnchor } from "./galleryViewport";
 import { ImageIcon } from "./icons";
-import { layoutMasonryImages, MAX_MASONRY_COLUMNS, useMasonryMetrics } from "./masonry";
+import {
+  layoutMasonryImages,
+  layoutMasonrySkeleton,
+  MAX_MASONRY_COLUMNS,
+  useMasonryMetrics,
+} from "./masonry";
 import type { GalleryImage } from "./types";
 import { preloadOriginalImage, viewerThumbnailUrl } from "./viewerAssets";
 
 const CARD_PREFETCH_MARGIN = "1200px 0px";
 const IMAGE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const READY_THUMBNAIL_CACHE_LIMIT = 2048;
-const SKELETON_RATIOS = [1.4, 0.72, 1, 1.55, 0.8, 1.2, 0.67, 1.35, 0.9, 1.6, 0.76, 1.1];
 
 type ThumbnailState = "loading" | "loaded" | "retrying" | "failed";
 
@@ -403,13 +407,10 @@ const ImageCard = memo(function ImageCard({
 export function GallerySkeleton() {
   const ref = useRef<HTMLDivElement>(null);
   const { width, columnCount, gap } = useMasonryMetrics(ref, MAX_MASONRY_COLUMNS);
-  const layout = useMemo(() => layoutMasonryImages(
-    Array.from({ length: columnCount * 5 }, (_, index) => ({
-      width: SKELETON_RATIOS[index % SKELETON_RATIOS.length] * 100,
-      height: 100,
-    })),
-    { width, columnCount, gap },
-  ), [columnCount, gap, width]);
+  const layout = useMemo(
+    () => layoutMasonrySkeleton({ width, columnCount, gap }),
+    [columnCount, gap, width],
+  );
 
   return (
     <div

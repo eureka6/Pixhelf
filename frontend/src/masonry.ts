@@ -3,6 +3,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "preact/
 import type { GalleryImage } from "./types";
 
 export const MAX_MASONRY_COLUMNS = 5;
+const SKELETON_RATIOS = [1.4, 0.72, 1, 1.55, 0.8, 1.2, 0.67, 1.35, 0.9, 1.6, 0.76, 1.1];
 
 export type MasonryMetrics = {
   width: number;
@@ -107,4 +108,14 @@ export function layoutMasonryImages<T extends Pick<GalleryImage, "width" | "heig
     items,
     height: items.length ? Math.max(...heights) - gap : 0,
   };
+}
+
+export function layoutMasonrySkeleton(metrics: MasonryMetrics) {
+  return layoutMasonryImages(
+    Array.from({ length: metrics.columnCount * 5 }, (_, index) => ({
+      width: SKELETON_RATIOS[index % SKELETON_RATIOS.length] * 100,
+      height: 100,
+    })),
+    metrics,
+  );
 }

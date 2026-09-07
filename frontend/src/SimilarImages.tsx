@@ -3,7 +3,7 @@ import { memo } from "preact/compat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { ImageIcon, LoaderCircle } from "./icons";
-import { layoutMasonryImages, MAX_MASONRY_COLUMNS } from "./masonry";
+import { layoutMasonryImages, layoutMasonrySkeleton } from "./masonry";
 import type { MasonryMetrics } from "./masonry";
 import type { GalleryImage } from "./types";
 import { viewerThumbnailUrl } from "./viewerAssets";
@@ -165,17 +165,18 @@ export function SimilarImageMasonry({
   );
 }
 
-export function SimilarImageSkeleton({ columnCount }: { columnCount: number }) {
-  const safeColumnCount = Math.min(MAX_MASONRY_COLUMNS, Math.max(2, Math.floor(columnCount)));
-  const itemCount = Math.max(4, safeColumnCount * 2);
+export function SimilarImageSkeleton({ metrics }: { metrics: MasonryMetrics }) {
+  const layout = useMemo(() => layoutMasonrySkeleton(metrics), [metrics]);
   return (
     <div
       className="viewer-similar-skeleton"
       aria-label="正在查找相似图片"
-      data-columns={safeColumnCount}
-      style={{ "--similar-columns": safeColumnCount } as CSSProperties}
+      data-columns={metrics.columnCount}
+      style={{ height: layout.height } as CSSProperties}
     >
-      {Array.from({ length: itemCount }, (_, index) => <span key={index} />)}
+      {layout.items.map(({ index, style }) => (
+        <span key={index} aria-hidden="true" style={style} />
+      ))}
     </div>
   );
 }
