@@ -87,22 +87,21 @@ select:focus-visible,
   align-items: center;
   gap: 12px;
   padding: 0 18px;
-  /* Keep the sidebar brand beneath the transparent header area clickable. */
   pointer-events: none;
 }
 
-.topbar::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0 0 0 var(--sidebar-layout-width);
-  content: "";
+.topbar-surface {
+  /* Block gallery clicks below both sidebars; toolbar controls stay above them. */
+  position: fixed;
+  z-index: 10;
+  inset: 0 0 auto;
+  height: var(--topbar-height);
   pointer-events: auto;
   background: rgba(252, 253, 252, 0.94);
   border-bottom: 1px solid var(--border);
   box-shadow: 0 4px 18px rgba(25, 35, 31, 0.035);
   backdrop-filter: blur(16px) saturate(1.08);
   -webkit-backdrop-filter: blur(16px) saturate(1.08);
-  transition: left var(--motion-medium) var(--ease-standard);
 }
 
 .topbar-leading > *,
@@ -229,17 +228,15 @@ select:focus-visible,
 
 .request-progress {
   position: fixed;
-  z-index: 31;
+  z-index: 11;
   top: calc(var(--visual-viewport-top) + var(--topbar-height) - 2px);
   right: 0;
-  left: var(--sidebar-layout-width);
+  left: 0;
   height: 2px;
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
-  transition:
-    opacity 180ms ease,
-    left var(--motion-medium) var(--ease-standard);
+  transition: opacity 180ms ease;
 }
 
 .request-progress[data-visible="true"] { opacity: 1; }
@@ -250,6 +247,9 @@ select:focus-visible,
   display: block;
   background: linear-gradient(90deg, transparent 0%, #2f8d82 28%, #78bab2 58%, transparent 100%);
   transform-origin: left;
+}
+
+.request-progress[data-visible="true"] span {
   animation: request-progress 1.1s var(--ease-standard) infinite;
 }
 
@@ -810,7 +810,7 @@ select:focus-visible,
   overflow: hidden;
   margin: 0;
   padding: 0;
-  background: #e5e8e6;
+  background: #e3e7e5;
   border: 1px solid rgba(26, 35, 31, 0.08);
   border-radius: 5px;
   box-shadow: 0 1px 1px rgba(21, 31, 27, 0.05);
@@ -823,16 +823,16 @@ select:focus-visible,
 }
 
 .image-card::before,
-.viewer-similar-card::before {
+.viewer-similar-card::before,
+.skeleton-grid span::before,
+.viewer-similar-skeleton span::before {
   position: absolute;
   z-index: 0;
   inset: 0;
   content: "";
-  background:
-    linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .48) 47%, transparent 64%),
-    #e3e7e5;
-  background-size: 220% 100%, 100% 100%;
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .48) 47%, transparent 64%);
   opacity: 1;
+  transform: translate3d(-100%, 0, 0);
   transition: opacity var(--motion-medium) ease;
   animation: none;
 }
@@ -844,7 +844,9 @@ select:focus-visible,
 }
 
 .image-card[data-loading="true"]::before,
-.viewer-similar-card[data-loading="true"]::before {
+.viewer-similar-card[data-loading="true"]::before,
+.skeleton-grid span::before,
+.viewer-similar-skeleton span::before {
   animation: card-shimmer 1.35s ease-in-out infinite;
 }
 
@@ -924,8 +926,8 @@ select:focus-visible,
 }
 
 @keyframes card-shimmer {
-  from { background-position: 130% 0, 0 0; }
-  to { background-position: -120% 0, 0 0; }
+  from { transform: translate3d(-100%, 0, 0); }
+  to { transform: translate3d(100%, 0, 0); }
 }
 
 .skeleton-grid span,
@@ -933,19 +935,11 @@ select:focus-visible,
   position: absolute;
   display: block;
   min-height: 64px;
-  background:
-    linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .48) 47%, transparent 64%),
-    #e3e7e5;
-  background-size: 220% 100%, 100% 100%;
+  overflow: hidden;
+  background: #e3e7e5;
   border: 1px solid rgba(26, 35, 31, .08);
   border-radius: 5px;
   box-shadow: 0 1px 1px rgba(21, 31, 27, .05);
-  animation: card-shimmer 1.35s ease-in-out infinite;
-}
-
-@keyframes skeleton-shimmer {
-  from { background-position: 130% 0; }
-  to { background-position: -120% 0; }
 }
 
 .empty-state {
@@ -1451,11 +1445,8 @@ select:focus-visible,
 }
 
 .viewer-similar-card::before,
-.viewer-similar-skeleton span {
-  background:
-    linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .07) 47%, transparent 64%),
-    #1b211e;
-  background-size: 220% 100%, 100% 100%;
+.viewer-similar-skeleton span::before {
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .07) 47%, transparent 64%);
 }
 
 .viewer-similar-card:focus-visible {
@@ -1683,9 +1674,6 @@ select:focus-visible,
     /* Reserve three 42px tools, their gaps and the drawer clearance. */
     --mobile-drawer-width: min(286px, calc(100vw - 144px - max(12px, env(safe-area-inset-right))));
   }
-  .app-shell[data-mobile-navigation-open="true"] {
-    --sidebar-layout-width: var(--mobile-drawer-width);
-  }
   .topbar {
     position: fixed;
     top: var(--visual-viewport-top);
@@ -1697,20 +1685,11 @@ select:focus-visible,
       max(12px, env(safe-area-inset-left));
     gap: 8px;
   }
-  .topbar::before {
+  .topbar-surface {
+    top: var(--visual-viewport-top);
     background: #fcfdfc;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
-    transition: left 240ms cubic-bezier(.55, .05, .8, .45);
-  }
-  .request-progress {
-    transition:
-      opacity 180ms ease,
-      left 240ms cubic-bezier(.55, .05, .8, .45);
-  }
-  .app-shell[data-mobile-navigation-open="true"] .topbar::before,
-  .app-shell[data-mobile-navigation-open="true"] .request-progress {
-    transition-timing-function: var(--ease-standard);
   }
   .gallery-sidebar-toggle.sidebar-toggle-button {
     width: 42px;
@@ -1812,11 +1791,13 @@ select:focus-visible,
   .mobile-nav-layer[data-state="closing"] { pointer-events: none; }
   .mobile-nav-scrim {
     position: absolute;
-    inset: 0;
+    inset: var(--topbar-height) 0 0;
     width: 100%;
     padding: 0;
     background: rgba(18, 25, 22, .32);
     border: 0;
+    opacity: 0;
+    transition: opacity 180ms ease;
   }
   .mobile-sidebar {
     position: absolute;
@@ -1824,36 +1805,31 @@ select:focus-visible,
     width: var(--mobile-drawer-width);
     overflow: hidden;
     box-shadow: 10px 0 24px rgba(13, 21, 17, .13);
-    will-change: transform;
+    transform: translate3d(-100%, 0, 0);
+    transition: transform 240ms var(--ease-standard);
+  }
+  .mobile-sidebar .sidebar-brand {
+    transform: translateX(var(--mobile-drawer-width));
+    transition: transform 240ms var(--ease-standard);
   }
   .mobile-nav-layer[data-state="open"] .mobile-nav-scrim {
-    animation: mobile-scrim-in 180ms ease-out both;
+    opacity: 1;
   }
   .mobile-nav-layer[data-state="open"] .mobile-sidebar {
-    animation: mobile-drawer-in 240ms var(--ease-standard) both;
+    transform: translate3d(0, 0, 0);
   }
   .mobile-nav-layer[data-state="open"] .sidebar-brand {
-    animation: mobile-brand-in 240ms var(--ease-standard) both;
+    transform: translateX(0);
   }
-  .mobile-nav-layer[data-state="closing"] .mobile-nav-scrim {
-    animation: mobile-scrim-out 180ms ease-in both;
-  }
-  .mobile-nav-layer[data-state="closing"] .mobile-sidebar {
-    animation: mobile-drawer-out 240ms cubic-bezier(.55, .05, .8, .45) both;
-  }
-  .mobile-nav-layer[data-state="closing"] .sidebar-brand {
-    animation: mobile-brand-out 240ms cubic-bezier(.55, .05, .8, .45) both;
+  @starting-style {
+    .mobile-nav-layer[data-state="open"] .mobile-nav-scrim { opacity: 0; }
+    .mobile-nav-layer[data-state="open"] .mobile-sidebar { transform: translate3d(-100%, 0, 0); }
+    .mobile-nav-layer[data-state="open"] .sidebar-brand { transform: translateX(var(--mobile-drawer-width)); }
   }
   .mobile-sidebar .sidebar-status {
     min-height: calc(50px + env(safe-area-inset-bottom));
     padding-bottom: calc(11px + env(safe-area-inset-bottom));
   }
-  @keyframes mobile-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes mobile-scrim-out { from { opacity: 1; } to { opacity: 0; } }
-  @keyframes mobile-drawer-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
-  @keyframes mobile-drawer-out { from { transform: translateX(0); } to { transform: translateX(-100%); } }
-  @keyframes mobile-brand-in { from { transform: translateX(var(--mobile-drawer-width)); } to { transform: translateX(0); } }
-  @keyframes mobile-brand-out { from { transform: translateX(0); } to { transform: translateX(var(--mobile-drawer-width)); } }
 }
 
 @media (max-width: 340px) {
@@ -1928,8 +1904,10 @@ select:focus-visible,
   }
 
   .image-card::before,
-  .skeleton-grid span,
-  .viewer-similar-skeleton span {
-    background-position: 0 0;
+  .viewer-similar-card::before,
+  .skeleton-grid span::before,
+  .viewer-similar-skeleton span::before {
+    animation: none !important;
+    transform: none;
   }
 }

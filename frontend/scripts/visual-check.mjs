@@ -172,7 +172,7 @@ try {
         topbarPosition: topbar ? getComputedStyle(topbar).position : "",
         topbarTop: topbarRect?.top ?? -1,
         topbarHeight: topbarRect?.height ?? -1,
-        topbarSurfaceLeft: topbar ? Number.parseFloat(getComputedStyle(topbar, "::before").left) : -1,
+        topbarSurfaceLeft: document.querySelector(".topbar-surface")?.getBoundingClientRect().left ?? -1,
         sidebarTop: document.querySelector(".desktop-sidebar")?.getBoundingClientRect().top ?? -1,
         topbarSearches: document.querySelectorAll(
           ".topbar-actions > .topbar-search",
@@ -1561,7 +1561,7 @@ try {
         progressPanels: document.querySelectorAll(".sidebar-progress").length,
         inlineToggles: document.querySelectorAll(".desktop-sidebar-inline-toggle").length,
         galleryToggles: document.querySelectorAll(".gallery-sidebar-toggle").length,
-        topbarSurfaceLeft: Number.parseFloat(getComputedStyle(document.querySelector(".topbar"), "::before").left),
+        topbarSurfaceLeft: document.querySelector(".topbar-surface")?.getBoundingClientRect().left ?? -1,
         brandVisibility: getComputedStyle(document.querySelector(".desktop-sidebar .brand-lockup")).visibility,
         brandInert: Boolean(document.querySelector(".desktop-sidebar .brand")?.closest("[inert]")),
       }));
@@ -1655,8 +1655,8 @@ try {
         layerTopGap: navigationLayer && topbar
           ? navigationLayer.y - topbar.y
           : -1,
-        topbarSurfaceLeft: await page.locator(".topbar").evaluate((header) =>
-          Number.parseFloat(getComputedStyle(header, "::before").left)),
+        topbarSurfaceLeft: await page.locator(".topbar-surface").evaluate((surface) =>
+          surface.getBoundingClientRect().left),
         toggleWidth: navigationToggleBefore?.width ?? -1,
         toggleHeight: navigationToggleBefore?.height ?? -1,
         expandedToggleWidth: navigationToggleOpen?.width ?? -1,
@@ -1696,9 +1696,9 @@ try {
       for (const width of [320, 360, 375, target.width]) {
         await page.setViewportSize({ width, height: target.height });
         await page.waitForFunction(() => {
-          const header = document.querySelector(".topbar");
           const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
-          return Math.abs(Number.parseFloat(getComputedStyle(header, "::before").left) - drawer.right) < 1;
+          // The gallery's ResizeObserver commits on the next animation frame.
+          return Math.abs(drawer.left) < 1 && document.documentElement.scrollWidth <= innerWidth;
         });
         const dimensions = await page.evaluate(() => {
           const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
@@ -2006,7 +2006,7 @@ try {
         desktopSidebar.toggleHeaderInsetY < 5 ||
         desktopSidebar.toggleHeaderInsetY > 9 ||
         Math.abs(layout.sidebarTop) > 1 ||
-        Math.abs(layout.topbarSurfaceLeft - desktopSidebar.contentBefore) > 1 ||
+        Math.abs(layout.topbarSurfaceLeft) > 1 ||
         Math.abs(desktopSidebar.topbarSurfaceLeft) > 1 ||
         desktopSidebar.stationaryToggleDelta < 0 ||
         desktopSidebar.stationaryToggleDelta > 1 ||
@@ -2035,7 +2035,7 @@ try {
         mobileNavigation.metaRows !== 0 ||
         Math.abs(mobileNavigation.layerTopGap) > 1 ||
         Math.abs(layout.topbarSurfaceLeft) > 1 ||
-        Math.abs(mobileNavigation.topbarSurfaceLeft - mobileNavigation.drawerWidth) > 1 ||
+        Math.abs(mobileNavigation.topbarSurfaceLeft) > 1 ||
         Math.abs(mobileNavigation.toggleWidth - 42) > 1 ||
         Math.abs(mobileNavigation.toggleHeight - 42) > 1 ||
         Math.abs(mobileNavigation.expandedToggleWidth - 42) > 1 ||

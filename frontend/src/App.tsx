@@ -285,7 +285,7 @@ function useDebounced<T>(value: T, delay: number): T {
   return debounced;
 }
 
-function useDelayedUnmount(visible: boolean, delay: number): boolean {
+function useTransitionPresence(visible: boolean, duration: number) {
   const [mounted, setMounted] = useState(visible);
 
   useLayoutEffect(() => {
@@ -295,11 +295,16 @@ function useDelayedUnmount(visible: boolean, delay: number): boolean {
     }
     if (!mounted) return;
 
-    const timer = window.setTimeout(() => setMounted(false), delay);
+    // The transition event normally removes the drawer. Cover hidden tabs and breakpoint changes.
+    const timer = window.setTimeout(() => setMounted(false), duration + 100);
     return () => window.clearTimeout(timer);
-  }, [delay, mounted, visible]);
+  }, [duration, mounted, visible]);
 
-  return mounted;
+  const finishExit = useCallback(() => {
+    if (!visible) setMounted(false);
+  }, [visible]);
+
+  return { mounted: visible || mounted, finishExit };
 }
 
 function errorMessage(reason: unknown, fallback: string): string {
@@ -363,7 +368,10 @@ function App() {
   const [viewerReturnRequest, setViewerReturnRequest] = useState<ViewerReturnRequest | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const compactLayout = useMediaQuery("(max-width: 720px)");
-  const mobileNavMounted = useDelayedUnmount(mobileNavOpen, MOBILE_NAV_EXIT_MS);
+  const { mounted: mobileNavMounted, finishExit: finishMobileNavExit } = useTransitionPresence(
+    mobileNavOpen,
+    MOBILE_NAV_EXIT_MS,
+  );
   const textSearchReady = Boolean(
     status?.backgroundComplete
     && status.textSearch.enabled
@@ -1164,6 +1172,7 @@ function App() {
       data-viewer-returning={Boolean(viewerReturnRequest)}
       data-viewer-return-image-id={viewerReturnRequest?.imageId}
     >
+      <div className="topbar-surface" aria-hidden="true" />
       <Header
         search={search}
         searchOpen={searchOpen}
@@ -1203,6 +1212,7 @@ function App() {
         onHome={goHome}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
+        onMobileExited={finishMobileNavExit}
         onClose={() => setMobileNavOpen(false)}
         desktopCollapsed={sidebarCollapsed}
       />

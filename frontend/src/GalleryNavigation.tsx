@@ -301,6 +301,7 @@ export function Sidebar({
   onHome,
   mobileOpen,
   mobileMounted,
+  onMobileExited,
   onClose,
   desktopCollapsed,
 }: {
@@ -311,6 +312,7 @@ export function Sidebar({
   onHome: () => void;
   mobileOpen: boolean;
   mobileMounted: boolean;
+  onMobileExited: () => void;
   onClose: () => void;
   desktopCollapsed: boolean;
 }) {
@@ -370,6 +372,13 @@ export function Sidebar({
             className="sidebar mobile-sidebar"
             role="dialog"
             aria-label="相册导航"
+            onTransitionEnd={(event) => {
+              if (
+                event.target === event.currentTarget
+                && event.propertyName === "transform"
+                && !mobileOpen
+              ) onMobileExited();
+            }}
           >
             <SidebarBrand onHome={onHome} />
             {navigation}

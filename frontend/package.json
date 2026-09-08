@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "visual-check": "node scripts/visual-check.mjs",
+    "navigation-motion-check": "node scripts/navigation-motion-check.mjs",
     "sidebar-resize-check": "node scripts/sidebar-resize-check.mjs",
     "viewer-resize-check": "node scripts/viewer-resize-check.mjs",
     "viewer-similar-check": "node scripts/viewer-similar-check.mjs"
