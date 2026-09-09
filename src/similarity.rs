@@ -8,15 +8,15 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Cursor, Write},
     sync::atomic::{AtomicU64, Ordering},
     sync::{Mutex, OnceLock},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use image::{DynamicImage, ImageReader, imageops::FilterType};
-#[cfg(test)]
-use image::{ImageDecoder, metadata::Orientation};
+use image::{
+    DynamicImage, ImageDecoder, ImageReader, Limits, imageops::FilterType, metadata::Orientation,
+};
 use tracing::warn;
 
 use crate::{
@@ -143,7 +143,7 @@ pub(crate) fn signature_for_thumbnail(
         .with_context(|| format!("cannot decode thumbnail {}", thumbnail.display()))?;
     let signature = signature_from_image(record, &image);
     if let Err(error) = write_signature(&sidecar, &signature) {
-        warn!(path = %sidecar.display(), %error, "cannot persist image similarity descriptor");
+        warn!(path = %sidecar.display(), %error, "无法保存相似图片索引");
     }
     cache_signature(&record.id, signature.clone());
     Ok(signature)
@@ -179,6 +179,28 @@ pub(crate) fn has_signature_sidecar(thumbnail: &std::path::Path) -> bool {
 }
 
 fn signature_from_image(record: &ImageRecord, image: &DynamicImage) -> ImageSignature {
+    signature_from_pixels(image, record.width as f32 / record.height.max(1) as f32)
+}
+
+/// Uploaded query images are decoded in memory and never added to the gallery.
+pub(crate) fn signature_for_upload(bytes: &[u8]) -> Result<ImageSignature> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(signature_from_pixels(
+        &image,
+        image.width() as f32 / image.height().max(1) as f32,
+    ))
+}
+
+fn signature_from_pixels(image: &DynamicImage, aspect_ratio: f32) -> ImageSignature {
     let sampled = image
         .resize_exact(SAMPLE_EDGE, SAMPLE_EDGE, FilterType::Triangle)
         .to_rgb8();
@@ -254,7 +276,7 @@ fn signature_from_image(record: &ImageRecord, image: &DynamicImage) -> ImageSign
         average_colour,
         contrast: standard_deviation / 255.0,
         edge_energy,
-        aspect_ratio: record.width as f32 / record.height.max(1) as f32,
+        aspect_ratio,
     }
 }
 

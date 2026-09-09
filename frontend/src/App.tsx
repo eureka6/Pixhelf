@@ -13,6 +13,13 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
+import { AlbumHeading, AlbumsView } from "./AlbumsView";
+import { ExternalStorageView } from "./ExternalStorageView";
+import { SettingsDialog } from "./SettingsDialog";
+import { authentication } from "./auth";
+import type { SettingsSection } from "./SettingsDialog";
+import { galleryHref, readGalleryLocation } from "./galleryLocation";
+import type { GalleryLocation } from "./galleryLocation";
 import {
   captureViewerAnchor,
   imageCardById,
@@ -21,8 +28,13 @@ import {
 } from "./galleryViewport";
 import type { ViewerAnchor } from "./galleryViewport";
 import { ImageViewer } from "./ImageViewer";
-import { GallerySkeleton, MasonryGallery } from "./MasonryGallery";
-import type { MasonryGalleryHandle } from "./MasonryGallery";
+import { PhotoInformationDialog } from "./PhotoInformationDialog";
+import { SimilarSearchView } from "./SimilarSearchView";
+import { useImageSimilarity } from "./useImageSimilarity";
+import type { ImageSearchSource } from "./useImageSimilarity";
+import { appendUniqueImages } from "./galleryImages";
+import { GallerySkeleton, JustifiedGallery } from "./JustifiedGallery";
+import type { JustifiedGalleryHandle } from "./JustifiedGallery";
 import {
   getGallery,
   getImages,
@@ -32,7 +44,9 @@ import {
 } from "./api";
 import type {
   GalleryImage,
+  GallerySection,
   GallerySummary,
+  ImageCardAction,
   ThumbnailStatus,
 } from "./types";
 import {
@@ -311,19 +325,6 @@ function errorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
 }
 
-function appendUniqueImages(
-  current: GalleryImage[],
-  incoming: GalleryImage[],
-): GalleryImage[] {
-  const ids = new Set(current.map((image) => image.id));
-  const unique = incoming.filter((image) => {
-    if (ids.has(image.id)) return false;
-    ids.add(image.id);
-    return true;
-  });
-  return unique.length ? [...current, ...unique] : current;
-}
-
 function createExploreSeed(): string {
   const values = new Uint32Array(4);
   window.crypto.getRandomValues(values);
@@ -332,6 +333,14 @@ function createExploreSeed(): string {
 
 function App() {
   useVisualViewportTop();
+  const [location, setLocation] = useState(readGalleryLocation);
+  const locationRef = useRef(location);
+  const { section, path } = location;
+  const album = section === "albums" ? path : "";
+  const browsingStorage = section === "storage";
+  const browsingSimilar = section === "similar";
+  const browsingAlbums = section === "albums" && !album;
+  const hasInitialImages = Boolean(INITIAL_BOOTSTRAP && section === "library");
   const [summary, setSummary] = useState<GallerySummary | null>(
     INITIAL_BOOTSTRAP?.summary ?? null,
   );
@@ -339,7 +348,7 @@ function App() {
     INITIAL_BOOTSTRAP?.status ?? null,
   );
   const [imagePage, setImagePage] = useState<ImagePageState>(() => (
-    INITIAL_BOOTSTRAP
+    hasInitialImages && INITIAL_BOOTSTRAP
       ? {
           images: INITIAL_BOOTSTRAP.images.items,
           total: INITIAL_BOOTSTRAP.images.total,
@@ -347,16 +356,27 @@ function App() {
         }
       : EMPTY_IMAGE_PAGE
   ));
-  const [album, setAlbum] = useState("");
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exploreSeed, setExploreSeed] = useState("");
-  const [loading, setLoading] = useState(!INITIAL_BOOTSTRAP);
+  const [loading, setLoading] = useState(!hasInitialImages && !browsingAlbums && !browsingStorage && !browsingSimilar);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
-  const masonryLayoutRef = useRef<MasonryGalleryHandle>(null);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
+  const [storageRevision, setStorageRevision] = useState(0);
+  const [infoImage, setInfoImage] = useState<GalleryImage | null>(null);
+  const [uploadedQuery, setUploadedQuery] = useState<File | null>(null);
+  const [galleryQuerySnapshot, setGalleryQuerySnapshot] = useState<GalleryImage | null>(null);
+  const lastSimilarPathRef = useRef(browsingSimilar ? path : "");
+  const queryImageId = browsingSimilar ? path : lastSimilarPathRef.current;
+  const querySource = useMemo<ImageSearchSource | null>(() => queryImageId
+    ? { kind: "gallery", imageId: queryImageId, image: galleryQuerySnapshot?.id === queryImageId ? galleryQuerySnapshot : undefined }
+    : uploadedQuery ? { kind: "upload", file: uploadedQuery } : null,
+  [queryImageId, galleryQuerySnapshot, uploadedQuery]);
+  const imageSimilarity = useImageSimilarity(querySource, browsingSimilar);
+  const galleryLayoutRef = useRef<JustifiedGalleryHandle>(null);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
   const [viewerDiscoveredImages, setViewerDiscoveredImages] = useState<GalleryImage[]>([]);
   const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
@@ -394,7 +414,7 @@ function App() {
   const summaryRevisionRef = useRef<string | null>(
     INITIAL_BOOTSTRAP?.summary.revision ?? null,
   );
-  const skipInitialImagesRef = useRef(Boolean(INITIAL_BOOTSTRAP));
+  const skipInitialImagesRef = useRef(hasInitialImages);
   const loadMoreControllerRef = useRef<AbortController | null>(null);
   const loadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
   const similarRequestVersionRef = useRef(0);
@@ -410,7 +430,9 @@ function App() {
   const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const viewerHistoryActiveRef = useRef(false);
   const viewerHistoryClosingRef = useRef(false);
-  const { images, total, nextOffset } = imagePage;
+  const { images, total, nextOffset } = browsingSimilar ? imageSimilarity : imagePage;
+  const pageLoadingMore = browsingSimilar ? imageSimilarity.loadingMore : loadingMore;
+  const selectedAlbum = useMemo(() => summary?.albums.find(item => item.path === album), [summary, album]);
   const viewerImages = useMemo(
     () => appendUniqueImages(images, viewerDiscoveredImages),
     [images, viewerDiscoveredImages],
@@ -418,7 +440,7 @@ function App() {
 
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [album, debouncedSearch, exploreSeed]);
+  }, [location, debouncedSearch, exploreSeed]);
 
   useLayoutEffect(() => {
     viewerImageIdRef.current = viewerImageId;
@@ -448,13 +470,6 @@ function App() {
   useEffect(() => {
     if (!compactLayout && mobileNavOpen) setMobileNavOpen(false);
   }, [compactLayout, mobileNavOpen]);
-
-  useEffect(() => {
-    if (summary && album && !summary.albums.some((item) => item.path === album)) {
-      setAlbum("");
-      setMobileNavOpen(false);
-    }
-  }, [album, summary]);
 
   useEffect(() => {
     try {
@@ -542,15 +557,19 @@ function App() {
       skipInitialImagesRef.current = false;
       return;
     }
-    const controller = new AbortController();
     const requestVersion = ++requestVersionRef.current;
     loadMoreControllerRef.current?.abort();
     loadMoreControllerRef.current = null;
     loadMorePromiseRef.current = null;
-    setLoading(true);
     setLoadingMore(false);
     setError(null);
     setImagePage(EMPTY_IMAGE_PAGE);
+    if (browsingAlbums || browsingStorage || browsingSimilar) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setLoading(true);
     getImages(
       {
         album,
@@ -587,10 +606,10 @@ function App() {
       loadMorePromiseRef.current = null;
       loadMoreController?.abort();
     };
-  }, [album, debouncedSearch, exploreSeed, reloadToken, textSearchReady]);
+  }, [location, debouncedSearch, exploreSeed, reloadToken, textSearchReady]);
 
-  const loadMore = useCallback((): Promise<GalleryImage[]> => {
-    if (loading || nextOffset === null) return Promise.resolve([]);
+  const loadMoreLibrary = useCallback((): Promise<GalleryImage[]> => {
+    if (browsingAlbums || browsingStorage || browsingSimilar || loading || nextOffset === null) return Promise.resolve([]);
     const pending = loadMorePromiseRef.current;
     if (pending) return pending;
 
@@ -634,7 +653,8 @@ function App() {
     })();
     loadMorePromiseRef.current = promise;
     return promise;
-  }, [album, debouncedSearch, exploreSeed, loading, nextOffset]);
+  }, [location, debouncedSearch, exploreSeed, loading, nextOffset]);
+  const loadMore = browsingSimilar ? imageSimilarity.loadMore : loadMoreLibrary;
 
   const resetSimilarSearch = useCallback(() => {
     similarRequestVersionRef.current += 1;
@@ -648,6 +668,44 @@ function App() {
     setSimilarLoadingMore(false);
     setSimilarError(null);
   }, []);
+
+  const activateLocation = useCallback((next: GalleryLocation) => {
+    locationRef.current = next;
+    if (next.section === "similar") lastSimilarPathRef.current = next.path;
+    requestVersionRef.current++;
+    skipInitialImagesRef.current = false;
+    loadMoreControllerRef.current?.abort();
+    setLocation(next);
+    setImagePage(EMPTY_IMAGE_PAGE);
+    setLoading(next.section === "library" || (next.section === "albums" && Boolean(next.path)));
+    setLoadingMore(false);
+    setError(null);
+    setSearch("");
+    setSearchOpen(false);
+    setExploreSeed("");
+    setMobileNavOpen(false);
+    setInfoImage(null);
+    viewerImageIdRef.current = null;
+    setViewerImageId(null);
+    setViewerDiscoveredImages([]);
+    setViewerReturnRequest(null);
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+    resetSimilarSearch();
+  }, [resetSimilarSearch]);
+
+  const openSimilarSearch = useCallback((source: GalleryImage) => {
+    setGalleryQuerySnapshot(source);
+    const href = galleryHref("similar", source.id);
+    if (viewerHistoryActiveRef.current || readViewerHistoryEntry(window.history.state)) {
+      window.history.replaceState(null, "", href);
+    } else if (href !== window.location.pathname + window.location.search) {
+      window.history.pushState(null, "", href);
+    }
+    viewerHistoryActiveRef.current = false;
+    viewerHistoryClosingRef.current = false;
+    activateLocation({ section: "similar", path: source.id });
+  }, [activateLocation]);
 
   const searchSimilar = useCallback((source: GalleryImage, force = false) => {
     const sameSource = similarPage.source?.id === source.id;
@@ -843,8 +901,12 @@ function App() {
     imageId: string,
     card: HTMLElement,
     pointerY?: number,
+    action: ImageCardAction = "view",
   ) => {
     const snapshot = images.find((image) => image.id === imageId);
+    if (!snapshot) return;
+    if (action === "details") { setInfoImage(snapshot); return; }
+    if (action === "similar") { openSimilarSearch(snapshot); return; }
     if (!viewerImageIdRef.current && snapshot) enterViewerHistory(snapshot);
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
@@ -855,7 +917,7 @@ function App() {
     setViewerReturnRequest(null);
     viewerImageIdRef.current = imageId;
     setViewerImageId(imageId);
-  }, [enterViewerHistory, images, resetSimilarSearch]);
+  }, [enterViewerHistory, images, openSimilarSearch, resetSimilarSearch]);
 
   const closeViewer = useCallback(() => {
     if (!viewerImageIdRef.current || viewerHistoryClosingRef.current) return;
@@ -873,6 +935,10 @@ function App() {
 
   useEffect(() => {
     const applyHistoryState = (state: unknown) => {
+      const next = readGalleryLocation();
+      if (next.section !== locationRef.current.section || next.path !== locationRef.current.path) {
+        activateLocation(next);
+      }
       const entry = readViewerHistoryEntry(state);
       viewerHistoryActiveRef.current = Boolean(entry);
       viewerHistoryClosingRef.current = false;
@@ -892,7 +958,7 @@ function App() {
       restoreViewerFromHistory(currentEntry.image);
     }
     return () => window.removeEventListener("popstate", onPopState);
-  }, [closeViewerState, restoreViewerFromHistory]);
+  }, [activateLocation, closeViewerState, restoreViewerFromHistory]);
 
   useLayoutEffect(() => {
     if (!viewerImage || !viewerHistoryActiveRef.current) return;
@@ -922,21 +988,21 @@ function App() {
     let animationGeneration = 0;
     let animationTarget: HTMLElement | null = null;
     let observedCard: HTMLElement | null = null;
-    let observedMasonry: HTMLElement | null = null;
+    let observedGallery: HTMLElement | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let resizeObserverPrimed = false;
 
     const observeLayout = (card: HTMLElement) => {
-      const masonry = card.closest<HTMLElement>(".masonry");
+      const gallery = card.closest<HTMLElement>(".justified-gallery");
       if (resizeObserver && card !== observedCard) {
         if (observedCard) resizeObserver.unobserve(observedCard);
         resizeObserver.observe(card);
         observedCard = card;
       }
-      if (resizeObserver && masonry && masonry !== observedMasonry) {
-        if (observedMasonry) resizeObserver.unobserve(observedMasonry);
-        resizeObserver.observe(masonry);
-        observedMasonry = masonry;
+      if (resizeObserver && gallery && gallery !== observedGallery) {
+        if (observedGallery) resizeObserver.unobserve(observedGallery);
+        resizeObserver.observe(gallery);
+        observedGallery = gallery;
       }
     };
 
@@ -1077,8 +1143,8 @@ function App() {
       schedule();
     });
     const mutationObserver = new MutationObserver(schedule);
-    const masonry = document.querySelector(".masonry");
-    if (masonry) mutationObserver.observe(masonry, { childList: true });
+    const gallery = document.querySelector(".justified-gallery");
+    if (gallery) mutationObserver.observe(gallery, { childList: true });
     window.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("resize", schedule);
     schedule();
@@ -1103,13 +1169,15 @@ function App() {
     if (galleryViewerIndex >= images.length - 5) void loadMore();
   }, [galleryViewerIndex, images.length, loadMore, nextOffset, viewerImageId]);
 
-  const openSimilarImage = useCallback((candidate: GalleryImage) => {
+  const openViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view") => {
+    if (action === "details") { setInfoImage(candidate); return; }
+    if (action === "similar") { openSimilarSearch(candidate); return; }
     setViewerDiscoveredImages((current) => appendUniqueImages(current, [candidate]));
     prepareViewerImages([candidate], 0);
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
     searchSimilar(candidate);
-  }, [searchSimilar]);
+  }, [openSimilarSearch, searchSimilar]);
 
   const navigateViewer = useCallback((direction: -1 | 1) => {
     const currentImageId = viewerImageIdRef.current;
@@ -1139,34 +1207,44 @@ function App() {
     });
   }, [images, loadMore, loadMoreSimilar, nextOffset, similarPage, viewerImages]);
 
-  const chooseAlbum = (path: string) => {
-    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-    setAlbum(path);
-    setExploreSeed("");
-    setViewerImageId(null);
-    setMobileNavOpen(false);
+  const navigateTo = (section: GallerySection, path = "", replace = false) => {
+    const href = galleryHref(section, path);
+    if (href !== window.location.pathname + window.location.search) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", href);
+    }
+    viewerHistoryActiveRef.current = false;
+    viewerHistoryClosingRef.current = false;
+    activateLocation({ section, path: section === "storage" ? path || "/" : section === "library" ? "" : path });
   };
+  const chooseAlbum = (path: string) => navigateTo("albums", path);
   const changeSearch = (value: string) => {
     setSearch(value);
     setExploreSeed("");
     setViewerImageId(null);
   };
   const goHome = () => {
-    requestVersionRef.current++;
-    skipInitialImagesRef.current = false;
-    chooseAlbum("");
-    setSearch("");
-    setSearchOpen(false);
-    setLoading(true);
+    navigateTo("library");
     setReloadToken((value) => value + 1);
   };
   const startExploring = () => {
+    if (browsingAlbums || browsingStorage || browsingSimilar) navigateTo("library");
+    setSearchOpen(false);
+    setMobileNavOpen(false);
     setViewerImageId(null);
     setExploreSeed(createExploreSeed());
   };
+
+  useEffect(() => {
+    if (summary && album && !summary.albums.some(item => item.path === album)) {
+      navigateTo("albums", "", true);
+    }
+  }, [album, summary]);
+
+  const pageLoading = browsingSimilar ? imageSimilarity.loading : browsingStorage ? false : browsingAlbums ? !summary : loading;
   return (
     <div
       className="app-shell"
+      data-gallery-section={section}
       data-sidebar-collapsed={sidebarCollapsed}
       data-mobile-navigation-open={mobileNavOpen}
       data-viewer-returning={Boolean(viewerReturnRequest)}
@@ -1178,6 +1256,9 @@ function App() {
         searchOpen={searchOpen}
         onSearchOpenChange={setSearchOpen}
         searchMode={textSearchMode}
+        albumSearch={browsingAlbums}
+        storageSearch={browsingStorage}
+        similarSearch={browsingSimilar}
         onSearchChange={changeSearch}
         onExplore={startExploring}
         exploreActive={Boolean(exploreSeed)}
@@ -1188,7 +1269,7 @@ function App() {
             setMobileNavOpen((open) => !open);
           } else {
             const updateLayout = () => setSidebarCollapsed((collapsed) => !collapsed);
-            if (masonryLayoutRef.current) masonryLayoutRef.current.resize(updateLayout);
+            if (galleryLayoutRef.current) galleryLayoutRef.current.resize(updateLayout);
             else updateLayout();
           }
         }}
@@ -1197,28 +1278,28 @@ function App() {
       />
       <div
         className="request-progress"
-        data-visible={loading}
+        data-visible={pageLoading}
         role="progressbar"
         aria-label="正在更新图库"
-        aria-hidden={!loading}
+        aria-hidden={!pageLoading}
       >
         <span key={reloadToken} />
       </div>
       <Sidebar
         summary={summary}
-        status={status}
-        activeAlbum={album}
-        onChoose={chooseAlbum}
+        activeSection={section}
+        onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}
         onHome={goHome}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
         onMobileExited={finishMobileNavExit}
         onClose={() => setMobileNavOpen(false)}
         desktopCollapsed={sidebarCollapsed}
+        onSettings={() => setSettingsSection("account")}
       />
 
-      <main className="content" aria-busy={loading || loadingMore}>
-        {error && (
+      <main className="content" aria-busy={pageLoading || pageLoadingMore}>
+        {error && !browsingStorage && !browsingSimilar && (
           <div className="error-banner" role="alert">
             <span>{error}</span>
             <button
@@ -1232,43 +1313,80 @@ function App() {
           </div>
         )}
 
-        {loading ? (
-          <GallerySkeleton />
-        ) : images.length ? (
-          <MasonryGallery
-            ref={masonryLayoutRef}
-            images={images}
-            initialColumnCount={compactLayout ? 2 : 5}
-            preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
+        {browsingSimilar ? (
+          <SimilarSearchView
+            source={querySource}
+            results={imageSimilarity}
+            filter={search}
+            onUpload={file => { setUploadedQuery(file); setGalleryQuerySnapshot(null); navigateTo("similar"); }}
+            onClear={() => { setUploadedQuery(null); setGalleryQuerySnapshot(null); navigateTo("similar"); }}
             onOpen={openViewer}
+            layoutRef={galleryLayoutRef}
+            preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
           />
+        ) : browsingStorage ? (
+          authentication.guest ? (
+            <div className="empty-state"><strong>外部存储仅限管理员访问</strong><a className="sidebar-login-link" href="/login">管理员登录</a></div>
+          ) : <ExternalStorageView
+            path={path}
+            search={search}
+            revision={storageRevision}
+            onOpen={path => navigateTo("storage", path)}
+            onConfigure={() => setSettingsSection("storage")}
+          />
+        ) : browsingAlbums ? (
+          <AlbumsView albums={summary?.albums} search={search} onOpen={chooseAlbum} />
         ) : (
-          <div className="empty-state">
-            <ImageIcon size={30} strokeWidth={1.6} />
-            <strong>{summary?.total === 0 ? "图库暂无图片" : "没有找到图片"}</strong>
-            <span>
-              {summary?.total === 0
-                ? "添加图片后将自动显示"
-                : textSearchReady && debouncedSearch
-                  ? "换一种自然语言描述，或减少限定词"
-                  : "请调整相册或搜索条件"}
-            </span>
-          </div>
-        )}
+          <>
+            {selectedAlbum && <AlbumHeading album={selectedAlbum} onOpen={chooseAlbum} />}
+            {loading ? (
+              <GallerySkeleton />
+            ) : images.length ? (
+              <JustifiedGallery
+                ref={galleryLayoutRef}
+                images={images}
+                preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
+                onOpen={openViewer}
+              />
+            ) : (
+              <div className="empty-state">
+                <ImageIcon size={30} strokeWidth={1.6} />
+                <strong>{selectedAlbum?.count === 0 ? "相册暂无图片" : summary?.total === 0 ? "图库暂无图片" : "没有找到图片"}</strong>
+                <span>
+                  {summary?.total === 0 || selectedAlbum?.count === 0
+                    ? "添加图片后将自动显示"
+                    : textSearchReady && debouncedSearch
+                      ? "换一种自然语言描述，或减少限定词"
+                      : "请调整相册或搜索条件"}
+                </span>
+              </div>
+            )}
 
-        <div ref={sentinelRef} className="load-sentinel" aria-live="polite">
-          {loadingMore && <LoaderCircle className="spin" size={21} aria-label="加载更多" />}
-          {!loading && nextOffset === null && images.length > 0 && (
-            <span>已显示全部 {formatCount(total)} 张图片</span>
-          )}
-        </div>
+            <div ref={sentinelRef} className="load-sentinel" aria-live="polite">
+              {loadingMore && <LoaderCircle className="spin" size={21} aria-label="加载更多" />}
+              {!loading && nextOffset === null && images.length > 0 && (
+                <span>已显示全部 {formatCount(total)} 张图片</span>
+              )}
+            </div>
+          </>
+        )}
       </main>
-      {viewerIndex >= 0 && (
+      {settingsSection && !authentication.guest && (
+        <SettingsDialog
+          initialSection={settingsSection}
+          onClose={() => setSettingsSection(null)}
+          onStorageSaved={() => {
+            setStorageRevision(value => value + 1);
+            if (browsingStorage) navigateTo("storage");
+          }}
+        />
+      )}
+      {!browsingAlbums && !browsingStorage && viewerIndex >= 0 && (
         <ImageViewer
           images={viewerImages}
           activeIndex={viewerIndex}
           hasMore={viewerCanLoadMore}
-          loadingMore={loadingMore || similarLoadingMore}
+          loadingMore={pageLoadingMore || similarLoadingMore}
           onNavigate={navigateViewer}
           onClose={closeViewer}
           similarActive={similarActive}
@@ -1280,9 +1398,10 @@ function App() {
           similarError={similarActive ? similarError : null}
           onSearchSimilar={searchSimilar}
           onLoadMoreSimilar={loadMoreSimilar}
-          onOpenSimilar={openSimilarImage}
+          onOpenImage={openViewerImage}
         />
       )}
+      {infoImage && <PhotoInformationDialog image={infoImage} onClose={() => setInfoImage(null)} />}
     </div>
   );
 }

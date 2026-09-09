@@ -42,7 +42,8 @@ async function traceNavigation(page, toggles) {
         if (!button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))) result.coveredControls++;
       }
       for (const y of [topbarRect.top + 1, topbarRect.top + topbarRect.height / 2, topbarRect.bottom - 1]) {
-        for (let x = 2; x < innerWidth; x += 16) {
+        // The browser's reserved scrollbar gutter is outside the header's hit-test area.
+        for (let x = 2; x < Math.min(innerWidth, topbarRect.right); x += 16) {
           const hit = document.elementFromPoint(x, y);
           if (!hit || hit.closest(".content")) result.leaks.push({ x, y });
           if (
@@ -124,10 +125,19 @@ try {
     if (width === 390) {
       await page.evaluate(() => window.scrollTo(0, 320));
       await page.waitForTimeout(200);
-      await page.evaluate(() => document.documentElement.style.setProperty("--visual-viewport-top", "24px"));
+      // Simulate the viewport itself so scroll events cannot overwrite a CSS-only offset.
+      await page.evaluate(() => {
+        Object.defineProperty(visualViewport, "offsetTop", { configurable: true, value: 24 });
+        visualViewport.dispatchEvent(new Event("scroll"));
+      });
+      // Reduced-motion transitions still take one frame; settle the simulated viewport before tracing navigation.
+      await page.waitForFunction(() => document.querySelector(".topbar").getBoundingClientRect().top === 24);
       const offset = await traceNavigation(page, [0, 90]);
       checkTrace(offset, true);
-      await page.evaluate(() => document.documentElement.style.removeProperty("--visual-viewport-top"));
+      await page.evaluate(() => {
+        delete visualViewport.offsetTop;
+        visualViewport.dispatchEvent(new Event("scroll"));
+      });
       await page.emulateMedia({ reducedMotion: "no-preference" });
       await page.locator(".gallery-sidebar-toggle").click();
       await page.locator(".mobile-sidebar .brand-name").waitFor();

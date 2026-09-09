@@ -1,3 +1,4 @@
+import { authentication, requireLogin } from "./auth";
 import type {
   Album,
   BootstrapData,
@@ -33,7 +34,8 @@ function isAlbum(value: unknown): value is Album {
   return isObject(value)
     && typeof value.path === "string"
     && typeof value.name === "string"
-    && isNonNegativeInteger(value.count);
+    && isNonNegativeInteger(value.count)
+    && (value.cover === null || typeof value.cover === "string");
 }
 
 function isGalleryImage(value: unknown): value is GalleryImage {
@@ -59,7 +61,8 @@ function isImagesPage(value: unknown): value is ImagesPage {
     && isNonNegativeInteger(value.total)
     && isNonNegativeInteger(value.offset)
     && isPositiveInteger(value.limit)
-    && (value.nextOffset === null || isNonNegativeInteger(value.nextOffset));
+    && (value.nextOffset === null || (isNonNegativeInteger(value.nextOffset)
+      && value.nextOffset > value.offset && value.nextOffset < value.total));
 }
 
 function isHistogramChannel(value: unknown): value is number[] {
@@ -109,11 +112,12 @@ function isBootstrapData(value: unknown): value is BootstrapData {
     && isImagesPage(value.images);
 }
 
-async function getJson<T>(
+async function requestJson<T>(
   url: string,
   validate: JsonValidator<T>,
   signal?: AbortSignal,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  request?: RequestInit,
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -130,12 +134,21 @@ async function getJson<T>(
   }, timeoutMs);
 
   try {
+    const headers = new Headers(request?.headers);
+    if (!headers.has("Accept")) headers.set("Accept", "application/json");
     const response = await fetch(url, {
       cache: "no-cache",
-      headers: { Accept: "application/json" },
+      ...request,
+      headers,
       signal: controller.signal,
     });
     if (!response.ok) {
+      if (response.status === 401) requireLogin();
+      if (request?.method === "POST") {
+        if (response.status === 413) throw new Error("图片不能超过 20 MB");
+        const payload = await response.json().catch(() => null);
+        if (typeof payload?.error === "string") throw new Error(payload.error);
+      }
       throw new Error(`请求失败 (${response.status})`);
     }
     if (!response.headers.get("content-type")?.includes("application/json")) {
@@ -176,11 +189,11 @@ export function takeInitialBootstrap(): BootstrapData | null {
 }
 
 export function getGallery(signal?: AbortSignal): Promise<GallerySummary> {
-  return getJson("/api/gallery", isGallerySummary, signal);
+  return requestJson("/api/gallery", isGallerySummary, signal);
 }
 
 export function getStatus(signal?: AbortSignal): Promise<ThumbnailStatus> {
-  return getJson("/api/status", isThumbnailStatus, signal);
+  return requestJson("/api/status", isThumbnailStatus, signal);
 }
 
 export function getImages(
@@ -202,7 +215,7 @@ export function getImages(
   if (options.album) params.set("album", options.album);
   if (options.search) params.set("search", options.search);
   if (options.seed) params.set("seed", options.seed);
-  return getJson(
+  return requestJson(
     `/api/images?${params}`,
     isImagesPage,
     signal,
@@ -219,7 +232,7 @@ export function getSimilarImages(
     offset: String(options.offset),
     limit: String(options.limit),
   });
-  return getJson(
+  return requestJson(
     `/api/images/${encodeURIComponent(imageId)}/similar?${params}`,
     isImagesPage,
     signal,
@@ -227,11 +240,27 @@ export function getSimilarImages(
   );
 }
 
+export function getGalleryImage(imageId: string, signal?: AbortSignal): Promise<GalleryImage> {
+  return requestJson(`/api/images/${encodeURIComponent(imageId)}`, isGalleryImage, signal);
+}
+
+export function searchByUploadedImage(file: File, options: { offset: number; limit: number }, signal?: AbortSignal): Promise<ImagesPage> {
+  const params = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) });
+  return requestJson(`/api/images/similar?${params}`, isImagesPage, signal, SIMILAR_REQUEST_TIMEOUT_MS, {
+    method: "POST", body: file, credentials: "same-origin", cache: "no-store", redirect: "error",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Pixhelf-Origin": window.location.origin,
+      ...(authentication.csrfToken ? { "X-CSRF-Token": authentication.csrfToken } : {}),
+    },
+  });
+}
+
 export function getPhotoDetails(
   imageId: string,
   signal?: AbortSignal,
 ): Promise<PhotoDetails> {
-  return getJson(
+  return requestJson(
     `/api/images/${encodeURIComponent(imageId)}/details`,
     isPhotoDetails,
     signal,

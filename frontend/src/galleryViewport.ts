@@ -4,7 +4,7 @@ export type ViewerAnchor = {
   fallbackScrollY: number;
 };
 
-export type MasonryViewportAnchor = ViewerAnchor & {
+export type GalleryViewportAnchor = ViewerAnchor & {
   imageId: string;
 };
 
@@ -14,9 +14,9 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 export function imageCardById(
   imageId: string,
-  masonry: HTMLElement | null = document.querySelector(".masonry"),
+  gallery: HTMLElement | null = document.querySelector(".justified-gallery"),
 ): HTMLElement | null {
-  return masonry?.querySelector<HTMLElement>(
+  return gallery?.querySelector<HTMLElement>(
     `.image-card[data-image-id="${CSS.escape(imageId)}"]`,
   ) ?? null;
 }
@@ -69,7 +69,7 @@ export function captureViewerAnchor(card: HTMLElement, pointerY?: number): Viewe
   return anchorAtPoint(rect, viewport, anchorY);
 }
 
-export function captureMasonryViewportAnchor(masonry: HTMLElement): MasonryViewportAnchor | null {
+export function captureGalleryViewportAnchor(gallery: HTMLElement): GalleryViewportAnchor | null {
   if (window.scrollY <= 1) return null;
   const viewport = galleryViewportBounds();
   const { safeTop, safeBottom } = viewport;
@@ -86,7 +86,7 @@ export function captureMasonryViewportAnchor(masonry: HTMLElement): MasonryViewp
     horizontalDistance: number;
   } | undefined;
 
-  for (const card of masonry.querySelectorAll<HTMLElement>(".image-card")) {
+  for (const card of gallery.querySelectorAll<HTMLElement>(".image-card")) {
     const rect = card.getBoundingClientRect();
     if (rect.bottom <= safeTop || rect.top >= safeBottom) continue;
     const verticalDistance = Math.max(rect.top - referenceY, referenceY - rect.bottom, 0);
@@ -136,11 +136,11 @@ export function scrollTopForAnchor(card: HTMLElement | null, anchor: ViewerAncho
   return clamp(top, 0, Math.max(0, documentHeight - window.innerHeight));
 }
 
-export function restoreMasonryViewportAnchor(
-  masonry: HTMLElement,
-  anchor: MasonryViewportAnchor,
+export function restoreGalleryViewportAnchor(
+  gallery: HTMLElement,
+  anchor: GalleryViewportAnchor,
 ): void {
-  scrollWindowImmediately(scrollTopForAnchor(imageCardById(anchor.imageId, masonry), anchor));
+  scrollWindowImmediately(scrollTopForAnchor(imageCardById(anchor.imageId, gallery), anchor));
 }
 
 export function scrollWindowImmediately(top: number): void {

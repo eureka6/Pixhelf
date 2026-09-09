@@ -28,6 +28,14 @@ pub struct ImageRecord {
 }
 
 impl ImageRecord {
+    pub(crate) fn belongs_to_album(&self, album: &str) -> bool {
+        self.album == album
+            || self
+                .album
+                .strip_prefix(album)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
     pub(crate) fn matches_metadata(&self, metadata: &fs::Metadata) -> bool {
         let fingerprint = FileFingerprint::from_metadata(metadata);
         metadata.is_file()
@@ -73,6 +81,7 @@ pub struct Album {
     pub path: String,
     pub name: String,
     pub count: usize,
+    pub cover: Option<String>,
 }
 
 #[derive(Default)]
@@ -100,6 +109,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         .collect();
 
     let mut images = Vec::new();
+    let mut albums = BTreeMap::<String, Album>::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
@@ -111,10 +121,24 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
                 return Err(anyhow!(error).context("gallery rescan was incomplete"));
             }
             Err(error) => {
-                warn!(%error, "cannot inspect gallery entry");
+                warn!(%error, "无法读取图库目录项");
                 continue;
             }
         };
+        if entry.file_type().is_dir() && entry.depth() > 0 {
+            if let Some(path) = entry.path().strip_prefix(root).ok().and_then(path_to_url) {
+                albums.insert(
+                    path.clone(),
+                    Album {
+                        name: path.rsplit('/').next().unwrap_or(&path).to_owned(),
+                        path,
+                        count: 0,
+                        cover: None,
+                    },
+                );
+            }
+            continue;
+        }
         if !entry.file_type().is_file() || !is_supported_image(entry.path()) {
             continue;
         }
@@ -124,14 +148,14 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             .strip_prefix(root)
             .with_context(|| format!("{} is outside the gallery root", path.display()))?;
         let Some(relative_path) = path_to_url(relative) else {
-            warn!(path = %path.display(), "image path is not valid UTF-8");
+            warn!(path = %path.display(), "已跳过路径不是 UTF-8 编码的图片");
             continue;
         };
         let existing = previous_by_path.get(relative_path.as_str()).copied();
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                warn!(path = %path.display(), %error, "cannot read image metadata");
+                warn!(path = %path.display(), %error, "无法读取图片文件信息");
                 if let Some(existing) = existing {
                     images.push(Arc::clone(existing));
                 }
@@ -151,7 +175,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         let (width, height) = match probe_dimensions(&path) {
             Ok(dimensions) => dimensions,
             Err(error) => {
-                warn!(path = %path.display(), %error, "cannot decode image header");
+                warn!(path = %path.display(), %error, "无法读取图片尺寸");
                 if let Some(existing) = existing {
                     images.push(Arc::clone(existing));
                 }
@@ -189,25 +213,19 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     images.sort_by(|left, right| {
         natord::compare_ignore_case(&left.relative_path, &right.relative_path)
     });
-    let revision = index_revision(&images);
-
-    let mut album_counts = BTreeMap::<String, usize>::new();
     for image in &images {
-        *album_counts.entry(image.album.clone()).or_default() += 1;
+        let mut path = image.album.as_str();
+        while !path.is_empty() {
+            if let Some(album) = albums.get_mut(path) {
+                album.count += 1;
+                album.cover.get_or_insert_with(|| image.id.clone());
+            }
+            path = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
     }
-    let albums = album_counts
-        .into_iter()
-        .map(|(path, count)| Album {
-            name: path
-                .rsplit('/')
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or("根目录")
-                .to_owned(),
-            path,
-            count,
-        })
-        .collect();
+    let mut albums = albums.into_values().collect::<Vec<_>>();
+    albums.sort_by(|left, right| natord::compare_ignore_case(&left.path, &right.path));
+    let revision = index_revision(&images, &albums);
     let mut images_by_id = images.clone();
     images_by_id.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     Ok(GalleryIndex {
@@ -218,11 +236,15 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     })
 }
 
-fn index_revision(images: &[Arc<ImageRecord>]) -> String {
+fn index_revision(images: &[Arc<ImageRecord>], albums: &[Album]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-index-v1\0");
+    hasher.update(b"pixhelf-index-v2\0");
     for image in images {
         hasher.update(image.id.as_bytes());
+        hasher.update(b"\0");
+    }
+    for album in albums {
+        hasher.update(album.path.as_bytes());
         hasher.update(b"\0");
     }
     hasher.finalize().to_hex().to_string()
@@ -316,6 +338,73 @@ mod tests {
             Some("image.png")
         );
         assert!(index.image("missing").is_none());
+    }
+
+    #[test]
+    fn albums_include_empty_directories_and_count_descendants_without_sibling_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        for path in ["旅行/海边", "旅行集", "empty", "album10", "album2"] {
+            fs::create_dir_all(temp.path().join(path)).unwrap();
+        }
+        for path in [
+            "root.png",
+            "旅行/direct.png",
+            "旅行/海边/child.png",
+            "旅行集/other.png",
+        ] {
+            image::RgbImage::new(20, 10)
+                .save(temp.path().join(path))
+                .unwrap();
+        }
+        let index = scan_gallery(temp.path(), None).unwrap();
+        assert_eq!(index.images.len(), 4);
+        assert_eq!(index.albums.len(), 6);
+        assert_eq!(index.albums[0].path, "album2");
+        assert_eq!(index.albums[1].path, "album10");
+        assert!(index.albums.iter().all(|album| !album.path.is_empty()));
+        for (path, count) in [("旅行", 2), ("旅行/海边", 1), ("旅行集", 1), ("empty", 0)] {
+            let album = index
+                .albums
+                .iter()
+                .find(|album| album.path == path)
+                .unwrap();
+            assert_eq!(album.count, count);
+            assert_eq!(
+                index
+                    .images
+                    .iter()
+                    .filter(|image| image.belongs_to_album(path))
+                    .count(),
+                count
+            );
+            if count == 0 {
+                assert!(album.cover.is_none());
+            } else {
+                assert!(
+                    index
+                        .image(album.cover.as_deref().unwrap())
+                        .unwrap()
+                        .belongs_to_album(path)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_directory_changes_update_the_gallery_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        image::RgbImage::new(20, 10)
+            .save(temp.path().join("root.png"))
+            .unwrap();
+        let first = scan_gallery(temp.path(), None).unwrap();
+        fs::create_dir(temp.path().join("new-album")).unwrap();
+        let added = scan_gallery(temp.path(), Some(&first)).unwrap();
+        assert_ne!(added.revision, first.revision);
+        assert_eq!(added.images[0].id, first.images[0].id);
+        fs::remove_dir(temp.path().join("new-album")).unwrap();
+        let removed = scan_gallery(temp.path(), Some(&added)).unwrap();
+        assert_eq!(removed.revision, first.revision);
+        assert!(removed.albums.is_empty());
     }
 
     #[test]

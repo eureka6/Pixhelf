@@ -9,13 +9,14 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, StatusCode, header::RANGE};
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::TextSearchFiles;
 
 const MODEL_REVISION: &str = "f4a64596bbcf9a2a94591b74b9dc39b2e4e77e3e";
 const MODEL_BASE_URL: &str = "https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16/resolve";
-const PROGRESS_INTERVAL: u64 = 64 * 1024 * 1024;
+const MEBIBYTE: u64 = 1024 * 1024;
+const PROGRESS_INTERVAL: u64 = 64 * MEBIBYTE;
 const DOWNLOAD_ATTEMPTS: usize = 5;
 
 const ARTIFACTS: [Artifact; 2] = [
@@ -65,7 +66,7 @@ pub(crate) async fn ensure_automatic_model(files: &TextSearchFiles) -> Result<()
     for artifact in ARTIFACTS {
         let destination = artifact.destination(files);
         if cached_artifact_is_valid(destination, artifact).await? {
-            info!(file = %destination.display(), "using cached model file");
+            debug!(file = %destination.display(), "复用已校验的模型缓存");
         } else {
             missing.push(artifact);
         }
@@ -94,9 +95,9 @@ pub(crate) async fn ensure_automatic_model(files: &TextSearchFiles) -> Result<()
         download_artifact(&client, artifact.destination(files), artifact, &url).await?;
     }
 
-    info!(
+    debug!(
         directory = %files.model.parent().unwrap_or(&files.model).display(),
-        "natural-language search model downloaded"
+        "文字搜图模型下载完成，校验通过"
     );
     Ok(())
 }
@@ -125,7 +126,7 @@ async fn download_artifact(
             attempt,
             retry_seconds,
             error = %format!("{error:#}"),
-            "model download failed; retrying"
+            "模型下载失败，稍后重试"
         );
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
     }
@@ -165,9 +166,9 @@ async fn download_artifact_once(
 
     info!(
         file = artifact.filename,
-        downloaded_bytes = resumed_from,
-        total_bytes = artifact.size,
-        "downloading natural-language search model"
+        "开始下载模型：{:.1} / {:.1} MiB",
+        resumed_from as f64 / MEBIBYTE as f64,
+        artifact.size as f64 / MEBIBYTE as f64
     );
     let mut response = request
         .send()
@@ -176,7 +177,7 @@ async fn download_artifact_once(
     if resumed_from > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
         info!(
             file = artifact.filename,
-            "download source does not support this range request; restarting the file"
+            "下载源不支持断点续传，将重新下载此文件"
         );
         response = client
             .get(url)
@@ -227,10 +228,10 @@ async fn download_artifact_once(
         if downloaded >= next_progress || downloaded == artifact.size {
             info!(
                 file = artifact.filename,
-                percent = downloaded.saturating_mul(100) / artifact.size,
-                downloaded_bytes = downloaded,
-                total_bytes = artifact.size,
-                "model download progress"
+                "模型下载进度：{:.1} / {:.1} MiB（{}%）",
+                downloaded as f64 / MEBIBYTE as f64,
+                artifact.size as f64 / MEBIBYTE as f64,
+                downloaded.saturating_mul(100) / artifact.size
             );
             next_progress = downloaded.saturating_add(PROGRESS_INTERVAL);
         }

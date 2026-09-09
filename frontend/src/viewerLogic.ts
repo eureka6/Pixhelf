@@ -20,7 +20,7 @@ export type PointerPoint = {
 
 export type ViewerSourcePresentation = "direct" | "upgrade";
 
-export type ViewerSourceStrategy = "viewport-upgrade" | "bounded-canvas" | "direct-original";
+type ViewerSourceStrategy = "viewport-upgrade" | "bounded-canvas" | "direct-original";
 
 export type ViewerSourceState = {
   id: string;
@@ -37,7 +37,7 @@ type ViewerDisplayState = {
   nativeOriginalActive: boolean;
 };
 
-export type ViewportSize = {
+type ViewportSize = {
   width: number;
   height: number;
 };

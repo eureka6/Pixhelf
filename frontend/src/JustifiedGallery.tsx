@@ -10,19 +10,17 @@ import {
   useState,
 } from "preact/hooks";
 import {
-  captureMasonryViewportAnchor,
-  restoreMasonryViewportAnchor,
+  captureGalleryViewportAnchor,
+  restoreGalleryViewportAnchor,
   visualViewportBounds,
 } from "./galleryViewport";
-import type { MasonryViewportAnchor } from "./galleryViewport";
+import type { GalleryViewportAnchor } from "./galleryViewport";
 import { ImageIcon } from "./icons";
-import {
-  layoutMasonryImages,
-  layoutMasonrySkeleton,
-  MAX_MASONRY_COLUMNS,
-  useMasonryMetrics,
-} from "./masonry";
-import type { GalleryImage } from "./types";
+import { ImageCardActions } from "./ImageCardActions";
+import { useGalleryMetrics } from "./galleryMetrics";
+import { useCardInteraction } from "./cardInteraction";
+import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
+import type { GalleryImage, ImageCardAction } from "./types";
 import { preloadOriginalImage, viewerThumbnailUrl } from "./viewerAssets";
 
 const CARD_PREFETCH_MARGIN = "1200px 0px";
@@ -31,12 +29,12 @@ const READY_THUMBNAIL_CACHE_LIMIT = 2048;
 
 type ThumbnailState = "loading" | "loaded" | "retrying" | "failed";
 
-export type MasonryGalleryHandle = {
+export type JustifiedGalleryHandle = {
   resize: (updateLayout: () => void) => void;
 };
 
-type MasonryResizeAnimation = {
-  masonry: HTMLElement;
+type GalleryResizeAnimation = {
+  gallery: HTMLElement;
   animations: Animation[];
 };
 
@@ -80,57 +78,54 @@ function observeCardLoad(element: Element, load: () => void): () => void {
   };
 }
 
-type MasonryGalleryProps = {
+type JustifiedGalleryProps = {
   images: GalleryImage[];
-  initialColumnCount: number;
   preserveViewport: boolean;
-  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
+  onOpen: (id: string, card: HTMLElement, pointerY?: number, action?: ImageCardAction) => void;
 };
 
-export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalleryProps>(function MasonryGallery({
+export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, JustifiedGalleryProps>(function JustifiedGallery({
   images,
-  initialColumnCount,
   preserveViewport,
   onOpen,
 }, handleRef) {
   const ref = useRef<HTMLDivElement>(null);
-  const resizeAnchorRef = useRef<MasonryViewportAnchor | null>(null);
-  const stableViewportAnchorRef = useRef<MasonryViewportAnchor | null>(null);
+  useCardInteraction(ref, preserveViewport);
+  const resizeAnchorRef = useRef<GalleryViewportAnchor | null>(null);
+  const stableViewportAnchorRef = useRef<GalleryViewportAnchor | null>(null);
   const resizeGuardUntilRef = useRef(0);
-  const resizeAnimationRef = useRef<MasonryResizeAnimation | null>(null);
-  const [activeNameId, setActiveNameId] = useState<string | null>(null);
+  const resizeAnimationRef = useRef<GalleryResizeAnimation | null>(null);
   const stopResizeAnimation = useCallback(() => {
     const current = resizeAnimationRef.current;
     if (!current) return;
     resizeAnimationRef.current = null;
     current.animations.forEach((animation) => animation.cancel());
-    delete current.masonry.dataset.resizing;
+    delete current.gallery.dataset.resizing;
   }, []);
   const captureResizeAnchor = useCallback(() => {
     stopResizeAnimation();
-    const masonry = ref.current;
-    resizeAnchorRef.current = preserveViewport && masonry
-      ? stableViewportAnchorRef.current ?? captureMasonryViewportAnchor(masonry)
+    const gallery = ref.current;
+    resizeAnchorRef.current = preserveViewport && gallery
+      ? stableViewportAnchorRef.current ?? captureGalleryViewportAnchor(gallery)
       : null;
   }, [preserveViewport, stopResizeAnimation]);
-  const { width, columnCount, gap, measure } = useMasonryMetrics(
+  const { width, gap, measure } = useGalleryMetrics(
     ref,
-    initialColumnCount,
     captureResizeAnchor,
   );
 
   useImperativeHandle(handleRef, () => ({
     resize(updateLayout) {
-      const masonry = ref.current;
-      if (!masonry) {
+      const gallery = ref.current;
+      if (!gallery) {
         updateLayout();
         return;
       }
-      const before = [...masonry.querySelectorAll<HTMLElement>(".image-card")]
+      const before = [...gallery.querySelectorAll<HTMLElement>(".image-card")]
         .map((card) => ({ card, rect: card.getBoundingClientRect() }));
       captureResizeAnchor();
       const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (!reducedMotion) masonry.dataset.resizing = "true";
+      if (!reducedMotion) gallery.dataset.resizing = "true";
 
       // Commit the final width before painting, then animate from the previous visual positions.
       flushSync(updateLayout);
@@ -145,10 +140,10 @@ export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalle
       const viewport = visualViewportBounds();
       const isVisible = (rect: DOMRect) => rect.bottom > viewport.top
         && rect.top < viewport.bottom;
-      const styles = getComputedStyle(masonry);
+      const styles = getComputedStyle(gallery);
       const duration = Number.parseFloat(styles.getPropertyValue("--motion-medium")) || 220;
       const easing = styles.getPropertyValue("--ease-standard").trim() || "ease";
-      const current: MasonryResizeAnimation = { masonry, animations: [] };
+      const current: GalleryResizeAnimation = { gallery, animations: [] };
       for (const { card, before, after } of positions) {
         if (!isVisible(before) && !isVisible(after)) continue;
         const x = before.left - after.left;
@@ -169,7 +164,7 @@ export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalle
       void Promise.allSettled(current.animations.map((animation) => animation.finished)).then(() => {
         if (resizeAnimationRef.current !== current) return;
         resizeAnimationRef.current = null;
-        delete masonry.dataset.resizing;
+        delete gallery.dataset.resizing;
       });
     },
   }), [captureResizeAnchor, measure]);
@@ -181,26 +176,26 @@ export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalle
 
   useLayoutEffect(() => {
     const anchor = resizeAnchorRef.current;
-    const masonry = ref.current;
+    const gallery = ref.current;
     let correctionFrame = 0;
     resizeAnchorRef.current = null;
-    if (anchor && masonry && preserveViewport) {
+    if (anchor && gallery && preserveViewport) {
       resizeGuardUntilRef.current = performance.now() + 120;
-      restoreMasonryViewportAnchor(masonry, anchor);
+      restoreGalleryViewportAnchor(gallery, anchor);
       correctionFrame = window.requestAnimationFrame(() => {
-        restoreMasonryViewportAnchor(masonry, anchor);
+        restoreGalleryViewportAnchor(gallery, anchor);
       });
     }
     // Keep fractional scroll rounding from accumulating across resize frames.
-    stableViewportAnchorRef.current = preserveViewport && masonry
-      ? anchor ?? captureMasonryViewportAnchor(masonry)
+    stableViewportAnchorRef.current = preserveViewport && gallery
+      ? anchor ?? captureGalleryViewportAnchor(gallery)
       : null;
     return () => window.cancelAnimationFrame(correctionFrame);
-  }, [columnCount, gap, images, preserveViewport, width]);
+  }, [gap, images, preserveViewport, width]);
 
   useEffect(() => {
-    const masonry = ref.current;
-    if (!masonry || !preserveViewport) {
+    const gallery = ref.current;
+    if (!gallery || !preserveViewport) {
       stableViewportAnchorRef.current = null;
       return;
     }
@@ -211,7 +206,7 @@ export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalle
         resizeAnchorRef.current
         || performance.now() < resizeGuardUntilRef.current
       ) return;
-      stableViewportAnchorRef.current = captureMasonryViewportAnchor(masonry);
+      stableViewportAnchorRef.current = captureGalleryViewportAnchor(gallery);
     };
     const scheduleViewportAnchor = () => {
       if (frame) return;
@@ -233,39 +228,37 @@ export const MasonryGallery = memo(forwardRef<MasonryGalleryHandle, MasonryGalle
     window.addEventListener("scroll", scheduleViewportAnchor, { passive: true });
     window.addEventListener("resize", guardViewportResize);
     window.visualViewport?.addEventListener("resize", guardViewportResize);
-    masonry.addEventListener("focusin", rememberFocusedAnchor);
+    gallery.addEventListener("focusin", rememberFocusedAnchor);
     return () => {
       if (frame) window.cancelAnimationFrame(frame);
       window.removeEventListener("scroll", scheduleViewportAnchor);
       window.removeEventListener("resize", guardViewportResize);
       window.visualViewport?.removeEventListener("resize", guardViewportResize);
-      masonry.removeEventListener("focusin", rememberFocusedAnchor);
+      gallery.removeEventListener("focusin", rememberFocusedAnchor);
     };
   }, [preserveViewport]);
 
-  const showName = useCallback((id: string) => setActiveNameId(id), []);
-
   const layout = useMemo(
-    () => layoutMasonryImages(images, { width, columnCount, gap }),
-    [columnCount, gap, images, width],
+    () => layoutJustifiedImages(images, { width, gap }),
+    [gap, images, width],
   );
 
   return (
     <div
       ref={ref}
-      className="masonry"
-      data-columns={columnCount}
+      className="justified-gallery"
+      data-layout="justified"
+      data-layout-width={width}
+      data-rows={layout.rowCount}
       style={{ height: layout.height } as CSSProperties}
     >
-      {layout.items.map(({ image, index, style }) => (
+      {layout.items.map(({ image, index, row, style }) => (
         <ImageCard
           key={image.id}
           image={image}
           layoutStyle={style}
-          eager={index < columnCount}
+          eager={row === 0}
           highPriority={index === 0}
-          nameVisible={activeNameId === image.id}
-          onNameTouch={showName}
           onOpen={onOpen}
         />
       ))}
@@ -278,17 +271,13 @@ const ImageCard = memo(function ImageCard({
   layoutStyle,
   eager,
   highPriority,
-  nameVisible,
-  onNameTouch,
   onOpen,
 }: {
   image: GalleryImage;
   layoutStyle: CSSProperties;
   eager: boolean;
   highPriority: boolean;
-  nameVisible: boolean;
-  onNameTouch: (id: string) => void;
-  onOpen: (id: string, card: HTMLElement, pointerY?: number) => void;
+  onOpen: JustifiedGalleryProps["onOpen"];
 }) {
   const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
   const [loadState, setLoadState] = useState<ThumbnailState>(alreadyReady ? "loaded" : "loading");
@@ -299,6 +288,9 @@ const ImageCard = memo(function ImageCard({
   const cardRef = useRef<HTMLElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const retryTimerRef = useRef(0);
+  const handleAction = useCallback((action: ImageCardAction) => {
+    if (cardRef.current) onOpen(image.id, cardRef.current, undefined, action);
+  }, [image.id, onOpen]);
 
   useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
   useEffect(() => {
@@ -345,9 +337,8 @@ const ImageCard = memo(function ImageCard({
     <figure
       ref={cardRef}
       className="image-card"
-      title={image.name}
       data-image-id={image.id}
-      data-name-visible={nameVisible}
+      data-image-name={image.name}
       data-loaded={loaded}
       data-failed={failed}
       data-loading={loadRequested && !loaded && !failed}
@@ -359,10 +350,7 @@ const ImageCard = memo(function ImageCard({
         aspectRatio: `${image.width} / ${image.height}`,
       } as CSSProperties}
       onPointerEnter={() => preloadOriginalImage(image)}
-      onPointerDown={(event) => {
-        preloadOriginalImage(image);
-        if (event.pointerType !== "mouse") onNameTouch(image.id);
-      }}
+      onPointerDown={() => preloadOriginalImage(image)}
       onFocus={() => preloadOriginalImage(image)}
       onClick={(event) => onOpen(
         image.id,
@@ -370,14 +358,14 @@ const ImageCard = memo(function ImageCard({
         event.detail > 0 ? event.clientY : undefined,
       )}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
         onOpen(image.id, event.currentTarget);
       }}
-      role="button"
-      tabIndex={0}
-      aria-label={`查看 ${image.name}`}
-      aria-haspopup="dialog"
+      role="group"
+      tabIndex={-1}
+      aria-label={image.name}
     >
       {!failed && loadRequested ? (
         <img
@@ -399,24 +387,26 @@ const ImageCard = memo(function ImageCard({
           <ImageIcon size={24} />
         </span>
       ) : null}
-      <span className="image-name">{image.name}</span>
+      <button type="button" className="photo-card-open" aria-label={`查看 ${image.name}`} aria-haspopup="dialog" />
+      <ImageCardActions image={image} onAction={handleAction} />
     </figure>
   );
 });
 
 export function GallerySkeleton() {
   const ref = useRef<HTMLDivElement>(null);
-  const { width, columnCount, gap } = useMasonryMetrics(ref, MAX_MASONRY_COLUMNS);
+  const { width, gap } = useGalleryMetrics(ref);
   const layout = useMemo(
-    () => layoutMasonrySkeleton({ width, columnCount, gap }),
-    [columnCount, gap, width],
+    () => layoutJustifiedSkeleton({ width, gap }),
+    [gap, width],
   );
 
   return (
     <div
       ref={ref}
       className="skeleton-grid"
-      data-columns={columnCount}
+      data-layout="justified"
+      data-layout-width={width}
       style={{ height: layout.height } as CSSProperties}
       aria-label="正在加载图库"
     >

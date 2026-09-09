@@ -1,12 +1,12 @@
 # Pixhelf
 
-Pixhelf 是一个轻量、自托管的本地图片画廊，支持 JPEG、PNG 和 WebP。提供相册与瀑布流浏览、文件名和中文自然语言搜索、相似图片、随机探索、原图查看下载，以及 EXIF 和直方图。
+一隅光影，满架时光。
+
+轻量、自托管的图片画廊，支持 JPEG、PNG、WebP，相册与 Justified 布局、中文自然语言搜索、以图搜图、随机探索，以及原图下载、EXIF 和直方图。
 
 ## Docker 部署（推荐）
 
-镜像支持 Linux amd64 和 arm64，内置文字搜图模型，无需单独下载或挂载。
-
-安装 Docker 和 Compose 插件后，在部署目录使用以下 [`compose.yml`](compose.yml)：
+镜像支持 Linux amd64 / arm64，内置文字搜图模型。将以下内容保存为 [`compose.yml`](compose.yml)：
 
 ```yaml
 services:
@@ -17,96 +17,77 @@ services:
       - "3002:3002"
     volumes:
       - "./pic:/data/pic:ro"
-      - pixhelf-cache:/data/.pixhelf-cache
+      - pixhelf-data:/data/.pixhelf-data
 
 volumes:
-  pixhelf-cache:
+  pixhelf-data:
 ```
-
-启动服务：
 
 ```bash
 mkdir -p pic
 docker compose up -d
 ```
 
-访问 <http://localhost:3002>，将图片放入 `./pic` 即可，目录变化默认每 10 秒自动检测。
+把图片放入 `pic`，或将 `./pic` 换成已有图片目录。打开 `http://服务器地址:3002`，创建管理员账号并设置至少 15 个字符的密码即可使用，无需额外配置登录环境变量。首次初始化仅能完成一次，部署后请先创建管理员。
 
-- `./pic:/data/pic:ro`：只读挂载图片目录，可将 `./pic` 改为实际路径，如 `/mnt/photos`。
-- `pixhelf-cache`：自动创建的缓存卷，保留缩略图和搜索索引，避免重建容器后重新处理。
+程序自动索引图片并检测目录变化；索引期间可按文件名搜索，完成后支持自然语言搜索。公网部署建议使用 HTTPS 反向代理，代理目标为 `服务器地址:3002`，同一 Docker 网络内可用 `pixhelf:3002`；图库页面和 API 应遵循应用的缓存指令。
 
-首次启动会在后台建立索引；完成前支持文件名搜索，完成后启用自然语言搜索。图片处理和搜索均在本机进行。
+## 使用与设置
 
-应用没有内置登录认证，公网访问请使用带认证的反向代理。
+- **浏览图片**：点击查看大图，桌面右键或手机长按打开菜单，可查看图片信息、查找相似图片或下载原图。
+- **以图搜图**：侧栏“相似图片”支持上传不超过 20 MB 的 JPG、PNG、WebP；查询图片仅用于搜索，不写入图库。
+- **账号安全**：设置中可修改用户名和密码，保存后所有设备需重新登录。
+- **访客模式**：默认关闭。开启“免登录浏览”后，来访者无需密码即可浏览、搜图和下载；账号设置与外部存储仅限管理员。
+- **外部存储**：在设置中连接 OpenList，填写服务地址、账号密码或令牌及起始目录，即可浏览、预览和下载远程文件。
 
-### 更新
+## 更新与数据
 
 ```bash
 docker compose pull
 docker compose up -d
+docker compose logs --tail=50 -f pixhelf
 ```
 
-`latest` 对应最新稳定版，固定版本可使用 `eureka6688/pixhelf:0.2.5`。模型未变更时，更新可复用已有模型层。
+`pixhelf-data` 卷挂载到 `/data/.pixhelf-data`，保存缩略图、索引、账号与设置。卷内 `thumbnails/auth/` 保存管理员和访客配置，`thumbnails/settings/` 保存外部存储配置。保留并备份此卷，更新或重建容器后设置仍在；`docker compose down -v` 会删除数据卷。
 
-### Docker Run
+<details>
+<summary>从旧的 pixhelf-cache 升级</summary>
 
-不使用 Compose 时，可以直接运行：
+先运行 `docker volume ls` 确认原卷名。将新 Compose 底部的卷声明改为以下形式，即可通过新名称和挂载路径复用原有账号与数据：
 
-```bash
-mkdir -p pic
-docker run -d \
-  --name pixhelf \
-  --restart unless-stopped \
-  -p 3002:3002 \
-  -v "$PWD/pic:/data/pic:ro" \
-  -v pixhelf-cache:/data/.pixhelf-cache \
-  eureka6688/pixhelf:latest
+```yaml
+volumes:
+  pixhelf-data:
+    external: true
+    name: 原项目名_pixhelf-cache
 ```
+
+将 `原项目名_pixhelf-cache` 替换为实际旧卷名，然后执行 `docker compose up -d`。如需同时更换实际卷名，先停服并将旧卷完整复制到新卷，再使用默认 Compose。
+
+独立运行时，先停止程序，将工作目录中的 `.pixhelf-cache` 改名为 `.pixhelf-data`；也可继续用 `--cache-dir` 或 `PIXHELF_CACHE_DIR` 指向原来的 `thumbnails` 目录。
+
+</details>
 
 ## 可选配置
 
-在 Compose 服务中添加 `environment`，修改后执行 `docker compose up -d` 生效：
+按需在 Compose 服务中添加 `environment`，其余参数可通过 `docker compose exec pixhelf /pixhelf --help` 查看。
 
-```yaml
-services:
-  pixhelf:
-    environment:
-      PIXHELF_WORKERS: "4"
-      PIXHELF_SCAN_INTERVAL: "30"
-```
-
-| 环境变量 | 默认值 | 说明 |
+| 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `PIXHELF_WORKERS` | 自动选择 2–4 | 后台缩略图任务数，可设为 1–16 |
-| `PIXHELF_SCAN_INTERVAL` | `10` | 目录检测间隔，单位秒，可设为 2–3600 |
-| `PIXHELF_TEXT_SEARCH_MODEL` | 内置模型 | 设为 `"false"` 关闭自然语言搜索，保留文件名搜索和相似图片 |
+| `PIXHELF_TEXT_SEARCH_MODEL` | 镜像内置模型 | 设为 `false` 关闭自然语言搜索 |
+| `PIXHELF_WORKERS` | 自动选择 2–4 | 后台处理并发数，范围 1–16 |
+| `PIXHELF_SCAN_INTERVAL` | `10` | 图片目录扫描间隔，单位秒 |
 
-完整参数可通过 `docker compose exec pixhelf /pixhelf --help` 查看。
+## 源码运行
 
-## 其他运行方式
-
-### 独立程序
-
-下载对应架构的程序后运行，以 amd64 为例：
-
-```bash
-chmod +x pixhelf-amd64-linux
-./pixhelf-amd64-linux \
-  --gallery-dir /path/to/photos \
-  --cache-dir /path/to/pixhelf-cache
-```
-
-独立程序默认会在后台下载文字搜图模型（约 753 MB），可加 `--text-search-model false` 关闭。
-
-### 源码运行
-
-需要 Rust stable、Node.js 22 和 npm：
+需要 Rust stable、Node.js 22+ 和 npm。
 
 ```bash
 npm --prefix frontend ci
-cargo run --release -- \
-  --gallery-dir /path/to/photos \
-  --cache-dir /path/to/pixhelf-cache
+cargo build --release
+./target/release/pixhelf --gallery-dir /path/to/photos
 ```
 
-前端会随 Cargo 构建并嵌入可执行文件。
+前端随 Cargo 构建并嵌入程序，默认数据目录为 `./.pixhelf-data/thumbnails`，可用 `--cache-dir` 指定其他位置。独立程序会自动下载文字搜图模型，可加 `--text-search-model false` 关闭。
+
+验证：`cargo test`；浏览器回归使用 `npm --prefix frontend run auth-check`（需先执行 `cargo build`，并安装 OpenSSL 和 Chromium）。

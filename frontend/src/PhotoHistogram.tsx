@@ -1,4 +1,5 @@
 import { memo } from "preact/compat";
+import { useId } from "preact/hooks";
 import type { PhotoHistogram as HistogramData } from "./types";
 
 const BOTTOM = 96;
@@ -41,7 +42,7 @@ export const PhotoHistogram = memo(function PhotoHistogram({
     ...histogram.blue,
     ...histogram.luminance,
   );
-  const titleId = `photo-histogram-${imageId}`;
+  const titleId = `photo-histogram-${imageId}-${useId()}`;
 
   return (
     <div className="viewer-histogram-card">

@@ -3,27 +3,26 @@ import { memo } from "preact/compat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { ImageIcon, LoaderCircle } from "./icons";
-import { layoutMasonryImages, layoutMasonrySkeleton } from "./masonry";
-import type { MasonryMetrics } from "./masonry";
-import type { GalleryImage } from "./types";
+import { ImageCardActions } from "./ImageCardActions";
+import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
+import type { GalleryMetrics } from "./galleryMetrics";
+import { useCardInteraction } from "./cardInteraction";
+import type { GalleryImage, ImageCardAction } from "./types";
 import { viewerThumbnailUrl } from "./viewerAssets";
 
 const SimilarImageCard = memo(function SimilarImageCard({
   image,
   layoutStyle,
-  nameVisible,
-  onNameTouch,
   onOpen,
 }: {
   image: GalleryImage;
   layoutStyle: CSSProperties;
-  nameVisible: boolean;
-  onNameTouch: (id: string) => void;
-  onOpen: (image: GalleryImage) => void;
+  onOpen: (image: GalleryImage, action?: ImageCardAction) => void;
 }) {
   const imageRef = useRef<HTMLImageElement>(null);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const handleAction = useCallback((action: ImageCardAction) => onOpen(image, action), [image, onOpen]);
 
   useLayoutEffect(() => {
     const element = imageRef.current;
@@ -33,21 +32,18 @@ const SimilarImageCard = memo(function SimilarImageCard({
   return (
     <figure
       className="viewer-similar-card"
-      title={image.name}
       data-image-id={image.id}
-      data-name-visible={nameVisible}
+      data-image-name={image.name}
       data-loaded={loaded}
       data-failed={failed}
       data-loading={!loaded && !failed}
       style={layoutStyle}
-      role="button"
-      tabIndex={0}
-      aria-label={`查看相似图片 ${image.name}`}
-      onPointerDown={(event) => {
-        if (event.pointerType !== "mouse") onNameTouch(image.id);
-      }}
+      role="group"
+      tabIndex={-1}
+      aria-label={image.name}
       onClick={() => onOpen(image)}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
         onOpen(image);
@@ -72,12 +68,13 @@ const SimilarImageCard = memo(function SimilarImageCard({
           <ImageIcon size={24} />
         </span>
       )}
-      <figcaption className="image-name">{image.name}</figcaption>
+      <button type="button" className="photo-card-open" aria-label={`查看相似图片 ${image.name}`} aria-haspopup="dialog" />
+      <ImageCardActions image={image} onAction={handleAction} />
     </figure>
   );
 });
 
-export function SimilarImageMasonry({
+export function SimilarImageGallery({
   images,
   total,
   metrics,
@@ -89,17 +86,17 @@ export function SimilarImageMasonry({
 }: {
   images: GalleryImage[];
   total: number;
-  metrics: MasonryMetrics;
+  metrics: GalleryMetrics;
   hasMore: boolean;
   loadingMore: boolean;
   error: string | null;
   onLoadMore: () => void;
-  onOpen: (image: GalleryImage) => void;
+  onOpen: (image: GalleryImage, action?: ImageCardAction) => void;
 }) {
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
-  const [activeNameId, setActiveNameId] = useState<string | null>(null);
-  const showName = useCallback((id: string) => setActiveNameId(id), []);
-  const layout = useMemo(() => layoutMasonryImages(images, metrics), [images, metrics]);
+  const galleryRef = useRef<HTMLDivElement>(null);
+  useCardInteraction(galleryRef);
+  const layout = useMemo(() => layoutJustifiedImages(images, metrics), [images, metrics]);
 
   useEffect(() => {
     const sentinel = loadMoreSentinelRef.current;
@@ -121,8 +118,11 @@ export function SimilarImageMasonry({
   return (
     <>
       <div
-        className="viewer-similar-masonry"
-        data-columns={metrics.columnCount}
+        ref={galleryRef}
+        className="viewer-similar-gallery"
+        data-layout="justified"
+        data-layout-width={metrics.width}
+        data-rows={layout.rowCount}
         style={{ height: layout.height } as CSSProperties}
       >
         {layout.items.map(({ image, style }) => (
@@ -130,8 +130,6 @@ export function SimilarImageMasonry({
             key={image.id}
             image={image}
             layoutStyle={style}
-            nameVisible={activeNameId === image.id}
-            onNameTouch={showName}
             onOpen={onOpen}
           />
         ))}
@@ -165,13 +163,14 @@ export function SimilarImageMasonry({
   );
 }
 
-export function SimilarImageSkeleton({ metrics }: { metrics: MasonryMetrics }) {
-  const layout = useMemo(() => layoutMasonrySkeleton(metrics), [metrics]);
+export function SimilarImageSkeleton({ metrics }: { metrics: GalleryMetrics }) {
+  const layout = useMemo(() => layoutJustifiedSkeleton(metrics), [metrics]);
   return (
     <div
       className="viewer-similar-skeleton"
       aria-label="正在查找相似图片"
-      data-columns={metrics.columnCount}
+      data-layout="justified"
+      data-layout-width={metrics.width}
       style={{ height: layout.height } as CSSProperties}
     >
       {layout.items.map(({ index, style }) => (

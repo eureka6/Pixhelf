@@ -19,7 +19,7 @@ use image::{
 };
 use serde::Serialize;
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::{
@@ -103,6 +103,13 @@ pub struct ThumbnailStatus {
 }
 
 impl ThumbnailManager {
+    pub(crate) fn settings_directory(&self) -> PathBuf {
+        self.cache_root
+            .parent()
+            .expect("thumbnail cache parent")
+            .join("settings")
+    }
+
     #[cfg(test)]
     pub fn new(cache_dir: PathBuf) -> Result<Arc<Self>> {
         Self::new_with_text_search(cache_dir, None)
@@ -122,7 +129,7 @@ impl ThumbnailManager {
             warn!(
                 path = %legacy_viewer_cache.display(),
                 %error,
-                "cannot remove obsolete viewer cache"
+                "无法清理旧版查看器缓存"
             );
         }
         purge_temporary_files(&cache_root);
@@ -269,7 +276,7 @@ impl ThumbnailManager {
                     .into_iter()
                     .filter(|(record, thumbnail)| {
                         if let Err(error) = signature_for_thumbnail(record, thumbnail) {
-                            warn!(image = %record.relative_path, %error, "cannot warm image similarity descriptor");
+                            warn!(image = %record.relative_path, %error, "无法补齐相似图片索引");
                             true
                         } else {
                             false
@@ -279,11 +286,18 @@ impl ThumbnailManager {
             })
             .await;
             match result {
-                Ok(failures) if total > 0 => {
-                    info!(total, failures, "image similarity descriptors are ready");
+                Ok(0) if total > 0 => {
+                    info!(images = total, "相似图片索引已补齐");
+                }
+                Ok(failures) if failures > 0 => {
+                    warn!(
+                        total,
+                        failed = failures,
+                        "相似图片索引补齐结束，部分图片处理失败"
+                    );
                 }
                 Ok(_) => {}
-                Err(error) => warn!(%error, "image similarity descriptor warmup stopped"),
+                Err(error) => warn!(%error, "相似图片索引任务中断"),
             }
             manager
                 .similarity_warmup_running
@@ -300,14 +314,20 @@ impl ThumbnailManager {
         for id in ids {
             if let Err(error) = self.wait_for(id).await {
                 failures += 1;
-                warn!(%id, %error, "initial thumbnail failed");
+                // The worker reports the final failure; avoid repeating it at normal log levels.
+                debug!(%id, %error, "首批缩略图中有图片不可用");
             }
         }
         self.initial_ready.store(true, Ordering::Release);
-        info!(
-            requested = ids.len(),
-            failures, "initial thumbnail batch is ready"
-        );
+        if failures > 0 {
+            warn!(
+                ready = ids.len() - failures,
+                failed = failures,
+                "首批缩略图处理结束，部分图片未能生成"
+            );
+        } else if !ids.is_empty() {
+            info!(images = ids.len(), "首批缩略图已就绪");
+        }
     }
 
     pub async fn ensure_ready(&self, id: &str) -> Result<PathBuf, ThumbnailError> {
@@ -380,7 +400,7 @@ impl ThumbnailManager {
         if let Err(error) =
             tokio::task::spawn_blocking(move || cleanup_cache(&root, &valid_ids)).await
         {
-            warn!(%error, "thumbnail cache cleanup task failed");
+            warn!(%error, "缩略图缓存清理任务中断");
         }
     }
 
@@ -512,7 +532,11 @@ impl ThumbnailManager {
                         (attempt, retry)
                     };
                     let (attempt, retry) = transition;
-                    warn!(worker, image = %entry.record.relative_path, attempt, %error, "thumbnail generation failed");
+                    if retry {
+                        debug!(worker, image = %entry.record.relative_path, attempt, %error, "缩略图生成失败，自动重试");
+                    } else {
+                        warn!(image = %entry.record.relative_path, attempts = attempt, %error, "缩略图生成失败，已达到重试上限");
+                    }
                     entry.notify.notify_waiters();
                     if retry {
                         self.schedule_retry(entry, id, attempt);
@@ -573,7 +597,7 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
     write_webp(&image, output, WEBP_QUALITY)
         .with_context(|| format!("cannot store thumbnail: {}", output.display()))?;
     if let Err(error) = cache_signature_for_thumbnail(record, &image, output) {
-        warn!(path = %output.display(), %error, "cannot cache image similarity descriptor");
+        warn!(path = %output.display(), %error, "无法保存相似图片索引");
     }
     if let Err(error) = record.ensure_source_is_current() {
         remove_cached_artifacts(output);
@@ -586,16 +610,16 @@ fn remove_cached_artifacts(thumbnail: &Path) {
     if let Err(error) = fs::remove_file(thumbnail)
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        warn!(path = %thumbnail.display(), %error, "cannot remove stale thumbnail");
+        warn!(path = %thumbnail.display(), %error, "无法清理过期缩略图");
     }
     if let Err(error) = remove_signature_for_thumbnail(thumbnail) {
-        warn!(path = %thumbnail.display(), %error, "cannot remove stale similarity descriptor");
+        warn!(path = %thumbnail.display(), %error, "无法清理过期相似图片索引");
     }
     if let Err(error) = remove_sidecar(thumbnail, OBSOLETE_DINO_EXTENSION) {
-        warn!(path = %thumbnail.display(), %error, "cannot remove obsolete DINOv2 embedding");
+        warn!(path = %thumbnail.display(), %error, "无法清理旧版 DINOv2 索引");
     }
     if let Err(error) = remove_text_search_embedding(thumbnail) {
-        warn!(path = %thumbnail.display(), %error, "cannot remove stale text-search embedding");
+        warn!(path = %thumbnail.display(), %error, "无法清理过期文字搜图索引");
     }
 }
 
@@ -647,7 +671,7 @@ fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
     visit_cache_files(root, |path| {
         if is_sidecar(path, OBSOLETE_DINO_EXTENSION) {
             if let Err(error) = fs::remove_file(path) {
-                warn!(path = %path.display(), %error, "cannot remove obsolete DINOv2 embedding");
+                warn!(path = %path.display(), %error, "无法清理旧版 DINOv2 索引");
             }
             return;
         }
@@ -664,7 +688,7 @@ fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
         if !valid_ids.contains(stem)
             && let Err(error) = fs::remove_file(path)
         {
-            warn!(path = %path.display(), %error, "cannot remove stale thumbnail");
+            warn!(path = %path.display(), %error, "无法清理过期缩略图");
         }
     });
 }
@@ -674,7 +698,7 @@ fn purge_temporary_files(root: &Path) {
         if path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
             && let Err(error) = fs::remove_file(path)
         {
-            warn!(path = %path.display(), %error, "cannot remove temporary thumbnail");
+            warn!(path = %path.display(), %error, "无法清理临时缩略图");
         }
     });
 }
@@ -684,7 +708,7 @@ fn visit_cache_files(root: &Path, mut visit: impl FnMut(&Path)) {
         match entry {
             Ok(entry) if entry.file_type().is_file() => visit(entry.path()),
             Ok(_) => {}
-            Err(error) => warn!(%error, "cannot inspect thumbnail cache"),
+            Err(error) => warn!(%error, "无法读取缩略图缓存目录"),
         }
     }
 }

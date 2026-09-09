@@ -14,9 +14,11 @@ import {
   X,
 } from "./icons";
 import { PhotoInformation } from "./PhotoInformation";
-import { useMasonryMetrics } from "./masonry";
-import { SimilarImageMasonry, SimilarImageSkeleton } from "./SimilarImages";
-import type { GalleryImage } from "./types";
+import { ImageCardActions } from "./ImageCardActions";
+import { CARD_MENU_EVENT, useCardInteraction } from "./cardInteraction";
+import { useGalleryMetrics } from "./galleryMetrics";
+import { SimilarImageGallery, SimilarImageSkeleton } from "./SimilarImages";
+import type { GalleryImage, ImageCardAction } from "./types";
 import {
   DEFAULT_TRANSFORM,
   clamp,
@@ -151,7 +153,7 @@ type ImageViewerProps = {
   similarError: string | null;
   onSearchSimilar: (image: GalleryImage) => void;
   onLoadMoreSimilar: () => void;
-  onOpenSimilar: (image: GalleryImage) => void;
+  onOpenImage: (image: GalleryImage, action?: ImageCardAction) => void;
 };
 
 export function ImageViewer({
@@ -170,7 +172,7 @@ export function ImageViewer({
   similarError,
   onSearchSimilar,
   onLoadMoreSimilar,
-  onOpenSimilar,
+  onOpenImage,
 }: ImageViewerProps) {
   const image = images[activeIndex]!;
   const stageRef = useRef<HTMLElement>(null);
@@ -195,8 +197,9 @@ export function ImageViewer({
   const detailsSectionRef = useRef<HTMLElement>(null);
   const similarSectionRef = useRef<HTMLElement>(null);
   const cancelSimilarNavigationRef = useRef<(() => void) | null>(null);
-  const similarMetrics = useMasonryMetrics(similarSectionRef, compactViewport ? 2 : 5);
+  const similarMetrics = useGalleryMetrics(similarSectionRef);
   const gestureSurfaceRef = useRef<HTMLDivElement>(null);
+  useCardInteraction(gestureSurfaceRef);
   const mediaRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointersRef = useRef(new Map<number, PointerPoint>());
@@ -590,6 +593,9 @@ export function ImageViewer({
     const snapshot = media.cloneNode(true) as HTMLDivElement;
     snapshot.classList.add("viewer-swipe-outgoing");
     snapshot.setAttribute("aria-hidden", "true");
+    snapshot.tabIndex = -1;
+    snapshot.removeAttribute("aria-haspopup");
+    snapshot.querySelector(".photo-card-controls")?.remove();
     snapshot.querySelectorAll<HTMLElement>("[id]").forEach((element) => {
       element.removeAttribute("id");
     });
@@ -1691,11 +1697,18 @@ export function ImageViewer({
     const surface = gestureSurfaceRef.current;
     if (!surface) return;
 
+    const menuContact = (event: Event) => event.target instanceof Element
+      && Boolean(event.target.closest(".photo-card-controls"));
+    const openImageMenu = () => {
+      gestureHandlersRef.current?.cancel();
+      lastTapRef.current = null;
+    };
     const touchPoint = (touch: Touch): PointerPoint => ({
       x: touch.clientX,
       y: touch.clientY,
     });
     const handleTouchStart = (event: TouchEvent) => {
+      if (menuContact(event)) return;
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch");
       }
@@ -1704,6 +1717,7 @@ export function ImageViewer({
       }
     };
     const handleTouchMove = (event: TouchEvent) => {
+      if (menuContact(event)) return;
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.move(touch.identifier, touchPoint(touch));
       }
@@ -1712,20 +1726,24 @@ export function ImageViewer({
       }
     };
     const handleTouchEnd = (event: TouchEvent) => {
+      if (menuContact(event)) return;
       if (event.cancelable && gestureModeRef.current !== "page") event.preventDefault();
       for (const touch of Array.from(event.changedTouches)) {
         gestureHandlersRef.current?.finish(touch.identifier, touchPoint(touch), "touch");
       }
     };
-    const handleTouchCancel = () => {
+    const handleTouchCancel = (event: TouchEvent) => {
+      if (menuContact(event)) return;
       gestureHandlersRef.current?.cancel();
     };
 
+    surface.addEventListener(CARD_MENU_EVENT, openImageMenu, true);
     surface.addEventListener("touchstart", handleTouchStart, { passive: false });
     surface.addEventListener("touchmove", handleTouchMove, { passive: false });
     surface.addEventListener("touchend", handleTouchEnd, { passive: false });
     surface.addEventListener("touchcancel", handleTouchCancel, { passive: false });
     return () => {
+      surface.removeEventListener(CARD_MENU_EVENT, openImageMenu, true);
       surface.removeEventListener("touchstart", handleTouchStart);
       surface.removeEventListener("touchmove", handleTouchMove);
       surface.removeEventListener("touchend", handleTouchEnd);
@@ -1859,7 +1877,6 @@ export function ImageViewer({
           onClick={() => void toggleFullscreen()}
           aria-label={fullscreen ? "退出全屏" : "进入全屏"}
           aria-pressed={fullscreen}
-          data-state={fullscreen ? "active" : "idle"}
           title={fullscreen ? "退出全屏" : "全屏查看"}
         >
           {fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
@@ -1936,7 +1953,8 @@ export function ImageViewer({
       >
         <div ref={surfaceRef} className="viewer-image-frame">
           <div className="viewer-media-center">
-            <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}>
+            <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}
+              data-image-id={image.id} data-image-name={image.name} tabIndex={0} aria-label={`图片：${image.name}`} aria-haspopup="menu">
               <img
                 key={`thumbnail-${image.id}`}
                 className="viewer-thumbnail"
@@ -2025,6 +2043,12 @@ export function ImageViewer({
                   })}
                 />
               )}
+              <ImageCardActions image={image} onAction={action => {
+                if (action === "view") {
+                  commitTransform(DEFAULT_TRANSFORM);
+                  scrollToImage(true);
+                } else onOpenImage(image, action);
+              }} />
             </div>
           </div>
         </div>
@@ -2107,7 +2131,7 @@ export function ImageViewer({
                         </button>
                       </div>
                     ) : similarImages.length ? (
-                      <SimilarImageMasonry
+                      <SimilarImageGallery
                         images={similarImages}
                         total={similarTotal}
                         metrics={similarMetrics}
@@ -2115,7 +2139,7 @@ export function ImageViewer({
                         loadingMore={similarLoadingMore}
                         error={similarError}
                         onLoadMore={onLoadMoreSimilar}
-                        onOpen={onOpenSimilar}
+                        onOpen={onOpenImage}
                       />
                     ) : (
                       <div className="viewer-similar-empty">

@@ -12,6 +12,7 @@ import type {
 
 type PhotoInformationProps = {
   image: GalleryImage;
+  showHeading?: boolean;
 };
 
 type ShootingParameter = {
@@ -282,14 +283,15 @@ function usePhotoDetails(imageId: string) {
 
 export const PhotoInformation = memo(function PhotoInformation({
   image,
+  showHeading = true,
 }: PhotoInformationProps) {
   const { details, loading, errorMessage, retry } = usePhotoDetails(image.id);
 
   return (
     <section className="viewer-photo-information" aria-label="图片信息">
-      <header className="viewer-photo-heading">
+      {showHeading && <header className="viewer-photo-heading">
         <h3>图片详情</h3>
-      </header>
+      </header>}
       <ImageInformationPanel
         image={image}
         details={details}

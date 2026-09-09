@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::support::{
     BoundedCache, PriorityQueue,
@@ -111,11 +111,11 @@ impl TextSearchIndex {
             fingerprint_files(&[model_path, vocabulary_path], "text-search model file")?;
         let model = LazyModel::chinese_clip(model_path.to_owned(), vocabulary_path.to_owned());
         let index = Self::with_model(model, fingerprint);
-        info!(
+        debug!(
             model = MODEL_NAME,
             path = %model_path.display(),
             fingerprint = %index.model_token,
-            "local natural-language image search enabled; model will load on demand"
+            "文字搜图模型文件已就绪"
         );
         Ok(index)
     }
@@ -277,10 +277,10 @@ impl TextSearchIndex {
         loop {
             tokio::time::sleep(MODEL_IDLE_CHECK_INTERVAL).await;
             if mutex_lock(&self.model).release_if_idle(MODEL_IDLE_TIMEOUT) {
-                info!(
+                debug!(
                     model = MODEL_NAME,
                     idle_seconds = MODEL_IDLE_TIMEOUT.as_secs(),
-                    "released idle natural-language search model"
+                    "已释放空闲的文字搜图模型"
                 );
             }
         }
@@ -316,7 +316,7 @@ impl TextSearchIndex {
                 }
                 let embedding = mutex_lock(&model).embed_thumbnail(&thumbnail)?;
                 if let Err(error) = write_embedding(&sidecar, &fingerprint, &embedding) {
-                    warn!(path = %sidecar.display(), %error, "cannot persist text-search image embedding");
+                    warn!(path = %sidecar.display(), %error, "无法保存文字搜图索引");
                 }
                 Ok(embedding)
             })
@@ -340,7 +340,7 @@ impl TextSearchIndex {
                     if matches!(*state, TextSearchState::Processing) {
                         *state = TextSearchState::Failed;
                         self.revision.fetch_add(1, Ordering::AcqRel);
-                        warn!(image = %id, %error, "text-search image embedding failed");
+                        warn!(image = %id, %error, "文字搜图索引生成失败");
                     } else {
                         removed = matches!(*state, TextSearchState::Removed);
                     }
@@ -348,7 +348,7 @@ impl TextSearchIndex {
             }
             entry.notify.notify_waiters();
             if removed && let Err(error) = remove_embedding_for_thumbnail(&entry.thumbnail) {
-                warn!(path = %entry.thumbnail.display(), %error, "cannot remove stale text-search embedding");
+                warn!(path = %entry.thumbnail.display(), %error, "无法清理过期文字搜图索引");
             }
         }
     }

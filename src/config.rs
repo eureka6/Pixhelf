@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use crate::auth::AuthConfig;
 use anyhow::{Context, Result, anyhow, bail};
 
 #[derive(Clone, Debug)]
@@ -17,6 +18,7 @@ pub struct Config {
     pub initial_batch: usize,
     pub workers: usize,
     pub scan_interval: Duration,
+    pub auth: AuthConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -63,12 +65,14 @@ impl Config {
         } else {
             env_path(&get_env, "PIXHELF_GALLERY_DIR", &cwd)?.unwrap_or_else(|| cwd.join("pic"))
         };
-        let mut cache_dir = if is_overridden("--cache-dir") {
-            cwd.join(".pixhelf-cache").join("thumbnails")
+        let configured_cache = if is_overridden("--cache-dir") {
+            None
         } else {
             env_path(&get_env, "PIXHELF_CACHE_DIR", &cwd)?
-                .unwrap_or_else(|| cwd.join(".pixhelf-cache").join("thumbnails"))
         };
+        let using_default_cache = configured_cache.is_none() && !is_overridden("--cache-dir");
+        let mut cache_dir =
+            configured_cache.unwrap_or_else(|| cwd.join(".pixhelf-data").join("thumbnails"));
         let mut text_search_model = if is_overridden("--text-search-model") {
             None
         } else {
@@ -133,11 +137,22 @@ impl Config {
                     print_help();
                     std::process::exit(0);
                 }
-                unknown => bail!("unknown argument: {unknown}\n\nRun pixhelf --help for usage."),
+                unknown => bail!("unknown argument: {unknown}; run pixhelf --help for usage"),
             }
         }
 
         gallery_dir = canonical_directory(&gallery_dir, "gallery")?;
+        if using_default_cache && !cache_dir.try_exists()? {
+            let legacy = cwd.join(".pixhelf-cache");
+            if legacy.try_exists()? {
+                bail!(
+                    "legacy data found at {}; stop Pixhelf and rename it to {}, or use --cache-dir {} to keep the existing data directory",
+                    legacy.display(),
+                    cwd.join(".pixhelf-data").display(),
+                    legacy.join("thumbnails").display(),
+                );
+            }
+        }
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("cannot create cache directory: {}", cache_dir.display()))?;
         cache_dir = canonical_directory(&cache_dir, "cache")?;
@@ -167,6 +182,7 @@ impl Config {
         };
 
         Ok(Self {
+            auth: AuthConfig::from_sources(&cwd, &cache_dir, &get_env)?,
             gallery_dir,
             cache_dir,
             text_search,
@@ -355,18 +371,24 @@ fn print_help() {
 Usage: pixhelf [OPTIONS]\n\n\
 Options:\n  \
   --gallery-dir PATH     Gallery root (default: ./pic)\n  \
-  --cache-dir PATH       Thumbnail cache (default: ./.pixhelf-cache/thumbnails)\n  \
+  --cache-dir PATH       Application data (default: ./.pixhelf-data/thumbnails)\n  \
   --text-search-model VALUE 'true', 'false', Chinese-CLIP directory, or model file (default: true)\n  \
   --text-search-vocab PATH  Optional vocab.txt override (default: beside model)\n  \
   --listen HOST:PORT     Listen address (default: 0.0.0.0:3002)\n  \
   --initial-batch N      Priority thumbnail batch (default: 60)\n  \
   --workers N            Background thumbnail workers (default: 2-4, based on CPU)\n  \
   --scan-interval SEC    Gallery rescan interval (default: 10)\n  \
+  --hash-password       Generate an Argon2id hash (hidden prompt or stdin)\n  \
   -h, --help             Show this help\n\n\
 Environment:\n  \
   PIXHELF_GALLERY_DIR, PIXHELF_CACHE_DIR, PIXHELF_TEXT_SEARCH_MODEL,\n  \
   PIXHELF_TEXT_SEARCH_VOCAB, PIXHELF_LISTEN,\n  \
-  PIXHELF_INITIAL_BATCH, PIXHELF_WORKERS, PIXHELF_SCAN_INTERVAL\n\n\
+  PIXHELF_INITIAL_BATCH, PIXHELF_WORKERS, PIXHELF_SCAN_INTERVAL,\n  \
+  PIXHELF_AUTH_ENABLED (default: true), PIXHELF_AUTH_USERNAME (default: admin),\n  \
+  PIXHELF_AUTH_PASSWORD_HASH, PIXHELF_AUTH_PASSWORD_HASH_FILE,\n  \
+  PIXHELF_PUBLIC_URL (optional HTTP/HTTPS origin override), PIXHELF_TRUSTED_PROXIES (CIDRs)\n\n\
+Without password environment variables, create the administrator in the web setup page.\n\
+Setup and login support HTTP and HTTPS. Settings persist in CACHE_DIR/auth/.\n\n\
 Command-line options override matching environment variables."
     );
 }
@@ -393,6 +415,7 @@ mod tests {
         std::fs::create_dir(&gallery).unwrap();
 
         let environment = HashMap::from([
+            ("PIXHELF_AUTH_ENABLED", OsString::from("false")),
             ("PIXHELF_GALLERY_DIR", gallery.as_os_str().to_os_string()),
             ("PIXHELF_CACHE_DIR", cache.as_os_str().to_os_string()),
             ("PIXHELF_LISTEN", OsString::from("127.0.0.1:4000")),
@@ -413,6 +436,73 @@ mod tests {
         assert_eq!(config.initial_batch, 90);
         assert_eq!(config.workers, 7);
         assert_eq!(config.scan_interval, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn default_data_directory_keeps_settings_and_models_under_pixhelf_data() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("pic")).unwrap();
+        let config = Config::from_sources(temp.path().to_path_buf(), [], |_| None).unwrap();
+        let expected = temp
+            .path()
+            .join(".pixhelf-data/thumbnails")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(config.cache_dir, expected);
+        assert_eq!(
+            config.auth.setup.unwrap().path,
+            expected.join("auth/account.json")
+        );
+        assert!(!temp.path().join(".pixhelf-cache").exists());
+        let Some(TextSearchSource::AutoDownload(files)) = config.text_search else {
+            panic!("expected automatic model download");
+        };
+        assert!(files.model.starts_with(expected));
+    }
+
+    #[test]
+    fn legacy_data_requires_migration_or_an_explicit_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("pic")).unwrap();
+        let legacy = temp.path().join(".pixhelf-cache/thumbnails");
+        std::fs::create_dir_all(legacy.join("auth")).unwrap();
+        let account = legacy.join("auth/account.json");
+        std::fs::write(&account, b"existing account").unwrap();
+        let error = Config::from_sources(temp.path().to_path_buf(), [], |_| None).unwrap_err();
+        assert!(error.to_string().contains("legacy data found"));
+        assert!(!temp.path().join(".pixhelf-data").exists());
+        assert_eq!(std::fs::read(&account).unwrap(), b"existing account");
+
+        for via_cli in [false, true] {
+            let args = if via_cli {
+                vec![
+                    "--cache-dir".to_owned(),
+                    legacy.to_string_lossy().into_owned(),
+                ]
+            } else {
+                Vec::new()
+            };
+            let config = Config::from_sources(temp.path().to_path_buf(), args, |name| match name {
+                "PIXHELF_AUTH_ENABLED" => Some(OsString::from("false")),
+                "PIXHELF_CACHE_DIR" if !via_cli => Some(legacy.as_os_str().to_owned()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(config.cache_dir, legacy.canonicalize().unwrap());
+        }
+        std::fs::rename(
+            temp.path().join(".pixhelf-cache"),
+            temp.path().join(".pixhelf-data"),
+        )
+        .unwrap();
+        let config = Config::from_sources(temp.path().to_path_buf(), [], |name| {
+            (name == "PIXHELF_AUTH_ENABLED").then(|| OsString::from("false"))
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(config.cache_dir.join("auth/account.json")).unwrap(),
+            b"existing account"
+        );
     }
 
     #[test]
@@ -481,6 +571,7 @@ mod tests {
         let cache = temp.path().join("cache");
         std::fs::create_dir(&gallery).unwrap();
         let environment = HashMap::from([
+            ("PIXHELF_AUTH_ENABLED", OsString::from("false")),
             ("PIXHELF_GALLERY_DIR", gallery.as_os_str().to_os_string()),
             ("PIXHELF_CACHE_DIR", cache.as_os_str().to_os_string()),
         ]);
@@ -533,6 +624,7 @@ mod tests {
         let cache = temp.path().join("cache");
         std::fs::create_dir(&gallery).unwrap();
         let environment = HashMap::from([
+            ("PIXHELF_AUTH_ENABLED", OsString::from("false")),
             ("PIXHELF_GALLERY_DIR", gallery.as_os_str().to_os_string()),
             ("PIXHELF_CACHE_DIR", cache.as_os_str().to_os_string()),
             ("PIXHELF_TEXT_SEARCH_MODEL", OsString::from("false")),

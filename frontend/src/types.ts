@@ -2,7 +2,10 @@ export interface Album {
   path: string;
   name: string;
   count: number;
+  cover: string | null;
 }
+
+export type GallerySection = "library" | "albums" | "similar" | "storage";
 
 export interface GallerySummary {
   total: number;
@@ -16,6 +19,8 @@ export interface GalleryImage {
   width: number;
   height: number;
 }
+
+export type ImageCardAction = "view" | "details" | "similar";
 
 export interface ImagesPage {
   items: GalleryImage[];

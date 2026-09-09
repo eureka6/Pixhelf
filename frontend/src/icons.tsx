@@ -32,10 +32,6 @@ function Icon({
   );
 }
 
-export function Check(props: IconProps) {
-  return <Icon {...props}><path d="M20 6 9 17l-5-5" /></Icon>;
-}
-
 export function ChevronLeft(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
 }
@@ -69,8 +65,28 @@ export function Download(props: IconProps) {
   );
 }
 
-export function Folder(props: IconProps) {
-  return <Icon {...props}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>;
+export function MoreHorizontal(props: IconProps) {
+  return <Icon {...props}><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></Icon>;
+}
+
+export function Info(props: IconProps) {
+  return <Icon {...props}><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></Icon>;
+}
+
+export function UserRound(props: IconProps) {
+  return <Icon {...props}><circle cx="12" cy="8" r="5" /><path d="M20 21a8 8 0 0 0-16 0" /></Icon>;
+}
+
+export function ExternalLink(props: IconProps) {
+  return <Icon {...props}><path d="M15 3h6v6m0-6L10 14M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4" /></Icon>;
+}
+
+export function Copy(props: IconProps) {
+  return <Icon {...props}><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></Icon>;
+}
+
+export function Check(props: IconProps) {
+  return <Icon {...props}><path d="m20 6-11 11-5-5" /></Icon>;
 }
 
 export function House(props: IconProps) {
@@ -103,8 +119,55 @@ export function Images(props: IconProps) {
   );
 }
 
+export function BookImage(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M7 3v18m3-5 3-4 3 3 2-2" />
+      <circle cx="14" cy="8" r="1" />
+    </Icon>
+  );
+}
+
+export function Cloud(props: IconProps) {
+  return <Icon {...props}><path d="M20 16.5A4.5 4.5 0 0 0 18 8a6 6 0 0 0-11.5-1A5 5 0 0 0 7 17h3m4 0h7m-3-3 3 3-3 3" /></Icon>;
+}
+
+export function Folder(props: IconProps) {
+  return <Icon {...props}><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /></Icon>;
+}
+
+export function FileIcon(props: IconProps) {
+  return <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 13h8m-8 4h5" /></Icon>;
+}
+
+export function Grid(props: IconProps) {
+  return <Icon {...props}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></Icon>;
+}
+
+export function ListIcon(props: IconProps) {
+  return <Icon {...props}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></Icon>;
+}
+
 export function LoaderCircle(props: IconProps) {
   return <Icon {...props}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></Icon>;
+}
+
+export function Settings(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10 2h4l.5 2.5 1.8 1 2.4-.8 2 3.4-1.9 1.7v4.4l1.9 1.7-2 3.4-2.4-.8-1.8 1L14 22h-4l-.5-2.5-1.8-1-2.4.8-2-3.4 1.9-1.7V9.8L3.3 8.1l2-3.4 2.4.8 1.8-1Z" />
+      <circle cx="12" cy="12" r="3" />
+    </Icon>
+  );
+}
+
+export function KeyRound(props: IconProps) {
+  return <Icon {...props}><circle cx="16.5" cy="7.5" r="5.5" /><path d="m12.6 11.4-9.1 9.1H1.5v-4l3-3h3v-3l1.1-1.1" /></Icon>;
+}
+
+export function LogOut(props: IconProps) {
+  return <Icon {...props}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></Icon>;
 }
 
 export function Maximize2(props: IconProps) {

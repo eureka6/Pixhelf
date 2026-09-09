@@ -142,13 +142,13 @@ try {
     const layout = await page.evaluate(() => {
       const search = document.querySelector(".topbar-search");
       const topbar = document.querySelector(".topbar");
-      const sidebarStatus = document.querySelector(".desktop-sidebar .sidebar-status");
+      const sidebarFooter = document.querySelector(".desktop-sidebar .sidebar-footer");
       const searchRect = search?.getBoundingClientRect();
-      const exploreRect = document.querySelector(".explore-toggle")?.getBoundingClientRect();
+      const exploreRect = document.querySelector(".topbar .explore-toggle")?.getBoundingClientRect();
       const home = document.querySelector(".topbar-home");
       const homeRect = home?.getBoundingClientRect();
       const topbarRect = topbar?.getBoundingClientRect();
-      const statusRect = sidebarStatus?.getBoundingClientRect();
+      const footerRect = sidebarFooter?.getBoundingClientRect();
       const galleryToggle = document.querySelector(".gallery-sidebar-toggle");
       const toggleRect = galleryToggle?.getBoundingClientRect();
       const brandRect = document.querySelector(".brand-lockup")?.getBoundingClientRect();
@@ -159,9 +159,8 @@ try {
         cards: document.querySelectorAll("[data-image-id]").length,
         cardTags: [...document.querySelectorAll("[data-image-id]")]
           .map((element) => element.tagName),
-        masonryColumns: Number(
-          document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
-        ),
+        galleryLayout: document.querySelector(".justified-gallery")?.dataset.layout,
+        galleryRows: Number(document.querySelector(".justified-gallery")?.dataset.rows ?? 0),
         loadedCards: document.querySelectorAll("[data-image-id] img.loaded").length,
         brokenVisibleImages: [...document.images].filter((image) => {
           const rect = image.getBoundingClientRect();
@@ -194,6 +193,7 @@ try {
         leadingHomeButtons: document.querySelectorAll(".topbar-leading .topbar-home, .topbar-home-slot").length,
         homeLabel: home?.getAttribute("aria-label"),
         homeExploreGap: homeRect && exploreRect ? exploreRect.left - homeRect.right : -1,
+        exploreSearchGap: exploreRect && searchRect ? searchRect.left - exploreRect.right : -1,
         homeStatic: home ? getComputedStyle(home).transitionProperty === "none" : false,
         brandLoaded: Boolean(brandImage?.complete && brandImage.naturalWidth > 0),
         brandMenuGap: brandRect && toggleRect ? brandRect.left - toggleRect.right : -1,
@@ -206,25 +206,19 @@ try {
           ".topbar .sidebar-toggle-button",
         ).length,
         contentSearches: document.querySelectorAll(".content .search-field").length,
-        topbarSearchRightGap: searchRect ? innerWidth - searchRect.right : -1,
-        exploreButtons: document.querySelectorAll(".topbar-actions > .explore-toggle").length,
-        exploreSearchGap: exploreRect && searchRect ? searchRect.left - exploreRect.right : -1,
-        sidebarStatuses: document.querySelectorAll(
-          ".desktop-sidebar > .sidebar-status",
-        ).length,
+        topbarSearchRightGap: searchRect && topbarRect ? topbarRect.right - searchRect.right : -1,
+        topbarExploreButtons: document.querySelectorAll(".topbar-actions > .explore-toggle").length,
+        sidebarExploreButtons: document.querySelectorAll(".desktop-sidebar .album-nav > .explore-toggle").length,
+        sidebarStatuses: document.querySelectorAll(".sidebar-status").length,
         sidebarGalleryMetas: document.querySelectorAll(".sidebar-gallery-meta").length,
         contentInfoRows: document.querySelectorAll(
           ".content-heading, .content .sidebar-gallery-meta",
         ).length,
         sortControls: document.querySelectorAll(".sort-control").length,
-        cardNameDisplay: getComputedStyle(document.querySelector(".image-name")).display,
-        cardNameOpacity: Number.parseFloat(
-          getComputedStyle(document.querySelector(".image-name")).opacity,
-        ),
-        cardNameWhiteSpace: getComputedStyle(
-          document.querySelector(".image-name"),
-        ).whiteSpace,
-        sidebarStatusBottomGap: statusRect ? innerHeight - statusRect.bottom : -1,
+        nativeCardTitles: document.querySelectorAll('.image-card[title], .image-card [title]').length,
+        legacyCardNames: document.querySelectorAll('.image-name').length,
+        cardActions: document.querySelectorAll('.image-card .photo-card-more').length,
+        sidebarFooterBottomGap: footerRect ? innerHeight - footerRect.bottom : null,
       };
     });
 
@@ -257,7 +251,7 @@ try {
       });
 
       const resizeAnchor = await page.evaluate(() => {
-        const cards = [...document.querySelectorAll(".masonry .image-card")];
+        const cards = [...document.querySelectorAll(".justified-gallery .image-card")];
         const card = cards[Math.min(24, cards.length - 1)];
         if (!(card instanceof HTMLElement)) return null;
         card.scrollIntoView({ block: "center", behavior: "instant" });
@@ -279,23 +273,24 @@ try {
           viewportRatio: (anchorY - viewportTop) / Math.max(1, viewportHeight),
         };
       });
-      if (!resizeAnchor) throw new Error("masonry resize anchor could not be captured");
+      if (!resizeAnchor) throw new Error("gallery resize anchor could not be captured");
       const resizeAnchorDeltas = [];
 
       for (const size of [
-        { width: 680, columns: 3 },
-        { width: 520, columns: 2 },
-        { width: 1000, columns: 3 },
-        { width: target.width, columns: 5 },
+        { width: 680 },
+        { width: 520 },
+        { width: 1000 },
+        { width: target.width },
       ]) {
         await page.setViewportSize({ width: size.width, height: target.height });
-        await page.waitForFunction((columns) =>
-          document.querySelector(".masonry")?.getAttribute("data-columns") === String(columns)
-        , size.columns);
+        await page.waitForFunction(() => {
+          const gallery = document.querySelector(".justified-gallery");
+          return gallery && Math.abs(Number(gallery.dataset.layoutWidth) - gallery.getBoundingClientRect().width) < 1;
+        });
         try {
           await page.waitForFunction((anchor) => {
             const card = document.querySelector(
-              `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+              `.justified-gallery .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
             );
             if (!(card instanceof HTMLElement)) return false;
             const rect = card.getBoundingClientRect();
@@ -316,7 +311,7 @@ try {
         } catch (error) {
           const actual = await page.evaluate((anchor) => {
             const card = document.querySelector(
-              `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+              `.justified-gallery .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
             );
             if (!(card instanceof HTMLElement)) return { missing: true };
             const rect = card.getBoundingClientRect();
@@ -334,20 +329,20 @@ try {
             const actualY = rect.top + rect.height * anchor.cardRatio;
             return {
               actualY,
-              columns: document.querySelector(".masonry")?.getAttribute("data-columns"),
+              rows: document.querySelector(".justified-gallery")?.dataset.rows,
               delta: Math.abs(actualY - expectedY),
               expectedY,
               scrollY,
             };
           }, resizeAnchor);
           throw new Error(
-            `masonry resize anchor drifted at ${size.width}px: ${JSON.stringify(actual)}`,
+            `gallery resize anchor drifted at ${size.width}px: ${JSON.stringify(actual)}`,
             { cause: error },
           );
         }
         resizeAnchorDeltas.push(await page.evaluate((anchor) => {
           const card = document.querySelector(
-            `.masonry .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
+            `.justified-gallery .image-card[data-image-id="${CSS.escape(anchor.imageId)}"]`,
           );
           if (!(card instanceof HTMLElement)) return Infinity;
           const rect = card.getBoundingClientRect();
@@ -404,9 +399,7 @@ try {
           brokenVisibleImages: visibleImages.filter((image) =>
             !image.complete || image.naturalWidth <= 0
           ).length,
-          columns: Number(
-            document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
-          ),
+          galleryLayout: document.querySelector(".justified-gallery")?.dataset.layout,
         };
       });
       Object.assign(resizeStability, {
@@ -418,7 +411,7 @@ try {
       });
     }
 
-    const firstViewerTitle = await page.locator("[data-image-id]").first().getAttribute("title");
+    const firstViewerTitle = await page.locator("[data-image-id]").first().getAttribute("data-image-name");
     await page.locator("[data-image-id]").first().click();
     await page.waitForSelector(".image-viewer");
     const viewerChrome = await page.evaluate(() => ({
@@ -555,7 +548,7 @@ try {
     }
     const sideButtonStart = await page.evaluate(() => {
       const activeId = document.querySelector(".image-viewer")?.getAttribute("data-image-id") ?? "";
-      const ids = [...document.querySelectorAll(".masonry .image-card")]
+      const ids = [...document.querySelectorAll(".justified-gallery .image-card")]
         .map((card) => card.getAttribute("data-image-id") ?? "");
       const index = ids.indexOf(activeId);
       return {
@@ -681,7 +674,7 @@ try {
     Object.assign(viewer, { switchPerformance });
     const rapidSwitch = await page.evaluate(async () => {
       const overlay = document.querySelector(".image-viewer");
-      const ids = [...document.querySelectorAll(".masonry .image-card")]
+      const ids = [...document.querySelectorAll(".justified-gallery .image-card")]
         .map((card) => card.getAttribute("data-image-id") ?? "");
       const startId = overlay?.getAttribute("data-image-id") ?? "";
       const startIndex = ids.indexOf(startId);
@@ -1189,7 +1182,7 @@ try {
     }
 
     const returnProbeStart = await page.evaluate(() => {
-      const cards = [...document.querySelectorAll(".masonry .image-card")];
+      const cards = [...document.querySelectorAll(".justified-gallery .image-card")];
       const card = cards.at(-1);
       if (!(card instanceof HTMLElement)) return null;
       card.scrollIntoView({ block: "center", behavior: "instant" });
@@ -1207,7 +1200,7 @@ try {
       const result = {
         imageId: card.dataset.imageId ?? "",
         beforeCount: cards.length,
-        beforeMasonryWidth: document.querySelector(".masonry")?.getBoundingClientRect().width ?? 0,
+        beforeGalleryWidth: document.querySelector(".justified-gallery")?.getBoundingClientRect().width ?? 0,
         cardRatio: rect.height > 0 ? (anchorY - rect.top) / rect.height : 0.5,
         viewportRatio: (anchorY - viewportTop) / Math.max(1, viewportHeight),
       };
@@ -1228,12 +1221,12 @@ try {
     const resizedWidth = target.name === "desktop" ? 920 : 430;
     await page.setViewportSize({ width: resizedWidth, height: target.height });
     await page.waitForFunction((previousWidth) => {
-      const width = document.querySelector(".masonry")?.getBoundingClientRect().width ?? 0;
+      const width = document.querySelector(".justified-gallery")?.getBoundingClientRect().width ?? 0;
       return Math.abs(width - previousWidth) > 20;
-    }, returnProbeStart.beforeMasonryWidth);
+    }, returnProbeStart.beforeGalleryWidth);
     await page.waitForFunction(([startId, beforeCount]) =>
       document.querySelector(".image-viewer")?.getAttribute("data-image-id") !== startId &&
-      document.querySelectorAll(".masonry .image-card").length > beforeCount
+      document.querySelectorAll(".justified-gallery .image-card").length > beforeCount
     , [returnViewerStartId, returnProbeStart.beforeCount], { timeout: 60_000 });
     const returnTargetId = await page.locator(".image-viewer").getAttribute("data-image-id");
     await page.keyboard.press("Escape");
@@ -1246,7 +1239,7 @@ try {
     }, returnTargetId);
     const returnRestoration = await page.evaluate(({ start, targetId }) => {
       const card = document.querySelector(
-        `.masonry .image-card[data-image-id="${CSS.escape(targetId)}"]`,
+        `.justified-gallery .image-card[data-image-id="${CSS.escape(targetId)}"]`,
       );
       if (!(card instanceof HTMLElement)) return null;
       const rect = card.getBoundingClientRect();
@@ -1266,7 +1259,7 @@ try {
         openedId: start.imageId,
         targetId,
         cardsBefore: start.beforeCount,
-        cardsAfter: document.querySelectorAll(".masonry .image-card").length,
+        cardsAfter: document.querySelectorAll(".justified-gallery .image-card").length,
         currentId: document.activeElement?.getAttribute("data-image-id") ?? "",
         visible: rect.bottom > topbarBottom && rect.top < viewportBottom,
         anchorDelta: Math.abs(actualAnchorY - expectedAnchorY),
@@ -1386,7 +1379,7 @@ try {
         url.searchParams.get("sort") === "explore" &&
         url.searchParams.get("offset") === "0";
     });
-    await page.locator(".explore-toggle").click();
+    await page.locator(".topbar .explore-toggle").click();
     const firstExplore = await firstExploreRequest;
     const firstExploreUrl = new URL(firstExplore.url());
     const firstExploreResponse = await firstExplore.response();
@@ -1399,7 +1392,7 @@ try {
         url.searchParams.get("sort") === "explore" &&
         url.searchParams.get("offset") === "0";
     });
-    await page.locator(".explore-toggle").click();
+    await page.locator(".topbar .explore-toggle").click();
     const secondExplore = await secondExploreRequest;
     const secondExploreUrl = new URL(secondExplore.url());
     const secondExploreResponse = await secondExplore.response();
@@ -1439,89 +1432,37 @@ try {
       homeNavigation.repeatedAtHome.push(await checkHomeNavigation(page, target, selector));
     }
 
-    let mobileCardNames = null;
+    let mobileCardActions = null;
     if (target.name === "mobile") {
-      const firstCard = page.locator("[data-image-id]").first();
-      const secondCard = page.locator("[data-image-id]").nth(1);
-      await firstCard.dispatchEvent("pointerdown", {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 1,
-        pointerType: "touch",
-        isPrimary: true,
-      });
-      await page.waitForFunction(() =>
-        document.querySelector("[data-image-id]")?.getAttribute("data-name-visible") === "true"
-      );
-      const shownOnContact = await firstCard.getAttribute("data-name-visible");
-      await firstCard.dispatchEvent("pointerup", {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 1,
-        pointerType: "touch",
-        isPrimary: true,
-      });
-      const retainedOnRelease = await firstCard.getAttribute("data-name-visible");
-      await page.waitForTimeout(1_900);
-      const retainedWithoutTimeout = await firstCard.getAttribute("data-name-visible");
-
-      await secondCard.dispatchEvent("pointerdown", {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 2,
-        pointerType: "touch",
-        isPrimary: true,
-      });
-      await page.waitForFunction(() =>
-        document.querySelectorAll('[data-name-visible="true"]').length === 1 &&
-        document.querySelectorAll("[data-image-id]")[1]
-          ?.getAttribute("data-name-visible") === "true"
-      );
-      await page.waitForTimeout(180);
-      const switchedToSecond = await secondCard.getAttribute("data-name-visible");
-      const firstHidden = await firstCard.getAttribute("data-name-visible");
-      const activeCount = await page.locator('[data-name-visible="true"]').count();
-      const displayedCount = await page.locator('[data-name-visible="true"] .image-name')
-        .evaluateAll((names) => names.filter((name) =>
-          Number.parseFloat(getComputedStyle(name).opacity) > 0.99
-        ).length);
-
-      await secondCard.dispatchEvent("pointerup", {
-        bubbles: true,
-        cancelable: true,
-        pointerId: 2,
-        pointerType: "touch",
-        isPrimary: true,
-      });
+      const firstCard = page.locator(".image-card").first();
+      const secondCard = page.locator(".image-card").nth(1);
+      const more = firstCard.locator(".photo-card-more");
+      const hiddenInitially = !await more.isVisible();
+      await firstCard.dispatchEvent("pointerdown", { pointerId: 1, pointerType: "touch", isPrimary: true, button: 0, buttons: 1 });
+      await page.locator(".photo-card-menu:popover-open").waitFor({ timeout: 2000 });
+      await firstCard.dispatchEvent("pointercancel", { pointerId: 1, pointerType: "touch", isPrimary: true, buttons: 0 });
+      await firstCard.dispatchEvent("click", { detail: 1, pointerType: "touch" });
+      const moreVisible = await more.isVisible();
+      if (moreVisible) throw new Error("Mobile cards must not show a more button");
+      await page.locator(".photo-card-menu:popover-open").waitFor();
+      const viewerAfterMenu = await page.locator(".image-viewer").count();
+      const menuItemCount = await page.getByRole("menuitem").count();
+      await page.keyboard.press("Escape");
+      await page.locator(".photo-card-menu").waitFor({ state: "detached" });
+      const focusReturned = await firstCard.locator(".photo-card-open").evaluate(button => document.activeElement === button);
       await secondCard.evaluate((card) => {
         globalThis.__pixhelfCardClickCount = 0;
         card.addEventListener("click", () => {
           globalThis.__pixhelfCardClickCount += 1;
         }, { once: true });
       });
-      const secondCardBox = await secondCard.boundingBox();
-      if (secondCardBox) {
-        await page.touchscreen.tap(
-          secondCardBox.x + secondCardBox.width / 2,
-          secondCardBox.y + secondCardBox.height / 2,
-        );
-      }
-      const clickCount = await page.evaluate(() => globalThis.__pixhelfCardClickCount ?? 0);
+      await secondCard.locator(".photo-card-open").tap();
       await page.waitForSelector(".image-viewer");
+      const clickCount = await page.evaluate(() => globalThis.__pixhelfCardClickCount ?? 0);
       const viewerOpenedFromTouch = await page.locator(".image-viewer").count();
       await page.locator(".viewer-close").click();
       await page.waitForSelector(".image-viewer", { state: "detached" });
-      mobileCardNames = {
-        shownOnContact,
-        retainedOnRelease,
-        retainedWithoutTimeout,
-        switchedToSecond,
-        firstHidden,
-        activeCount,
-        displayedCount,
-        clickCount,
-        viewerOpenedFromTouch,
-      };
+      mobileCardActions = { hiddenInitially, moreVisible, viewerAfterMenu, menuItemCount, focusReturned, clickCount, viewerOpenedFromTouch };
     }
 
     let desktopSidebar = null;
@@ -1532,7 +1473,7 @@ try {
       const firstAlbumBefore = await page.locator(".desktop-sidebar .album-link").first()
         .boundingBox();
       const topbarBefore = await page.locator(".topbar").boundingBox();
-      const galleryBefore = await page.locator(".masonry").boundingBox();
+      const galleryBefore = await page.locator(".justified-gallery").boundingBox();
       const collapseMotion = await closeNavigation(page);
       await page.waitForFunction(() =>
         document.querySelector(".app-shell")?.getAttribute("data-sidebar-collapsed") === "true"
@@ -1541,21 +1482,18 @@ try {
       const contentCollapsed = await page.locator(".content").boundingBox();
       const toggleCollapsed = await page.locator(".gallery-sidebar-toggle").boundingBox();
       const sidebarCollapsedBox = await page.locator(".desktop-sidebar").boundingBox();
-      const galleryCollapsed = await page.locator(".masonry").boundingBox();
+      const galleryCollapsed = await page.locator(".justified-gallery").boundingBox();
       desktopSidebar = await page.evaluate(() => ({
         expanded: document.querySelector(".gallery-sidebar-toggle")?.getAttribute("aria-expanded"),
         visibility: getComputedStyle(document.querySelector(".desktop-sidebar")).visibility,
         navigationVisibility: getComputedStyle(
           document.querySelector(".desktop-sidebar .album-nav"),
         ).visibility,
-        statusVisibility: getComputedStyle(
-          document.querySelector(".desktop-sidebar .sidebar-status"),
-        ).visibility,
+        footerVisibility: [...document.querySelectorAll(".desktop-sidebar .sidebar-footer")]
+          .map(element => getComputedStyle(element).visibility),
         ariaHidden: document.querySelector(".desktop-sidebar")?.getAttribute("aria-hidden"),
         stored: localStorage.getItem("pixhelf.sidebar-collapsed"),
-        columns: Number(
-          document.querySelector(".masonry")?.getAttribute("data-columns") ?? 0,
-        ),
+        galleryLayout: document.querySelector(".justified-gallery")?.dataset.layout,
         redundantHeadings: document.querySelectorAll(".sidebar-heading").length,
         pathDetails: document.querySelectorAll(".album-copy small").length,
         progressPanels: document.querySelectorAll(".sidebar-progress").length,
@@ -1635,7 +1573,7 @@ try {
       const fixedTop = await page.locator(".topbar").boundingBox();
       await page.evaluate(() => window.scrollTo({ top: 0, behavior: "auto" }));
       const navigationToggleBefore = await page.locator(".gallery-sidebar-toggle").boundingBox();
-      const galleryBefore = await page.locator(".masonry").boundingBox();
+      const galleryBefore = await page.locator(".justified-gallery").boundingBox();
       await page.locator(".gallery-sidebar-toggle").click();
       await page.waitForSelector(".mobile-nav-layer");
       await page.waitForTimeout(240);
@@ -1643,7 +1581,8 @@ try {
       const navigationLayer = await page.locator(".mobile-nav-layer").boundingBox();
       const navigationDrawer = await page.locator(".mobile-sidebar").boundingBox();
       const firstAlbum = await page.locator(".mobile-sidebar .album-link").first().boundingBox();
-      const mobileStatus = await page.locator(".mobile-sidebar .sidebar-status").boundingBox();
+      const footer = page.locator(".mobile-sidebar .sidebar-footer");
+      const mobileFooter = await footer.count() ? await footer.boundingBox() : null;
       const topbar = await page.locator(".topbar").boundingBox();
       mobileNavigation = {
         opened: await page.locator(".mobile-nav-layer").count(),
@@ -1689,7 +1628,7 @@ try {
         albumClearance: firstAlbum && topbar
           ? firstAlbum.y - (topbar.y + topbar.height)
           : -1,
-        statusBottomGap: mobileStatus ? target.height - (mobileStatus.y + mobileStatus.height) : -1,
+        footerBottomGap: mobileFooter ? target.height - (mobileFooter.y + mobileFooter.height) : null,
         drawerWidth: navigationDrawer?.width ?? -1,
       };
       mobileNavigation.narrowLayouts = [];
@@ -1709,8 +1648,6 @@ try {
             drawerWidth: drawer.width,
             toolsClearance: tools.left - drawer.right,
             brandClearance: drawer.right - brand.right,
-            statusReadable: [...document.querySelectorAll(".mobile-sidebar .sidebar-status span, .mobile-sidebar .sidebar-status strong")]
-              .every((element) => element.scrollWidth <= element.clientWidth + 1),
             toolsClickable: [...document.querySelectorAll(".topbar-actions button")].filter((button) => {
               const rect = button.getBoundingClientRect();
               return rect.width > 0 && rect.height > 0 && !button.closest("[inert]");
@@ -1730,7 +1667,7 @@ try {
         if (
           dimensions.toolsClearance < 5 || dimensions.brandClearance < 8
           || !dimensions.toolsClickable || !dimensions.brandClickable
-          || !dimensions.statusReadable || dimensions.overflow
+          || dimensions.overflow
         ) {
           throw new Error(`mobile drawer overlaps the header: ${JSON.stringify(dimensions)}`);
         }
@@ -1754,7 +1691,7 @@ try {
       searchDisclosure,
       exploration,
       homeNavigation,
-      mobileCardNames,
+      mobileCardActions,
       desktopSidebar,
       mobileNavigation,
       browserErrors,
@@ -1762,11 +1699,11 @@ try {
     results.push(result);
     console.log(JSON.stringify(result));
 
-    const expectedColumns = target.name === "desktop" ? 5 : 2;
     if (
       layout.horizontalOverflow ||
       layout.brokenVisibleImages ||
-      layout.masonryColumns !== expectedColumns ||
+      layout.galleryLayout !== "justified" ||
+      layout.galleryRows < 1 ||
       layout.cardTags.some((tag) => tag !== "FIGURE") ||
       layout.dialogs !== 0 ||
       dialogsAfterImageClick !== 1 ||
@@ -1947,6 +1884,8 @@ try {
       layout.homeLabel !== "主页" ||
       layout.homeExploreGap < 4 ||
       layout.homeExploreGap > 8 ||
+      layout.exploreSearchGap < 4 ||
+      layout.exploreSearchGap > 8 ||
       !layout.homeStatic ||
       !layout.brandLoaded ||
       (target.name === "desktop" && (
@@ -1961,10 +1900,9 @@ try {
       layout.sortControls !== 0 ||
       layout.topbarSearchRightGap < 0 ||
       layout.topbarSearchRightGap > 20 ||
-      layout.exploreButtons !== 1 ||
-      layout.exploreSearchGap < 4 ||
-      layout.exploreSearchGap > 8 ||
-      layout.sidebarStatuses !== 1 ||
+      layout.topbarExploreButtons !== 1 ||
+      layout.sidebarExploreButtons !== 0 ||
+      layout.sidebarStatuses !== 0 ||
       layout.sidebarGalleryMetas !== 0 ||
       (target.name === "desktop" && (
         !resizeStability ||
@@ -1973,7 +1911,7 @@ try {
         resizeStability.skeletonSeen ||
         resizeStability.imagePageRequests !== 0 ||
         resizeStability.brokenVisibleImages !== 0 ||
-        resizeStability.columns !== 5 ||
+        resizeStability.galleryLayout !== "justified" ||
         !resizeStability.anchorFocused ||
         resizeStability.anchorDeltas.length !== 4 ||
         resizeStability.anchorDeltas.some((delta) => !Number.isFinite(delta) || delta > 2)
@@ -1986,10 +1924,10 @@ try {
         desktopSidebar.restoredBrandRight <= 0 ||
         desktopSidebar.visibility !== "visible" ||
         desktopSidebar.navigationVisibility !== "hidden" ||
-        desktopSidebar.statusVisibility !== "hidden" ||
+        desktopSidebar.footerVisibility.some(visibility => visibility !== "hidden") ||
         desktopSidebar.ariaHidden !== "true" ||
         desktopSidebar.stored !== "true" ||
-        desktopSidebar.columns !== 5 ||
+        desktopSidebar.galleryLayout !== "justified" ||
         desktopSidebar.redundantHeadings !== 0 ||
         desktopSidebar.pathDetails !== 0 ||
         desktopSidebar.progressPanels !== 0 ||
@@ -2017,8 +1955,9 @@ try {
         Math.abs(desktopSidebar.contentCollapsed) > 1 ||
         desktopSidebar.restoredToggleDelta < 0 ||
         desktopSidebar.restoredToggleDelta > 1 ||
-        layout.sidebarStatusBottomGap < 0 ||
-        layout.sidebarStatusBottomGap > 1 ||
+        (layout.sidebarFooterBottomGap !== null && (
+          layout.sidebarFooterBottomGap < 0 || layout.sidebarFooterBottomGap > 1
+        )) ||
         desktopSidebar.restored !== "true"
       )) ||
       (target.name === "mobile" && (
@@ -2048,25 +1987,21 @@ try {
         mobileNavigation.toggleHeaderInsetY > 8 ||
         mobileNavigation.albumClearance < 8 ||
         mobileNavigation.albumClearance > 12 ||
-        mobileNavigation.statusBottomGap < 0 ||
-        mobileNavigation.statusBottomGap > 1 ||
+        (mobileNavigation.footerBottomGap !== null && (
+          mobileNavigation.footerBottomGap < 0 || mobileNavigation.footerBottomGap > 1
+        )) ||
         mobileNavigation.drawerWidth < 200 ||
         mobileNavigation.closed !== 0 ||
         mobileNavigation.restored !== "false" ||
-        mobileCardNames?.shownOnContact !== "true" ||
-        mobileCardNames.retainedOnRelease !== "true" ||
-        mobileCardNames.retainedWithoutTimeout !== "true" ||
-        mobileCardNames.switchedToSecond !== "true" ||
-        mobileCardNames.firstHidden !== "false" ||
-        mobileCardNames.activeCount !== 1 ||
-        mobileCardNames.displayedCount !== 1 ||
-        mobileCardNames.clickCount !== 1 ||
-        mobileCardNames.viewerOpenedFromTouch !== 1 ||
-        layout.cardNameDisplay === "none" ||
-        layout.cardNameOpacity > 0.01 ||
-        layout.cardNameWhiteSpace !== "nowrap"
+        !mobileCardActions?.hiddenInitially || mobileCardActions.moreVisible ||
+        mobileCardActions.viewerAfterMenu !== 0 ||
+        mobileCardActions.menuItemCount !== 6 ||
+        !mobileCardActions.focusReturned ||
+        mobileCardActions.clickCount !== 1 ||
+        mobileCardActions.viewerOpenedFromTouch !== 1
       )) ||
       (target.name === "desktop" && layout.topbarPosition !== "fixed") ||
+      layout.nativeCardTitles !== 0 || layout.legacyCardNames !== 0 || layout.cardActions !== 0 ||
       browserErrors.length
     ) {
       throw new Error(`visual check failed: ${JSON.stringify(result)}`);

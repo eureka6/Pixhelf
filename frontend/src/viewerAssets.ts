@@ -1,4 +1,5 @@
 import type { GalleryImage } from "./types";
+import { authentication, checkAuthentication, requireLogin } from "./auth";
 
 const THUMBNAIL_CACHE_LIMIT = 32;
 const ORIGINAL_CACHE_LIMIT = 4;
@@ -14,16 +15,16 @@ type NetworkInformation = {
   saveData?: boolean;
 };
 
-export type ViewerAssetStatus = "loading" | "ready" | "failed";
+type ViewerAssetStatus = "loading" | "ready" | "failed";
 
-export type ViewerImageAsset = {
+type ViewerImageAsset = {
   element: HTMLImageElement;
   promise: Promise<void>;
   status: ViewerAssetStatus;
   lastUsed: number;
 };
 
-export type ViewerRenderAsset = {
+type ViewerRenderAsset = {
   bitmap: ImageBitmap | null;
   promise: Promise<void>;
   status: ViewerAssetStatus;
@@ -59,7 +60,7 @@ export function viewerOriginalUrl(image: GalleryImage, attempt = 0): string {
   return attempt ? `${url}?retry=${attempt}` : url;
 }
 
-function canSpeculativelyPreloadOriginals(): boolean {
+export function canPreloadViewerNeighbors(): boolean {
   if (document.visibilityState !== "visible") return false;
   const connection = (navigator as Navigator & { connection?: NetworkInformation }).connection;
   if (connection?.saveData) return false;
@@ -71,10 +72,6 @@ export function supportsViewerViewportBitmaps(): boolean {
   if (window.innerWidth <= 720) return true;
   return navigator.maxTouchPoints > 0
     && window.matchMedia("(pointer: coarse)").matches;
-}
-
-export function canPreloadViewerNeighbors(): boolean {
-  return canSpeculativelyPreloadOriginals();
 }
 
 function pruneCache(
@@ -136,7 +133,11 @@ function loadImageAsset(
       settle(element.naturalWidth > 0 ? "ready" : "failed");
     });
   }, { once: true });
-  element.addEventListener("error", () => settle("failed"), { once: true });
+  element.addEventListener("error", () => {
+    settle("failed");
+    // These preload elements are detached, so document-level image error handlers cannot see them.
+    void checkAuthentication();
+  }, { once: true });
   cache.set(url, asset);
   element.src = url;
   timeout = window.setTimeout(() => {
@@ -148,9 +149,9 @@ function loadImageAsset(
   return asset;
 }
 
-export function preloadViewerThumbnail(
+function preloadViewerThumbnail(
   image: GalleryImage,
-  priority: AssetPriority = "low",
+  priority: AssetPriority,
 ): ViewerImageAsset {
   return loadImageAsset(
     thumbnailAssets,
@@ -248,13 +249,16 @@ function startNextViewportRenderJob(): void {
     const timeout = window.setTimeout(() => controller.abort(), ASSET_LOAD_TIMEOUT_MS);
     try {
       const requestOptions: RequestInit & { priority: "high" | "low" } = {
-        cache: attempt ? "reload" : "force-cache",
+        cache: authentication.enabled ? "no-cache" : attempt ? "reload" : "force-cache",
         credentials: "same-origin",
         priority: asset.priority,
         signal: controller.signal,
       };
       const response = await fetch(viewerOriginalUrl(image, attempt), requestOptions);
-      if (!response.ok) throw new Error(`original request failed: ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 401) requireLogin();
+        throw new Error(`original request failed: ${response.status}`);
+      }
       if (!response.headers.get("content-type")?.startsWith("image/")) {
         throw new Error("original response is not an image");
       }
@@ -362,7 +366,7 @@ export function getDecodedViewerOriginal(source: string): HTMLImageElement | nul
 export function preloadOriginalImage(image: GalleryImage): void {
   if (
     supportsViewerViewportBitmaps()
-    || !canSpeculativelyPreloadOriginals()
+    || !canPreloadViewerNeighbors()
   ) return;
   getViewerOriginalAsset(image, 0, "low");
 }
@@ -393,7 +397,7 @@ export function prepareViewerImages(
   // The active desktop original is always requested. Neighboring originals are
   // speculative and respect Save-Data/slow-network signals.
   getViewerOriginalAsset(images[activeIndex]!, 0, "high");
-  if (!canSpeculativelyPreloadOriginals()) return;
+  if (!canPreloadViewerNeighbors()) return;
   for (let distance = 1; distance <= ORIGINAL_PRELOAD_DISTANCE; distance += 1) {
     const next = images[activeIndex + distance];
     const previous = images[activeIndex - distance];

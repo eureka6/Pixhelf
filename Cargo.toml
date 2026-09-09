@@ -1,34 +1,40 @@
 [package]
 name = "pixhelf"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+argon2 = { version = "0.5.3", features = ["std"] }
+async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["json", "query", "tokio"] }
 blake3 = "1.8.7"
 candle-core = { version = "0.9.2", default-features = false }
 candle-nn = { version = "0.9.2", default-features = false }
 candle-transformers = { version = "0.9.2", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+ipnet = "2.12.0"
 kamadak-exif = "0.6.1"
 natord = "1.0.9"
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+rpassword = "7.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.10.9"
+subtle = "2.6.1"
+tempfile = "3.27.0"
+time = { version = "0.3.55", features = ["formatting", "macros"] }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["compression-br", "compression-gzip", "fs", "set-header", "trace"] }
+tower-sessions = { version = "0.15.0", default-features = false, features = ["axum-core"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "time"] }
 tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 walkdir = "2.5.0"
 webp = "0.3.1"
-
-[dev-dependencies]
-tempfile = "3.27.0"
+zeroize = "1.9.0"
 
 [profile.release]
 lto = "thin"

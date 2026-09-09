@@ -13,8 +13,8 @@ const results = [];
 
 async function traceResize(page, toggles = [0]) {
   return page.evaluate(async (toggleTimes) => {
-    const masonry = document.querySelector(".masonry");
-    const cards = [...masonry.querySelectorAll(".image-card")];
+    const gallery = document.querySelector(".justified-gallery");
+    const cards = [...gallery.querySelectorAll(".image-card")];
     const focused = document.activeElement?.closest(".image-card");
     const anchorY = focused ? focused.getBoundingClientRect().top + focused.getBoundingClientRect().height / 2 : null;
     const loaded = cards.filter((card) => card.dataset.loaded === "true");
@@ -25,7 +25,7 @@ async function traceResize(page, toggles = [0]) {
     const snapshot = (time) => ({
       time,
       width: cards[0].style.width,
-      columns: masonry.dataset.columns,
+      rows: gallery.dataset.rows,
       scrollY,
       anchorY: focused ? focused.getBoundingClientRect().top + focused.getBoundingClientRect().height / 2 : null,
       animated: cards.filter((card) => card.getAnimations().some((animation) => animation.playState === "running")).length,
@@ -66,8 +66,8 @@ async function traceResize(page, toggles = [0]) {
     return {
       viewport: innerWidth,
       toggles: toggleTimes.length,
-      layoutCommits: frames.slice(1).filter((frame, index) => frame.width !== frames[index].width || frame.columns !== frames[index].columns).length,
-      columnCounts: [...new Set(frames.map((frame) => frame.columns))],
+      layoutCommits: frames.slice(1).filter((frame, index) => frame.width !== frames[index].width || frame.rows !== frames[index].rows).length,
+      rowCounts: [...new Set(frames.map((frame) => frame.rows))],
       maxAnchorDrift: anchorY === null ? 0 : Math.max(...frames.map((frame) => Math.abs(frame.anchorY - anchorY))),
       maxExcessTravel,
       maxFrameStep,
@@ -113,7 +113,7 @@ try {
         if (!baseline) {
           assert.ok(trace.layoutCommits <= 2, "sidebar animation repeatedly recalculates the layout");
           assert.ok(trace.maxAnchorDrift <= 2, "the reading position moved during the transition");
-          assert.ok(trace.maxExcessTravel <= 4, "cards reverse direction or jump between columns");
+          assert.ok(trace.maxExcessTravel <= 4, "cards reverse direction or jump between rows");
           assert.ok(trace.peakAnimated > 0, "cards did not transition to the new layout");
           assert.equal(trace.remainingAnimations, 0);
           assert.equal(trace.cardsPreserved && trace.loadedPreserved && !trace.skeletonSeen, true);

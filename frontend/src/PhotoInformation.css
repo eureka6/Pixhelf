@@ -4,6 +4,17 @@
   gap: 12px;
 }
 
+html:has(.photo-info-dialog[open]) { overflow: hidden; }
+.photo-info-dialog { width: min(680px, calc(100% - 24px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 24px 80px #10201933; overflow: hidden; color-scheme: light; }
+.photo-info-dialog[open] { display: flex; flex-direction: column; }
+.photo-info-dialog::backdrop { background: #14221d66; backdrop-filter: blur(3px); }
+.photo-info-header { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 15px; color: #304b3e; border-bottom: 1px solid var(--border); }
+.photo-info-header h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; }
+.photo-info-header button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: inherit; background: transparent; border: 0; border-radius: 6px; }
+.photo-info-header button:hover { background: var(--accent-soft); }
+.photo-info-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.photo-info-dialog .viewer-image-information-panel { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+
 .viewer-photo-heading {
   min-width: 0;
   min-height: 28px;
@@ -430,3 +441,35 @@
   .viewer-histogram-card.is-loading { min-height: 130px; }
   .viewer-histogram { height: 104px; }
 }
+
+/* The standalone dialog follows the gallery theme, including every detail state. */
+.photo-info-dialog :is(.viewer-image-information-group, .viewer-image-information-metadata,
+  .viewer-image-information-list > div, .viewer-image-information-loading,
+  .viewer-image-information-empty, .viewer-histogram-axis,
+  .viewer-image-information-overview > .viewer-image-information-group + .viewer-image-information-group,
+  .viewer-image-information-metadata > .viewer-image-information-group + .viewer-image-information-group) { border-color: var(--border); }
+.photo-info-dialog .viewer-image-information-group h4 { color: #486253; }
+.photo-info-dialog .viewer-image-information-group h4::before { background: var(--accent); }
+.photo-info-dialog :is(.viewer-image-information-list dt, .viewer-image-information-exposure dt,
+  .viewer-image-information-empty, .viewer-histogram-axis, .viewer-histogram-legend) { color: var(--muted); }
+.photo-info-dialog :is(.viewer-image-information-list dd, .viewer-image-information-exposure dd) { color: var(--ink); }
+.photo-info-dialog .viewer-image-information-exposure > div {
+  --exposure-accent: 36, 120, 111;
+  background: rgba(var(--exposure-accent), .045);
+  border-color: rgba(var(--exposure-accent), .18);
+}
+.photo-info-dialog .viewer-image-information-exposure > [data-exposure-kind="aperture"] { --exposure-accent: 154, 107, 45; }
+.photo-info-dialog .viewer-image-information-exposure > [data-exposure-kind="shutter"] { --exposure-accent: 61, 109, 185; }
+.photo-info-dialog .viewer-image-information-exposure > [data-exposure-kind="iso"] { --exposure-accent: 135, 92, 169; }
+.photo-info-dialog .viewer-histogram-card { background: #f1f5f2; }
+.photo-info-dialog .viewer-histogram-grid { stroke: #d5dfd8; }
+.photo-info-dialog .viewer-histogram-channel { mix-blend-mode: multiply; }
+.photo-info-dialog .viewer-histogram-luminance { fill: #586d631c; stroke: #788e82; }
+.photo-info-dialog .viewer-histogram-red { fill: #c5574e29; stroke: #b74941; }
+.photo-info-dialog .viewer-histogram-green { fill: #39905b29; stroke: #2f8451; }
+.photo-info-dialog .viewer-histogram-blue { fill: #4b7fc829; stroke: #386fbe; }
+.photo-info-dialog .viewer-histogram-legend span[data-channel="luminance"]::before { background: #788e82; }
+.photo-info-dialog :is(.viewer-photo-data-skeleton, .viewer-image-information-value-skeleton,
+  .viewer-image-information-loading span) { background-image: linear-gradient(105deg, #e7ede9 24%, #f5f8f6 43%, #e7ede9 62%); }
+.photo-info-dialog .viewer-photo-data-error { color: #974e3d; background: #faeee9; border-color: #efdcd3; }
+.photo-info-dialog .viewer-photo-data-error button { background: #f6e4dd; border-color: #e6cbbf; }

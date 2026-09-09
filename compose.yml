@@ -6,7 +6,7 @@ services:
       - "3002:3002"
     volumes:
       - "./pic:/data/pic:ro"
-      - pixhelf-cache:/data/.pixhelf-cache
+      - pixhelf-data:/data/.pixhelf-data
 
 volumes:
-  pixhelf-cache:
+  pixhelf-data:

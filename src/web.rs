@@ -5,11 +5,12 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{Path, Query, Request, State},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, Semaphore};
@@ -23,11 +24,12 @@ use tower_http::{
 use tracing::error;
 
 use crate::{
+    auth::{self, AuthConfig, AuthState, AuthView},
     gallery::{Album, GalleryIndex, ImageRecord},
     photo_details::PhotoDetails,
     similarity::{
-        DiversityFingerprint, MIN_SIMILARITY_SCORE, redundancy_score, signature_for_thumbnail,
-        similarity_score,
+        DiversityFingerprint, ImageSignature, MIN_SIMILARITY_SCORE, redundancy_score,
+        signature_for_thumbnail, signature_for_upload, similarity_score,
     },
     support::{BoundedCache, mutex_lock},
     text_search::{TextSearchEmbedding, text_image_similarity},
@@ -58,6 +60,7 @@ const TEXT_SEARCH_RESULT_LIMIT: usize = 600;
 const FILENAME_MATCH_BOOST: f32 = 3.0;
 const MAX_QUERY_VALUE_BYTES: usize = 4096;
 const PHOTO_DETAILS_CACHE_LIMIT: usize = 64;
+const MAX_SEARCH_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
 static SIMILARITY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 type SimilarityRanking = Arc<Vec<Arc<ImageRecord>>>;
@@ -261,19 +264,43 @@ struct BootstrapResponse {
     images: ImagesResponse,
 }
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+pub fn router(state: AppState, config: AuthConfig) -> Router {
+    let storage = crate::storage::router(state.thumbnails.settings_directory());
+    let authentication = AuthState::new(config);
+    let session_layer = authentication.session_layer();
+    let protected = Router::new()
         .route("/api/gallery", get(gallery_summary))
         .route("/api/images", get(images))
+        .route("/api/images/{id}", get(image_metadata))
+        .route(
+            "/api/images/similar",
+            post(uploaded_similar_images).layer(DefaultBodyLimit::max(MAX_SEARCH_UPLOAD_BYTES)),
+        )
         .route("/api/images/{id}/details", get(image_details))
         .route("/api/images/{id}/similar", get(similar_images))
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
         .route("/api/images/{id}/original", get(original))
+        .fallback(frontend)
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            authentication.clone(),
+            auth::require_auth,
+        ));
+    let application = protected
+        .merge(storage.layer(middleware::from_fn_with_state(
+            authentication.clone(),
+            auth::require_admin,
+        )))
+        .merge(auth::router(authentication.clone()))
+        .layer(middleware::from_fn(auth::session_cookie_security))
+        .layer(session_layer);
+    Router::new()
+        .route("/api/health", get(health))
         .route("/assets/{version}/app.js", get(app_js))
         .route("/assets/{version}/app.css", get(app_css))
-        .fallback(frontend)
+        .merge(application)
+        .layer(middleware::from_fn(auth::response_security))
         .layer(CompressionLayer::new().quality(CompressionLevel::Precise(5)))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -288,7 +315,6 @@ pub fn router(state: AppState) -> Router {
             HeaderValue::from_static("no-referrer"),
         ))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
 }
 
 async fn health() -> &'static str {
@@ -366,7 +392,7 @@ async fn images(
                         query
                             .album
                             .as_deref()
-                            .is_none_or(|album| record.album == album)
+                            .is_none_or(|album| record.belongs_to_album(album))
                     })
                     .filter_map(|record| {
                         let embedding = state.thumbnails.text_search_embedding(&record.id);
@@ -382,7 +408,7 @@ async fn images(
                 {
                     Ok(ranking) => Arc::new(ranking),
                     Err(error) => {
-                        error!(%error, "natural-language image ranking task stopped");
+                        error!(%error, "文字搜图排序任务中断");
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
                 };
@@ -395,7 +421,7 @@ async fn images(
             }
             Ok(None) => {}
             Err(error) => {
-                error!(query = %search, %error, "cannot encode natural-language image query; using filename fallback");
+                error!(%error, "文字搜图查询失败，改用文件名搜索");
                 let mut response = Json(image_page(&index, &query)).into_response();
                 response
                     .headers_mut()
@@ -410,6 +436,78 @@ async fn images(
         &etag,
         "private, no-cache",
     )
+}
+
+async fn image_metadata(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let index = state.index.read().await;
+    match index.image(&id) {
+        Some(image) => Json(ImageView::from(image.as_ref())).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn uploaded_similar_images(
+    State(state): State<AppState>,
+    Query(query): Query<SimilarImagesQuery>,
+    bytes: Bytes,
+) -> Response {
+    let query = query.normalize();
+    let index = Arc::clone(&*state.index.read().await);
+    let source_id = format!("upload-{}", blake3::hash(&bytes).to_hex());
+    let permit = match similarity_limit().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let status = state.thumbnails.status();
+    let key = similar_ranking_key(&index.revision, &source_id, status.ready, status.failed);
+    let ranking = if let Some(ranking) = cached_similarity_ranking(&key) {
+        ranking
+    } else {
+        let candidates = index
+            .images
+            .iter()
+            .filter_map(|candidate| {
+                state
+                    .thumbnails
+                    .ready_path(&candidate.id)
+                    .map(|path| (Arc::clone(candidate), path))
+            })
+            .collect();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let signature = signature_for_upload(&bytes).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "图片无法读取或尺寸过大，请选择 JPG、PNG 或 WebP 图片",
+                )
+            })?;
+            rank_similar_signature(&signature, candidates).map_err(|error| {
+                error!(%error, "上传图片相似度计算失败");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "无法计算相似图片，请重试",
+                )
+            })
+        })
+        .await;
+        let ranking = match result {
+            Ok(Ok(ranking)) => Arc::new(ranking),
+            Ok(Err((status, message))) => {
+                return (status, Json(serde_json::json!({ "error": message }))).into_response();
+            }
+            Err(error) => {
+                error!(%error, "上传图片搜索任务中断");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        cache_similarity_ranking(key, Arc::clone(&ranking));
+        ranking
+    };
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(similar_image_page(&ranking, query)),
+    )
+        .into_response()
 }
 
 async fn similar_images(
@@ -431,7 +529,7 @@ async fn similar_images(
         Ok(path) => path,
         Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
-            error!(%id, %error, "cannot prepare source thumbnail for similarity search");
+            error!(%id, %error, "无法准备相似图片搜索所需的缩略图");
             return (StatusCode::INTERNAL_SERVER_ERROR, "无法读取查询图片").into_response();
         }
     };
@@ -463,7 +561,7 @@ async fn similar_images(
     let permit = match similarity_limit().acquire_owned().await {
         Ok(permit) => permit,
         Err(error) => {
-            error!(%id, %error, "similarity search queue stopped");
+            error!(%id, %error, "相似图片搜索队列中断");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
@@ -514,11 +612,11 @@ async fn similar_images(
     {
         Ok(Ok(ranking)) => Arc::new(ranking),
         Ok(Err(error)) => {
-            error!(%id, %error, "cannot calculate similar images");
+            error!(%id, %error, "相似图片计算失败");
             return (StatusCode::INTERNAL_SERVER_ERROR, "无法计算相似图片").into_response();
         }
         Err(error) => {
-            error!(%id, %error, "similar image task stopped");
+            error!(%id, %error, "相似图片计算任务中断");
             return (StatusCode::INTERNAL_SERVER_ERROR, "无法计算相似图片").into_response();
         }
     };
@@ -540,6 +638,13 @@ fn rank_similar_images(
     candidates: Vec<(Arc<ImageRecord>, std::path::PathBuf)>,
 ) -> anyhow::Result<Vec<Arc<ImageRecord>>> {
     let source_signature = signature_for_thumbnail(source.as_ref(), &source_thumbnail)?;
+    rank_similar_signature(&source_signature, candidates)
+}
+
+fn rank_similar_signature(
+    source_signature: &ImageSignature,
+    candidates: Vec<(Arc<ImageRecord>, std::path::PathBuf)>,
+) -> anyhow::Result<Vec<Arc<ImageRecord>>> {
     let worker_count = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get().clamp(2, 8))
         .unwrap_or(2)
@@ -549,14 +654,9 @@ fn rank_similar_images(
         let workers = candidates
             .chunks(chunk_size)
             .map(|chunk| {
-                let source_id = source.id.as_str();
-                let source_signature = &source_signature;
                 scope.spawn(move || {
                     let mut matches = Vec::with_capacity(chunk.len());
                     for (candidate, thumbnail) in chunk {
-                        if candidate.id == source_id {
-                            continue;
-                        }
                         // A malformed candidate should not make the whole gallery
                         // unusable. It is omitted until a rescan fixes or removes it.
                         let Ok(candidate_signature) =
@@ -784,7 +884,7 @@ fn page_from_unfiltered_index(
 }
 
 fn record_matches(record: &ImageRecord, album: Option<&str>, search: Option<&str>) -> bool {
-    album.is_none_or(|album| record.album == album)
+    album.is_none_or(|album| record.belongs_to_album(album))
         && search.is_none_or(|search| record.search_key.contains(search))
 }
 
@@ -868,7 +968,7 @@ async fn image_details(
             return StatusCode::NOT_FOUND.into_response();
         }
         Err(error) => {
-            error!(path = %image.path.display(), %error, "cannot inspect image details source");
+            error!(path = %image.path.display(), %error, "无法读取图片详情源文件");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -894,7 +994,7 @@ async fn image_details(
         Ok(path) => path,
         Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
-            error!(%id, %error, "cannot prepare histogram source");
+            error!(%id, %error, "无法准备直方图源图片");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -909,11 +1009,11 @@ async fn image_details(
             if image.ensure_source_is_current().is_err() {
                 return StatusCode::NOT_FOUND.into_response();
             }
-            error!(%id, %error, "cannot read image details");
+            error!(%id, %error, "无法读取图片详情");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         Err(error) => {
-            error!(%id, %error, "image details task stopped");
+            error!(%id, %error, "图片详情任务中断");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -934,7 +1034,7 @@ async fn thumbnail(
         Ok(path) => path,
         Err(ThumbnailError::NotFound) => return Err(StatusCode::NOT_FOUND),
         Err(error) => {
-            error!(%id, %error, "cannot serve thumbnail");
+            error!(%id, %error, "无法提供缩略图");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
@@ -964,7 +1064,7 @@ async fn original(
             return Err(StatusCode::NOT_FOUND);
         }
         Err(error) => {
-            error!(path = %image.path.display(), %error, "cannot inspect original image");
+            error!(path = %image.path.display(), %error, "无法读取原图文件信息");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
@@ -1007,7 +1107,7 @@ fn with_cache_headers(mut response: Response, etag: &str, cache_control: &'stati
     let etag = match HeaderValue::from_str(etag) {
         Ok(etag) => etag,
         Err(error) => {
-            error!(%error, "cannot create ETag response header");
+            error!(%error, "无法生成 ETag 响应头");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
@@ -1149,13 +1249,18 @@ async fn frontend(State(state): State<AppState>, request: Request) -> Response {
     if request.method() != Method::GET && request.method() != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
+    let authentication = request
+        .extensions()
+        .get::<AuthView>()
+        .cloned()
+        .unwrap_or_default();
     let index = state.index.read().await;
     let status = state.thumbnails.status();
     let etag = format!(
         "\"index-{ASSET_VERSION}-{}-{}-{}\"",
         index.revision, status.ready, status.failed
     );
-    if is_not_modified(request.headers(), &etag) {
+    if !authentication.enabled && is_not_modified(request.headers(), &etag) {
         return not_modified(&etag, "private, no-cache");
     }
     let summary = summary_from_index(&index);
@@ -1173,27 +1278,11 @@ async fn frontend(State(state): State<AppState>, request: Request) -> Response {
     let bootstrap_json = match serde_json::to_string(&bootstrap) {
         Ok(json) => escape_script_json(json),
         Err(error) => {
-            error!(%error, "cannot serialize frontend bootstrap");
+            error!(%error, "无法生成页面初始数据");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let inline_styles = format!(
-        "<style>{}</style>",
-        std::str::from_utf8(APP_CSS).expect("Vite app.css must be UTF-8")
-    );
-    let html = std::str::from_utf8(INDEX_HTML)
-        .expect("Vite index.html must be UTF-8")
-        .replace(
-            r#"<link rel="stylesheet" crossorigin href="/assets/app.css">"#,
-            &inline_styles,
-        )
-        .replace("/assets/app.js", &format!("/assets/{ASSET_VERSION}/app.js"))
-        .replace(
-            "/assets/app.css",
-            &format!("/assets/{ASSET_VERSION}/app.css"),
-        )
-        .replace("<!--PIXHELF_IMAGE_PRELOAD-->", &preload)
-        .replace("__PIXHELF_BOOTSTRAP__", &bootstrap_json);
+    let html = frontend_document(&bootstrap_json, &authentication, &preload);
     drop(index);
 
     let body = if request.method() == Method::HEAD {
@@ -1209,6 +1298,58 @@ async fn frontend(State(state): State<AppState>, request: Request) -> Response {
     with_cache_headers(response, &etag, "private, no-cache")
 }
 
+pub(crate) fn authentication_html(authentication: &AuthView) -> Response {
+    let title = if authentication.setup_required {
+        "<title>欢迎使用 · Pixhelf</title>"
+    } else {
+        "<title>登录 · Pixhelf</title>"
+    };
+    let html =
+        frontend_document("null", authentication, "").replace("<title>Pixhelf</title>", title);
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::HeaderName::from_static("clear-site-data"),
+                "\"cache\"",
+            ),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+fn frontend_document(bootstrap_json: &str, authentication: &AuthView, preload: &str) -> String {
+    let authentication = escape_script_json(
+        serde_json::to_string(authentication).expect("serializable authentication view"),
+    );
+    let inline_styles = format!(
+        "<style>{}</style>",
+        std::str::from_utf8(APP_CSS).expect("Vite app.css must be UTF-8")
+    );
+    let template = std::str::from_utf8(INDEX_HTML)
+        .expect("Vite index.html must be UTF-8")
+        .replace(
+            r#"<link rel="stylesheet" crossorigin href="/assets/app.css">"#,
+            &inline_styles,
+        )
+        .replace("/assets/app.js", &format!("/assets/{ASSET_VERSION}/app.js"))
+        .replace(
+            "/assets/app.css",
+            &format!("/assets/{ASSET_VERSION}/app.css"),
+        )
+        .replace("<!--PIXHELF_IMAGE_PRELOAD-->", preload);
+    // Substitute each template slot once without interpreting markers inside usernames or filenames.
+    let (before_auth, remainder) = template
+        .split_once("__PIXHELF_AUTH__")
+        .expect("authentication template slot");
+    let (between, after_bootstrap) = remainder
+        .split_once("__PIXHELF_BOOTSTRAP__")
+        .expect("gallery template slot");
+    format!("{before_auth}{authentication}{between}{bootstrap_json}{after_bootstrap}")
+}
+
 fn escape_script_json(json: String) -> String {
     json.replace('&', "\\u0026")
         .replace('<', "\\u003c")
@@ -1220,6 +1361,10 @@ fn escape_script_json(json: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn router(state: AppState) -> Router {
+        super::router(state, AuthConfig::default())
+    }
 
     struct ColourTextSearchModel;
 
@@ -1421,6 +1566,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn albums_share_recursive_scope_with_image_search_and_pagination() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        for folder in ["trip/child", "trip-other", "empty"] {
+            std::fs::create_dir_all(gallery.join(folder)).unwrap();
+        }
+        for path in [
+            "root.png",
+            "trip/direct.png",
+            "trip/child/child.png",
+            "trip-other/other.png",
+        ] {
+            image::RgbImage::new(20, 10)
+                .save(gallery.join(path))
+                .unwrap();
+        }
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails: ThumbnailManager::new(temp.path().join("cache")).unwrap(),
+        });
+        for (query, expected_total, expected_items) in [
+            ("album=trip&limit=1&offset=0", 2, 1),
+            ("album=trip&limit=1&offset=1", 2, 1),
+            ("album=trip&search=child", 1, 1),
+            ("album=trip&sort=name-desc", 2, 2),
+            ("album=trip&sort=explore&seed=test", 2, 2),
+            ("album=trip-other", 1, 1),
+            ("album=empty", 0, 0),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/images?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["total"], expected_total, "{query}");
+            let items = body["items"].as_array().unwrap();
+            assert_eq!(items.len(), expected_items, "{query}");
+            assert!(items.iter().all(|item| item["name"] != "root.png"));
+            if query.starts_with("album=trip&") {
+                assert!(items.iter().all(|item| item["name"] != "other.png"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn similar_images_are_ranked_exclude_the_source_and_paginate() {
         let temp = tempfile::tempdir().unwrap();
         let gallery = temp.path().join("gallery");
@@ -1495,6 +1696,138 @@ mod tests {
         assert_eq!(page["total"], 2);
         assert_eq!(page["nextOffset"], serde_json::Value::Null);
         assert_eq!(page["items"][0]["name"], "nearby.png");
+    }
+
+    #[tokio::test]
+    async fn uploaded_images_search_without_importing_and_validate_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        let source = image::RgbImage::from_pixel(40, 30, image::Rgb([220, 80, 40]));
+        source.save(gallery.join("source.png")).unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([216, 82, 43]))
+            .save(gallery.join("nearby.png"))
+            .unwrap();
+        image::RgbImage::from_pixel(40, 30, image::Rgb([20, 50, 220]))
+            .save(gallery.join("unrelated.png"))
+            .unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let source_id = index
+            .images
+            .iter()
+            .find(|image| image.name == "source.png")
+            .unwrap()
+            .id
+            .clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        for image in &index.images {
+            thumbnails.ensure_ready(&image.id).await.unwrap();
+        }
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+        let upload = |bytes: Vec<u8>, offset: usize| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/images/similar?offset={offset}&limit=1"))
+                .header(header::ORIGIN, "http://localhost")
+                .header("x-pixhelf-origin", "http://localhost")
+                .body(Body::from(bytes))
+                .unwrap()
+        };
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::WebP,
+        ] {
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            source.write_to(&mut encoded, format).unwrap();
+            for offset in 0..2 {
+                let response = app
+                    .clone()
+                    .oneshot(upload(encoded.get_ref().clone(), offset))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{format:?}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                    .await
+                    .unwrap();
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(page["total"], 2, "{format:?}");
+                assert_eq!(
+                    page["items"][0]["name"],
+                    if offset == 0 {
+                        "source.png"
+                    } else {
+                        "nearby.png"
+                    }
+                );
+                assert_eq!(
+                    page["nextOffset"],
+                    if offset == 0 {
+                        serde_json::json!(1)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                );
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(upload(b"invalid image".to_vec(), 0))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = app
+            .clone()
+            .oneshot(upload(vec![0; MAX_SEARCH_UPLOAD_BYTES + 1], 0))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/images/similar")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images/{source_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 10_000)
+            .await
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(metadata["name"], "source.png");
+        assert_eq!(metadata["width"], 40);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/images/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(std::fs::read_dir(&gallery).unwrap().count(), 3);
     }
 
     #[tokio::test]

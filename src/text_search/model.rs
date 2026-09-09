@@ -15,7 +15,7 @@ use tokenizers::{
     Tokenizer, TruncationParams, models::wordpiece::WordPiece, normalizers::bert::BertNormalizer,
     pre_tokenizers::bert::BertPreTokenizer, processors::bert::BertProcessing,
 };
-use tracing::info;
+use tracing::debug;
 
 use super::TextSearchEmbedding;
 
@@ -106,15 +106,12 @@ impl LazyModel {
             .as_ref()
             .context("natural-language search model cannot be reloaded")?
             .clone();
-        info!(
-            model = MODEL_NAME,
-            "loading natural-language search model on demand"
-        );
+        debug!(model = MODEL_NAME, "按需加载文字搜图模型");
         match loader() {
             Ok(model) => {
                 self.current = Some(model);
                 self.last_used = Some(Instant::now());
-                info!(model = MODEL_NAME, "natural-language search model loaded");
+                debug!(model = MODEL_NAME, "文字搜图模型已加载");
                 Ok(())
             }
             Err(error) => {

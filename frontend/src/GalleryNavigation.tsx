@@ -1,27 +1,32 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 
-import { version as appVersion } from "../package.json";
+import { VersionLink } from "./VersionLink";
 import logoMark from "./assets/pixhelf-mark.svg?inline";
 import { formatCount } from "./format";
 import {
-  Check,
+  BookImage,
+  Cloud,
   Dices,
-  Folder,
   House,
   Images,
-  LoaderCircle,
   Menu,
   Search,
+  ScanSearch,
   X,
 } from "./icons";
 import { ToolbarPopover } from "./ToolbarPopover";
-import type { GallerySummary, ThumbnailStatus } from "./types";
+import { AuthControls } from "./AuthControls";
+import { authentication } from "./auth";
+import type { GallerySection, GallerySummary } from "./types";
 
 export function Header({
   search,
   searchOpen,
   onSearchOpenChange,
   searchMode,
+  albumSearch,
+  storageSearch,
+  similarSearch,
   onSearchChange,
   onExplore,
   exploreActive,
@@ -35,6 +40,9 @@ export function Header({
   searchOpen: boolean;
   onSearchOpenChange: (open: boolean) => void;
   searchMode: "filename" | "indexing" | "semantic";
+  albumSearch: boolean;
+  storageSearch: boolean;
+  similarSearch: boolean;
   onSearchChange: (value: string) => void;
   onExplore: () => void;
   exploreActive: boolean;
@@ -47,9 +55,9 @@ export function Header({
   const [exploreMotionKey, setExploreMotionKey] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mobileNavigationOpen = compactLayout && navigationOpen;
-  const semanticSearch = searchMode === "semantic";
-  const searchIndexing = searchMode === "indexing";
-  const searchPlaceholder = semanticSearch
+  const semanticSearch = !albumSearch && !storageSearch && !similarSearch && searchMode === "semantic";
+  const searchIndexing = !albumSearch && !storageSearch && !similarSearch && searchMode === "indexing";
+  const searchPlaceholder = similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
     ? "描述想找的图片"
     : searchIndexing
       ? "文字索引中 · 暂搜文件名"
@@ -76,8 +84,6 @@ export function Header({
   };
   const handleExplore = () => {
     searchInputRef.current?.blur();
-    onSearchOpenChange(false);
-    if (mobileNavigationOpen) onToggleNavigation();
     setExploreMotionKey((value) => value + 1);
     onExplore();
   };
@@ -107,13 +113,12 @@ export function Header({
         </button>
         <button
           type="button"
-          className={`icon-button toolbar-action-button explore-toggle ${exploreActive ? "is-active" : ""} ${exploreLoading ? "is-loading" : ""}`}
+          className="icon-button toolbar-action-button explore-toggle"
           onClick={handleExplore}
-          aria-label={exploreActive ? "换一组图片" : "随机探索"}
+          aria-label="探索列队"
           aria-pressed={exploreActive}
           aria-busy={exploreLoading}
-          data-state={exploreActive ? "active" : "idle"}
-          title={exploreActive ? "换一组" : "随机探索"}
+          title={exploreActive ? "探索列队 · 换一组图片" : "探索列队"}
         >
           <Dices
             key={exploreMotionKey}
@@ -128,7 +133,7 @@ export function Header({
           onOpenChange={handleSearchOpenChange}
           openLabel="打开搜索"
           closeLabel="收起搜索"
-          panelLabel="搜索图片"
+          panelLabel={similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索图片"}
           icon={
             <>
               <Search className="search-toggle-icon" size={18} />
@@ -146,12 +151,12 @@ export function Header({
             value={search}
             onInput={(event) => onSearchChange(event.currentTarget.value)}
             placeholder={searchPlaceholder}
-            aria-label={semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
+            aria-label={similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
             enterKeyHint="search"
             autoComplete="off"
             tabIndex={searchOpen ? 0 : -1}
           />
-          {searchMode !== "filename" && (
+          {!albumSearch && !storageSearch && !similarSearch && searchMode !== "filename" && (
             <span
               className="search-mode-badge"
               data-state={searchMode}
@@ -178,7 +183,7 @@ export function Header({
   );
 }
 
-export function SidebarToggleButton({
+function SidebarToggleButton({
   className,
   controls,
   expanded,
@@ -193,61 +198,15 @@ export function SidebarToggleButton({
   return (
     <button
       type="button"
-      className={`icon-button sidebar-toggle-button ${className} ${expanded ? "is-expanded" : "is-collapsed"}`}
+      className={`icon-button sidebar-toggle-button ${className}`}
       onClick={onClick}
       aria-label={label}
       aria-expanded={expanded}
       aria-controls={controls}
-      data-state={expanded ? "expanded" : "collapsed"}
       title={label}
     >
       <Menu size={22} />
     </button>
-  );
-}
-
-function SidebarStatus({ status }: { status: ThumbnailStatus | null }) {
-  if (!status) {
-    return (
-      <div className="sidebar-status muted" role="status">
-        <LoaderCircle className="spin" size={15} />
-        <span>连接中</span>
-      </div>
-    );
-  }
-  const progress = !status.backgroundComplete
-    ? {
-      ready: status.ready,
-      total: status.total,
-      label: "处理中",
-      title: "正在后台处理缩略图",
-      complete: false,
-    }
-    : status.textSearch.enabled && !status.textSearch.backgroundComplete
-      ? {
-        ready: status.textSearch.ready,
-        total: status.textSearch.total,
-        label: "文字索引",
-        title: "正在本地建立自然语言文字搜图索引",
-        complete: false,
-      }
-      : {
-        ready: status.ready,
-        total: status.total,
-        label: "已就绪",
-        title: "图片和搜索索引处理完成",
-        complete: true,
-      };
-  return (
-    <div
-      className={`sidebar-status ${progress.complete ? "complete" : ""}`}
-      title={progress.title}
-      role="status"
-    >
-      {progress.complete ? <Check size={15} /> : <LoaderCircle className="spin" size={15} />}
-      <span>{progress.label}</span>
-      <strong>{formatCount(progress.ready)} / {formatCount(progress.total)}</strong>
-    </div>
   );
 }
 
@@ -279,15 +238,7 @@ function SidebarBrand({ onHome }: { onHome: () => void }) {
             Pixhelf
           </span>
         </a>
-        <a
-          className="brand-version"
-          href="https://github.com/eureka6/Pixhelf"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="GitHub"
-        >
-          v{appVersion}
-        </a>
+        <VersionLink className="brand-version" />
       </div>
     </div>
   );
@@ -295,8 +246,7 @@ function SidebarBrand({ onHome }: { onHome: () => void }) {
 
 export function Sidebar({
   summary,
-  status,
-  activeAlbum,
+  activeSection,
   onChoose,
   onHome,
   mobileOpen,
@@ -304,40 +254,50 @@ export function Sidebar({
   onMobileExited,
   onClose,
   desktopCollapsed,
+  onSettings,
 }: {
   summary: GallerySummary | null;
-  status: ThumbnailStatus | null;
-  activeAlbum: string;
-  onChoose: (path: string) => void;
+  activeSection: GallerySection;
+  onChoose: (section: GallerySection) => void;
   onHome: () => void;
   mobileOpen: boolean;
   mobileMounted: boolean;
   onMobileExited: () => void;
   onClose: () => void;
   desktopCollapsed: boolean;
+  onSettings: () => void;
 }) {
   const navigation = (
     <>
-      <nav className="album-nav" aria-label="相册">
-        <AlbumButton
-          label="全部图片"
+      <nav className="album-nav" aria-label="主导航">
+        <NavigationButton
+          label="图片"
           count={summary?.total ?? 0}
-          active={!activeAlbum}
-          onClick={() => onChoose("")}
-          all
+          active={activeSection === "library"}
+          onClick={() => onChoose("library")}
+          section="library"
         />
-        {summary?.albums.map((item) => (
-          <AlbumButton
-            key={item.path}
-            label={item.name}
-            detail={item.path.includes("/") ? item.path : undefined}
-            count={item.count}
-            active={activeAlbum === item.path}
-            onClick={() => onChoose(item.path)}
-          />
-        ))}
+        <NavigationButton
+          label="相册"
+          count={summary?.albums.length ?? 0}
+          active={activeSection === "albums"}
+          onClick={() => onChoose("albums")}
+          section="albums"
+        />
+        <NavigationButton
+          label="相似图片"
+          active={activeSection === "similar"}
+          onClick={() => onChoose("similar")}
+          section="similar"
+        />
+        {!authentication.guest && <NavigationButton
+          label="外部存储"
+          active={activeSection === "storage"}
+          onClick={() => onChoose("storage")}
+          section="storage"
+        />}
       </nav>
-      <SidebarStatus status={status} />
+      <AuthControls onSettings={() => { onClose(); onSettings(); }} />
     </>
   );
 
@@ -346,7 +306,7 @@ export function Sidebar({
       <aside
         id="desktop-album-navigation"
         className="sidebar desktop-sidebar"
-        aria-label="相册导航"
+        aria-label="图库导航"
         aria-hidden={desktopCollapsed}
         inert={desktopCollapsed}
       >
@@ -365,13 +325,13 @@ export function Sidebar({
             className="mobile-nav-scrim"
             type="button"
             onClick={onClose}
-            aria-label="关闭相册导航"
+            aria-label="关闭图库导航"
           />
           <aside
             id="mobile-album-navigation"
             className="sidebar mobile-sidebar"
             role="dialog"
-            aria-label="相册导航"
+            aria-label="图库导航"
             onTransitionEnd={(event) => {
               if (
                 event.target === event.currentTarget
@@ -389,20 +349,18 @@ export function Sidebar({
   );
 }
 
-function AlbumButton({
+function NavigationButton({
   label,
-  detail,
   count,
   active,
   onClick,
-  all = false,
+  section,
 }: {
   label: string;
-  detail?: string;
-  count: number;
+  count?: number;
   active: boolean;
   onClick: () => void;
-  all?: boolean;
+  section: GallerySection;
 }) {
   return (
     <button
@@ -410,13 +368,13 @@ function AlbumButton({
       className={`album-link ${active ? "active" : ""}`}
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      title={detail ?? label}
+      title={label}
     >
-      {all ? <Images size={17} /> : <Folder size={17} />}
+      {section === "library" ? <Images size={17} /> : section === "similar" ? <ScanSearch size={17} /> : section === "storage" ? <Cloud size={17} /> : <BookImage size={17} />}
       <span className="album-copy">
         <strong>{label}</strong>
       </span>
-      <span className="album-count">{formatCount(count)}</span>
+      {count !== undefined && <span className="album-count">{formatCount(count)}</span>}
     </button>
   );
 }

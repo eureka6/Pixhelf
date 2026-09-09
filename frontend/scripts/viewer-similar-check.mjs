@@ -49,6 +49,47 @@ async function expectAligned(page) {
   return current;
 }
 
+async function expectJustified(page, skeleton = false) {
+  const selector = skeleton ? ".viewer-similar-skeleton" : ".viewer-similar-gallery";
+  await page.waitForFunction(selector => {
+    const gallery = document.querySelector(selector);
+    return gallery?.dataset.layout === "justified" && Number(gallery.dataset.layoutWidth) > 0
+      && Math.abs(Number(gallery.dataset.layoutWidth) - gallery.getBoundingClientRect().width) < 1;
+  }, selector);
+  const result = await page.locator(selector).evaluate((gallery, skeleton) => {
+    const cards = [...gallery.querySelectorAll(skeleton ? "span" : ".viewer-similar-card")];
+    const rows = [...Map.groupBy(cards, card => card.style.top).values()];
+    const width = gallery.getBoundingClientRect().width;
+    const limit = width <= 720 ? 2 : width >= 1600 ? 6 : 5;
+    const gap = parseFloat(getComputedStyle(gallery).getPropertyValue("--gallery-gap"));
+    const problems = [];
+    let bottom = gallery.getBoundingClientRect().top - gap;
+    for (const [index, row] of rows.entries()) {
+      if (row.length > limit) problems.push("row limit exceeded");
+      const first = row[0].getBoundingClientRect();
+      let right = gallery.getBoundingClientRect().left - gap;
+      for (const card of row) {
+        const rect = card.getBoundingClientRect();
+        if (Math.abs(rect.left - right - gap) > .1 || Math.abs(rect.top - bottom - gap) > .1) problems.push("gap or overlap");
+        if (Math.abs(rect.height - first.height) > .1) problems.push("unequal row heights");
+        const image = card.querySelector("img");
+        const ratio = image ? Number(image.getAttribute("width")) / Number(image.getAttribute("height")) : 1;
+        if (image && (getComputedStyle(image).objectFit !== "contain"
+          || Math.abs(rect.width / rect.height - ratio) / ratio > .003)) problems.push("image ratio changed");
+        right = rect.right;
+      }
+      const edge = gallery.getBoundingClientRect().right;
+      if (right > edge + .1 || (index < rows.length - 1 && Math.abs(right - edge) > .1)) problems.push("row not justified");
+      bottom = first.bottom;
+    }
+    if (Math.abs(bottom - gallery.getBoundingClientRect().bottom) > .1) problems.push("incorrect gallery height");
+    return { rows: rows.length, maxRowImages: Math.max(...rows.map(row => row.length)), problems };
+  }, skeleton);
+  assert.ok(result.rows > 0);
+  assert.deepEqual(result.problems, []);
+  return result;
+}
+
 try {
   for (const target of [
     { name: "desktop", width: 1440, height: 900, mode: "results" },
@@ -107,6 +148,7 @@ try {
       }
       await page.waitForSelector(".viewer-similar-skeleton");
       const loading = await expectAligned(page);
+      const skeleton = await expectJustified(page, true);
       assert.ok(loading.focused, "keyboard focus did not follow the destination");
       round.details.resolve();
       await page.waitForSelector(".viewer-image-information-exposure");
@@ -122,6 +164,8 @@ try {
         await page.waitForSelector(".viewer-similar-card");
         await expectAligned(page);
       }
+      const gallery = await page.locator(".viewer-similar-gallery").count()
+        ? await expectJustified(page) : null;
       const requests = round.requests;
       await activate(page.locator(".viewer-details-return"));
       await page.waitForFunction(() => document.querySelector(".image-viewer").scrollTop < 1);
@@ -171,7 +215,7 @@ try {
       const afterLoad = await position(page);
       assert.ok(afterLoad.top > afterLoad.margin + 40, "loading pulled the user back to the destination");
       assert.deepEqual(errors, []);
-      results.push({ target: target.name, loading, metadata, ready, manualInterruption: true, cachedNavigation: true });
+      results.push({ target: target.name, loading, metadata, ready, skeleton, gallery, manualInterruption: true, cachedNavigation: true });
     } finally {
       for (const current of rounds) {
         current.details.resolve();

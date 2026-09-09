@@ -65,7 +65,6 @@ export function ToolbarPopover({
     <div
       ref={rootRef}
       className={`toolbar-popover ${open ? "is-open" : ""} ${rootClassName}`}
-      data-popover-open={open}
     >
       <button
         ref={triggerRef}
@@ -75,7 +74,6 @@ export function ToolbarPopover({
         aria-label={triggerLabel}
         aria-expanded={open}
         aria-controls={id}
-        data-state={open ? "open" : "closed"}
         title={triggerLabel}
       >
         <span className="toolbar-popover-trigger-icon" aria-hidden="true">

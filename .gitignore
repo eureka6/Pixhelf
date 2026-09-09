@@ -1,7 +1,10 @@
 /pic/
+/.pixhelf-data/
 /.pixhelf-cache/
 /target/
 /frontend/node_modules/
 /frontend/dist/
 /models/
 *.log
+/.env
+/pixhelf-password.hash

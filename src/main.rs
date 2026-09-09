@@ -1,13 +1,16 @@
+mod auth;
 mod config;
 mod gallery;
+mod logging;
 mod photo_details;
 mod similarity;
+mod storage;
 mod support;
 mod text_search;
 mod thumbs;
 mod web;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use config::{Config, TextSearchFiles, TextSearchSource};
@@ -16,34 +19,52 @@ use text_search::TextSearchIndex;
 use thumbs::ThumbnailManager;
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 use web::AppState;
 
 const AUTOMATIC_MODEL_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("pixhelf=info,tower_http=info")),
-        )
-        .compact()
-        .init();
+async fn main() -> ExitCode {
+    logging::init();
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(
+                target: logging::FATAL_TARGET,
+                error = %format!("{error:#}"),
+                "Pixhelf 运行失败"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
 
+async fn run() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--hash-password") {
+        anyhow::ensure!(
+            std::env::args().len() == 2,
+            "--hash-password does not accept arguments; enter the password at the prompt or via stdin"
+        );
+        return auth::print_password_hash();
+    }
     let config = Config::from_env_and_args()?;
-    info!(gallery = %config.gallery_dir.display(), "scanning gallery");
+    // Fail before scanning or displaying setup instructions if the port cannot be bound.
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .with_context(|| format!("cannot listen on {}", config.listen))?;
+    info!(version = env!("CARGO_PKG_VERSION"), "启动 Pixhelf");
+    info!(path = %config.gallery_dir.display(), "扫描图库");
     let index = scan_gallery_async(config.gallery_dir.clone(), None).await?;
     if index.images.is_empty() {
         warn!(
             gallery = %config.gallery_dir.display(),
-            "gallery is empty; waiting for supported images"
+            "图库为空，添加 JPEG、PNG 或 WebP 图片后会自动更新"
         );
     }
     info!(
         images = index.images.len(),
         albums = index.albums.len(),
-        "gallery indexed"
+        "图库扫描完成"
     );
 
     let initial_ids: Vec<String> = index
@@ -66,6 +87,16 @@ async fn main() -> Result<()> {
         let current = index.read().await;
         thumbnails.reconcile(&current.images);
     }
+    info!(listen = %listener.local_addr()?, "服务已就绪");
+    if config.auth.setup.is_some() {
+        info!("首次使用：打开网页，创建管理员账号即可进入图库");
+    } else if config.auth.enabled() {
+        info!("登录保护已启用");
+    } else {
+        warn!("内置登录已关闭，请通过带认证的反向代理保护图库");
+    }
+
+    // Keep the startup and setup messages together, before background workers can log.
     thumbnails.start_workers(config.workers);
     if let Some(text_search) = text_search {
         text_search.start_worker();
@@ -88,29 +119,33 @@ async fn main() -> Result<()> {
     });
     tokio::spawn(rescan_gallery(state.clone(), config.clone()));
 
-    let listener = TcpListener::bind(config.listen)
-        .await
-        .with_context(|| format!("cannot listen on {}", config.listen))?;
-    info!(listen = %config.listen, "Pixhelf is ready");
     if let Some(files) = automatic_text_search {
         start_automatic_text_search(Arc::clone(&thumbnails), files);
     }
 
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        web::router(state, config.auth)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+    info!("Pixhelf 已停止");
     Ok(())
 }
 
 fn load_text_search(files: &TextSearchFiles) -> Option<Arc<TextSearchIndex>> {
     match TextSearchIndex::load(&files.model, &files.vocabulary) {
-        Ok(index) => Some(index),
+        Ok(index) => {
+            info!("文字搜图已启用，模型将按需加载");
+            Some(index)
+        }
         Err(error) => {
             warn!(
                 model = %files.model.display(),
                 vocabulary = %files.vocabulary.display(),
                 %error,
-                "natural-language search model unavailable; using filename search"
+                "文字搜图模型不可用，继续使用文件名搜索"
             );
             None
         }
@@ -123,9 +158,7 @@ fn start_automatic_text_search(thumbnails: Arc<ThumbnailManager>, files: TextSea
             match prepare_automatic_text_search(&files).await {
                 Ok(index) => {
                     if thumbnails.enable_text_search(index) {
-                        info!(
-                            "background model preparation complete; natural-language search enabled"
-                        );
+                        info!("文字搜图已启用，模型将按需加载");
                     }
                     return;
                 }
@@ -133,7 +166,7 @@ fn start_automatic_text_search(thumbnails: Arc<ThumbnailManager>, files: TextSea
                     warn!(
                         retry_seconds = AUTOMATIC_MODEL_RETRY_INTERVAL.as_secs(),
                         error = %format!("{error:#}"),
-                        "natural-language search model is not ready; filename search remains available"
+                        "文字搜图模型准备失败，稍后自动重试；文件名搜索仍可用"
                     );
                     tokio::time::sleep(AUTOMATIC_MODEL_RETRY_INTERVAL).await;
                 }
@@ -163,7 +196,7 @@ async fn rescan_gallery(state: AppState, config: Config) {
         let updated = match scan_gallery_async(root, Some(Arc::clone(&previous))).await {
             Ok(updated) => updated,
             Err(error) => {
-                error!(%error, "gallery rescan failed");
+                error!(%error, "图库刷新失败，保留上一次索引");
                 continue;
             }
         };
@@ -176,7 +209,7 @@ async fn rescan_gallery(state: AppState, config: Config) {
         state.thumbnails.start_similarity_warmup();
         *state.index.write().await = Arc::new(updated);
         state.thumbnails.cleanup_stale().await;
-        info!(old_count, new_count, "gallery changes indexed");
+        info!(previous = old_count, images = new_count, "图库已更新");
     }
 }
 
@@ -200,7 +233,7 @@ async fn shutdown_signal() {
                 }
             }
             Err(error) => {
-                error!(%error, "cannot install SIGTERM handler");
+                error!(%error, "无法监听 SIGTERM 停止信号");
                 wait_for_ctrl_c().await;
             }
         }
@@ -208,11 +241,13 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     wait_for_ctrl_c().await;
+
+    info!("收到停止信号，正在结束服务");
 }
 
 async fn wait_for_ctrl_c() {
     if let Err(error) = tokio::signal::ctrl_c().await {
-        error!(%error, "cannot install shutdown handler");
+        error!(%error, "无法监听停止信号");
         std::future::pending::<()>().await;
     }
 }
