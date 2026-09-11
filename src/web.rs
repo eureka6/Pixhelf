@@ -244,6 +244,8 @@ struct ImageView {
     name: String,
     width: u32,
     height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    motion: Option<String>,
 }
 
 impl From<&ImageRecord> for ImageView {
@@ -253,6 +255,10 @@ impl From<&ImageRecord> for ImageView {
             name: record.name.clone(),
             width: record.width,
             height: record.height,
+            motion: record
+                .motion
+                .as_ref()
+                .map(|motion| format!("/api/images/{}/motion/original/{}", record.id, motion.id)),
         }
     }
 }
@@ -281,6 +287,10 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
         .route("/api/images/{id}/original", get(original))
+        .route(
+            "/api/images/{id}/motion/original/{version}",
+            get(motion_video),
+        )
         .fallback(frontend)
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -1081,6 +1091,118 @@ async fn original(
     .await
 }
 
+async fn motion_video(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(String, String)>,
+    mut request: Request,
+) -> Result<Response, StatusCode> {
+    let image = {
+        let index = state.index.read().await;
+        index.image(&id).cloned().ok_or(StatusCode::NOT_FOUND)?
+    };
+    let motion = image
+        .motion
+        .as_ref()
+        .filter(|motion| motion.id == version)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let image_metadata = tokio::fs::metadata(&image.path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let video_metadata = tokio::fs::metadata(&motion.path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if !image.matches_metadata(&image_metadata) || !motion.matches_metadata(&video_metadata) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Let the browser reuse original bytes when a fresh decoder is needed or
+    // the user returns to a previous photo. The versioned URL and this validator
+    // are separate from retired previews and earlier uncacheable responses.
+    let etag = format!("\"original-motion-v2-{version}\"");
+    let cache_control = "private, max-age=31536000, immutable";
+    if is_not_modified(request.headers(), &etag) {
+        return Ok(not_modified(&etag, cache_control));
+    }
+    // ServeFile's date validator refers to the containing JPEG/MOV, not this
+    // clip representation. Only the clip's own ETag can validate a response.
+    request.headers_mut().remove(header::IF_NONE_MATCH);
+    request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+
+    let range = if request.method() == Method::GET
+        && request
+            .headers()
+            .get(header::IF_RANGE)
+            .is_none_or(|value| value == etag.as_str())
+    {
+        request
+            .headers()
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok())
+    } else {
+        None
+    };
+    // Multipart ranges may be ignored. The browser uses single ranges to buffer and seek.
+    let range = if let Some(range) = range.filter(|range| !range.contains(',')) {
+        match http_range_header::parse_range_header(range)
+            .and_then(|range| range.validate(motion.length))
+        {
+            Ok(ranges) => ranges.into_iter().next(),
+            Err(_) => {
+                let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", motion.length).parse().unwrap(),
+                );
+                return Ok(response);
+            }
+        }
+    } else {
+        None
+    };
+    let start = range.as_ref().map_or(0, |range| *range.start());
+    let end = range
+        .as_ref()
+        .map_or(motion.length - 1, |range| *range.end());
+    request.headers_mut().remove(header::IF_RANGE);
+    request.headers_mut().insert(
+        header::RANGE,
+        format!("bytes={}-{}", motion.offset + start, motion.offset + end)
+            .parse()
+            .unwrap(),
+    );
+    // ServeFile streams the selected bytes, including when the clip is inside a JPEG.
+    let response = ServeFile::new(&motion.path)
+        .oneshot(request)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (parts, body) = response.into_parts();
+    let mut response = Response::from_parts(parts, Body::new(body));
+    if !response.status().is_success() {
+        return Ok(response);
+    }
+    *response.status_mut() = if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(motion.mime));
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if range.is_some() {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{}", motion.length)
+                .parse()
+                .unwrap(),
+        );
+    } else {
+        response.headers_mut().remove(header::CONTENT_RANGE);
+    }
+    Ok(with_cache_headers(response, &etag, cache_control))
+}
+
 async fn serve_file(
     path: std::path::PathBuf,
     request: Request,
@@ -1414,6 +1536,7 @@ mod tests {
             size: 30,
             modified_ms: 40,
             modified_ns: 40,
+            motion: None,
         };
         let view = ImageView::from(&record);
         let json = serde_json::to_string(&view).unwrap();
@@ -1421,6 +1544,369 @@ mod tests {
             json,
             r#"{"id":"abc","name":"photo.jpg","width":10,"height":20}"#
         );
+    }
+
+    #[tokio::test]
+    async fn live_photo_video_streams_only_the_clip_and_supports_browser_ranges() {
+        const CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+        for format in [
+            "paired",
+            "paired-hevc",
+            "xmp",
+            "samsung",
+            "samsung-reference",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let gallery = temp.path().join("gallery");
+            std::fs::create_dir(&gallery).unwrap();
+            let photo = gallery.join("photo.jpg");
+            let video = if format == "paired-hevc" {
+                include_bytes!("../frontend/scripts/fixtures/live-photo-hevc.mov").to_vec()
+            } else {
+                crate::motion::tests::video_bytes()
+            };
+            if format.starts_with("samsung") {
+                crate::motion::tests::samsung_jpeg(&photo, &video, format == "samsung-reference");
+            } else if format == "xmp" {
+                let xmp = format!(
+                    r#"<x xmlns:c="http://ns.google.com/photos/1.0/camera/" c:MicroVideoOffset="{}"/>"#,
+                    video.len()
+                );
+                crate::motion::tests::motion_jpeg(&photo, &xmp, &video);
+            } else {
+                image::RgbImage::new(20, 10).save(&photo).unwrap();
+                std::fs::write(gallery.join("photo.mp4"), &video).unwrap();
+            }
+            let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+            let record = Arc::clone(&index.images[0]);
+            let url = format!(
+                "/api/images/{}/motion/original/{}",
+                record.id,
+                record.motion.as_ref().unwrap().id
+            );
+            assert_eq!(ImageView::from(record.as_ref()).motion.as_ref(), Some(&url));
+            let app = router(AppState {
+                index: Arc::new(RwLock::new(Arc::new(index))),
+                thumbnails: ThumbnailManager::new(temp.path().join("cache")).unwrap(),
+            });
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                record.motion.as_ref().unwrap().mime
+            );
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(
+                response.headers()[header::CONTENT_LENGTH],
+                video.len().to_string()
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], CACHE_CONTROL);
+            let etag = response.headers()[header::ETAG].clone();
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+                video
+            );
+            for (range, start, end) in [
+                ("bytes=0-7", 0, 7),
+                ("bytes=8-", 8, video.len() - 1),
+                ("bytes=-8", video.len() - 8, video.len() - 1),
+                ("bytes=8-9999", 8, video.len() - 1),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(&url)
+                            .header(header::RANGE, range)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], CACHE_CONTROL);
+                assert_eq!(response.headers()[header::ETAG], etag);
+                assert_eq!(
+                    response.headers()[header::CONTENT_RANGE],
+                    format!("bytes {start}-{end}/{}", video.len())
+                );
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap(),
+                    video[start..=end]
+                );
+            }
+            let head = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::HEAD)
+                        .uri(&url)
+                        .header(header::RANGE, "bytes=0-7")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(head.status(), StatusCode::OK);
+            assert_eq!(
+                head.headers()[header::CONTENT_LENGTH],
+                video.len().to_string()
+            );
+            assert!(
+                axum::body::to_bytes(head.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let cached = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::IF_NONE_MATCH, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(cached.headers()[header::CACHE_CONTROL], CACHE_CONTROL);
+            assert_eq!(cached.headers()[header::ETAG], etag);
+            assert!(
+                axum::body::to_bytes(cached.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let continuing = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::RANGE, "bytes=0-7")
+                        .header(header::IF_RANGE, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(continuing.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                axum::body::to_bytes(continuing.into_body(), 8)
+                    .await
+                    .unwrap(),
+                video[..8]
+            );
+            let outdated = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::RANGE, "bytes=0-7")
+                        .header(header::IF_RANGE, "\"old\"")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(outdated.status(), StatusCode::OK);
+            assert_eq!(
+                axum::body::to_bytes(outdated.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+                video
+            );
+            let invalid = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::RANGE, "bytes=9999-")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(
+                invalid.headers()[header::CONTENT_RANGE],
+                format!("bytes */{}", video.len())
+            );
+            let wrong = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/images/{}/motion/original/wrong", record.id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+            std::fs::write(&record.motion.as_ref().unwrap().path, b"replaced").unwrap();
+            let stale = app
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::IF_NONE_MATCH, etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PIXHELF_LIVE_SAMPLES with the original Apple and Samsung files"]
+    async fn original_live_samples_bypass_old_cache_and_match_source_bytes() {
+        let samples = std::path::PathBuf::from(
+            std::env::var("PIXHELF_LIVE_SAMPLES").expect("set PIXHELF_LIVE_SAMPLES"),
+        );
+        let index = crate::gallery::scan_gallery(&samples, None).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let cases: Vec<_> = [
+            (
+                "2023-12-27_12-30-56.jpg",
+                "Apple/2023-12-27_12-30-56.mov",
+                0,
+                5_276_784,
+            ),
+            (
+                "samsung-one-ui-6.jpg",
+                "motionphoto/samsung-one-ui-6.jpg",
+                4_938_111,
+                3_274_599,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, source, offset, length)| {
+            let record = index
+                .images
+                .iter()
+                .find(|record| record.name == name)
+                .unwrap();
+            let motion = record
+                .motion
+                .as_ref()
+                .expect("sample must have a live clip");
+            assert_eq!(motion.offset, offset as u64);
+            assert_eq!(motion.length, length as u64);
+            let file = std::fs::read(samples.join(source)).unwrap();
+            let expected = file[offset..offset + length].to_vec();
+            assert!(expected.windows(4).any(|bytes| bytes == b"hvc1"));
+            (Arc::clone(record), expected)
+        })
+        .collect();
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails: ThumbnailManager::new(temp.path().join("cache")).unwrap(),
+        });
+        for (record, expected) in cases {
+            let motion = record.motion.as_ref().unwrap();
+            let url = ImageView::from(record.as_ref()).motion.unwrap();
+            assert!(url.contains("/motion/original/"));
+            // Both validators can be left behind by an old video response. The
+            // new endpoint must send original bytes, never a 304 for that cache.
+            for validator in [
+                format!("\"motion-{}\"", motion.id),
+                format!("\"original-motion-{}\"", motion.id),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(&url)
+                            .header(header::IF_NONE_MATCH, validator)
+                            .header(header::IF_MODIFIED_SINCE, "Wed, 31 Dec 2098 23:59:59 GMT")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.headers()[header::CACHE_CONTROL],
+                    "private, max-age=31536000, immutable"
+                );
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+            }
+            let range = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::RANGE, "bytes=1024-2047")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                range.headers()[header::CACHE_CONTROL],
+                "private, max-age=31536000, immutable"
+            );
+            let original_etag = range.headers()[header::ETAG].clone();
+            assert_eq!(
+                axum::body::to_bytes(range.into_body(), 1024).await.unwrap(),
+                expected[1024..2048]
+            );
+            let replay = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&url)
+                        .header(header::IF_NONE_MATCH, original_etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(replay.status(), StatusCode::NOT_MODIFIED);
+            assert!(
+                axum::body::to_bytes(replay.into_body(), 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            for suffix in ["", "/preview-v1.mp4"] {
+                let legacy = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!(
+                                "/api/images/{}/motion/{}{suffix}",
+                                record.id, motion.id
+                            ))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+            }
+            println!(
+                "{}: {} original HEVC bytes, blake3={}; replay validates without a body, legacy preview unavailable",
+                record.name,
+                expected.len(),
+                blake3::hash(&expected).to_hex()
+            );
+        }
     }
 
     #[test]
@@ -1464,6 +1950,7 @@ mod tests {
                 size: 1,
                 modified_ms: 1,
                 modified_ns: 1,
+                motion: None,
             })
         };
         let query = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));

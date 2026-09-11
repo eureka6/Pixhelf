@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod gallery;
 mod logging;
+mod motion;
 mod photo_details;
 mod similarity;
 mod storage;

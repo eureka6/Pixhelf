@@ -18,6 +18,7 @@ export interface GalleryImage {
   name: string;
   width: number;
   height: number;
+  motion?: string;
 }
 
 export type ImageCardAction = "view" | "details" | "similar";

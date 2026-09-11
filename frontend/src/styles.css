@@ -811,7 +811,7 @@ select:focus-visible,
   transform: scale(1.006);
   transition:
     opacity var(--motion-medium) ease,
-    transform var(--motion-slow) var(--ease-standard),
+    transform var(--motion-medium) var(--ease-standard),
     filter var(--motion-medium) ease;
 }
 
@@ -824,7 +824,7 @@ select:focus-visible,
 .image-card[data-high-priority="true"] img {
   opacity: 1;
   transform: scale(1);
-  transition: none;
+  transition: transform var(--motion-medium) var(--ease-standard);
 }
 
 .image-fallback {
@@ -835,6 +835,127 @@ select:focus-visible,
   color: #8c9390;
   z-index: 1;
   animation: feedback-in var(--motion-medium) ease-out both;
+}
+
+.live-photo {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.viewer-media > .live-photo { z-index: 4; }
+
+.live-photo-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.live-photo[data-playing="true"] .live-photo-viewport {
+  opacity: 1;
+}
+
+.live-photo-video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  transition: transform var(--motion-medium) var(--ease-standard);
+}
+
+.viewer-media .live-photo-canvas {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  object-fit: cover;
+}
+
+.viewer-media .live-photo-canvas[hidden] { display: none; }
+
+.viewer-media .live-photo-canvas:not([hidden]) ~ .live-photo-video { opacity: 0; }
+
+.live-photo-badge {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: #fff;
+  background: rgba(16, 22, 19, .55);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.live-photo[data-failed="true"] .live-photo-badge::after { content: "· 暂不可播放"; }
+
+.live-photo-loading {
+  position: absolute;
+  z-index: 3;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  width: 48px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .3);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .15);
+}
+
+.viewer-media .live-photo-loading { width: 64px; bottom: 16px; }
+
+.live-photo[data-loading="true"] .live-photo-loading {
+  display: block;
+  animation: live-loading-in 140ms ease-out 120ms both;
+}
+
+.live-photo-progress {
+  display: block;
+  width: 30%;
+  height: 100%;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, .92);
+  animation: live-loading-progress 1s ease-in-out infinite;
+}
+
+.live-photo[data-buffer-known="true"] .live-photo-progress {
+  animation: none;
+  width: 100%;
+  transform-origin: left;
+  transform: scaleX(var(--live-buffer-progress, 0));
+  transition: transform 160ms ease-out;
+}
+
+@keyframes live-loading-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
+}
+
+@keyframes live-loading-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.image-card[data-card-active="true"],
+.viewer-similar-card[data-card-active="true"] {
+  z-index: 2;
+  box-shadow: 0 10px 24px rgba(17, 32, 27, .22);
+}
+
+.image-card[data-card-active="true"][data-loaded="true"] img,
+.viewer-similar-card[data-card-active="true"][data-loaded="true"] img,
+.image-card[data-card-active="true"] .live-photo-video,
+.viewer-similar-card[data-card-active="true"] .live-photo-video {
+  transform: scale(1.04);
 }
 
 @keyframes card-shimmer {
@@ -1559,8 +1680,15 @@ select:focus-visible,
 
   .image-card:hover,
   .viewer-similar-card:hover {
-    border-color: rgba(24, 82, 74, .2);
-    box-shadow: 0 7px 20px rgba(17, 32, 27, .13);
+    z-index: 2;
+    box-shadow: 0 10px 24px rgba(17, 32, 27, .22);
+  }
+
+  .image-card[data-loaded="true"]:hover img,
+  .viewer-similar-card[data-loaded="true"]:hover img,
+  .image-card:hover .live-photo-video,
+  .viewer-similar-card:hover .live-photo-video {
+    transform: scale(1.04);
   }
 }
 
@@ -1768,6 +1896,13 @@ select:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .image-card[data-card-active="true"] img,
+  .viewer-similar-card[data-card-active="true"] img,
+  .image-card[data-card-active="true"] .live-photo-video,
+  .viewer-similar-card[data-card-active="true"] .live-photo-video {
+    transform: none;
+  }
+
   *,
   *::before,
   *::after {
@@ -1777,6 +1912,13 @@ select:focus-visible,
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     transition-delay: 0.01ms !important;
+  }
+
+  .image-card[data-loaded="true"]:hover img,
+  .viewer-similar-card[data-loaded="true"]:hover img,
+  .image-card:hover .live-photo-video,
+  .viewer-similar-card:hover .live-photo-video {
+    transform: none;
   }
 
   .request-progress span {

@@ -1,6 +1,18 @@
 .albums-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .albums-heading h1 { min-width: 0; margin: 0; color: var(--ink); font-size: 20px; line-height: 1.4; font-weight: 650; letter-spacing: -.4px; overflow-wrap: anywhere; }
 .albums-heading > span, .album-heading > span { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.album-children { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+.album-children > h2 { display: flex; align-items: baseline; gap: 7px; margin: 0 0 10px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.album-children > h2 > span { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.album-folders { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 230px), 1fr)); gap: 8px; }
+.album-folder { display: flex; min-width: 0; align-items: center; gap: 11px; padding: 11px 12px; border: 1px solid #dde5df; border-radius: 10px; color: var(--ink); background: #f9fbf9; text-decoration: none; transition: background var(--motion-fast), border-color var(--motion-fast); }
+.album-folder-icon { display: grid; flex: none; place-items: center; width: 38px; height: 38px; border-radius: 9px; color: #5b8066; background: #e8f0e9; }
+.album-folder-details { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.album-folder-details > strong { overflow: hidden; font-size: 13px; font-weight: 600; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.album-folder-details > span { color: var(--muted); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.album-folder > svg { flex: none; color: var(--muted); }
+.album-folder:focus-visible { outline-offset: 3px; }
+.album-folder:active { background: #eaf1ec; }
 .albums-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 14px 12px; padding-bottom: 12px; }
 .album-card { min-width: 0; color: inherit; text-decoration: none; border-radius: 12px; }
 .album-cover { position: relative; display: grid; place-items: center; aspect-ratio: 4 / 3; overflow: hidden; color: #89a398; background: linear-gradient(135deg, #e4eee8, #d9e5df); border: 1px solid #d4e0d8; border-radius: 12px; }
@@ -21,6 +33,7 @@
 .album-breadcrumbs a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .albums-skeleton > div { aspect-ratio: 4 / 3; border-radius: 12px; background: #e8eeea; }
 @media (hover: hover) and (pointer: fine) {
+  .album-folder:hover { background: #eef4ef; border-color: #bccfc0; }
   .album-card:hover .album-cover > img { transform: scale(1.035); }
   .album-card:hover h2 { color: var(--accent); }
 }
@@ -31,5 +44,5 @@
   .album-size { right: 7px; bottom: 7px; padding: 4px 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .album-cover > img { transition: none; }
+  .album-cover > img, .album-folder { transition: none; }
 }

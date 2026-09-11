@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { BookImage, ChevronRight, ImageIcon } from "./icons";
+import { BookImage, ChevronRight, Folder, ImageIcon } from "./icons";
 import { formatCount } from "./format";
 import { galleryHref } from "./galleryLocation";
 import type { Album } from "./types";
@@ -32,7 +32,9 @@ function AlbumCard({ album, onOpen }: { album: Album; onOpen: (path: string) => 
 
 export function AlbumsView({ albums, search, onOpen }: { albums: Album[] | undefined; search: string; onOpen: (path: string) => void }) {
   const query = search.trim().toLocaleLowerCase();
-  const visible = albums?.filter(album => album.path.toLocaleLowerCase().includes(query));
+  const visible = albums?.filter(album => query
+    ? album.path.toLocaleLowerCase().includes(query)
+    : !album.path.includes("/"));
   return (
     <section className="albums-page" aria-labelledby="albums-title">
       <header className="albums-heading">
@@ -50,6 +52,31 @@ export function AlbumsView({ albums, search, onOpen }: { albums: Album[] | undef
           <span>{albums?.length ? "试试其他名称或路径" : "在图片目录中添加文件夹后，会自动显示在这里"}</span>
         </div>
       )}
+    </section>
+  );
+}
+
+export function AlbumChildren({ albums, path, onOpen }: { albums: Album[] | undefined; path: string; onOpen: (path: string) => void }) {
+  const prefix = `${path}/`;
+  const children = albums?.filter(album => album.path.startsWith(prefix)
+    && !album.path.slice(prefix.length).includes("/"));
+  if (!children?.length) return null;
+  return (
+    <section className="album-children" aria-label="子相册">
+      <h2>子相册 <span>{formatCount(children.length)}</span></h2>
+      <div className="album-folders">
+        {children.map(album => (
+          <a key={album.path} className="album-folder" href={galleryHref("albums", album.path)}
+            onClick={event => followAlbum(event, album.path, onOpen)} data-album-path={album.path}>
+            <span className="album-folder-icon"><Folder size={22} strokeWidth={1.6} /></span>
+            <span className="album-folder-details">
+              <strong title={album.name}>{album.name}</strong>
+              <span>{formatCount(album.count)} 张照片</span>
+            </span>
+            <ChevronRight size={16} />
+          </a>
+        ))}
+      </div>
     </section>
   );
 }

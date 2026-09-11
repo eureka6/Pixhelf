@@ -12,6 +12,8 @@ use serde::Serialize;
 use tracing::warn;
 use walkdir::WalkDir;
 
+use crate::motion::{self, MotionSource};
+
 #[derive(Clone, Debug)]
 pub struct ImageRecord {
     pub id: String,
@@ -25,6 +27,7 @@ pub struct ImageRecord {
     pub size: u64,
     pub modified_ms: u64,
     pub(crate) modified_ns: u128,
+    pub motion: Option<MotionSource>,
 }
 
 impl ImageRecord {
@@ -110,6 +113,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
 
     let mut images = Vec::new();
     let mut albums = BTreeMap::<String, Album>::new();
+    let mut videos = HashMap::<(PathBuf, String), Vec<PathBuf>>::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
@@ -139,7 +143,16 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             }
             continue;
         }
-        if !entry.file_type().is_file() || !is_supported_image(entry.path()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if motion::is_video_path(entry.path()) {
+            if let Some(key) = motion::pairing_key(entry.path()) {
+                videos.entry(key).or_default().push(entry.into_path());
+            }
+            continue;
+        }
+        if !is_supported_image(entry.path()) {
             continue;
         }
 
@@ -194,6 +207,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             .to_owned();
         let id = image_id(&relative_path, fingerprint.size, fingerprint.modified_ns);
         let search_key = relative_path.to_lowercase();
+        let motion = motion::embedded_video(&path);
 
         images.push(Arc::new(ImageRecord {
             id,
@@ -207,7 +221,37 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             size: fingerprint.size,
             modified_ms: fingerprint.modified_ms,
             modified_ns: fingerprint.modified_ns,
+            motion,
         }));
+    }
+
+    for image in &mut images {
+        if image
+            .motion
+            .as_ref()
+            .is_some_and(|source| source.offset > 0)
+        {
+            continue;
+        }
+        let candidates = motion::pairing_key(&image.path).and_then(|key| videos.get_mut(&key));
+        let source = candidates.and_then(|candidates| {
+            candidates.sort_by_key(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mov"))
+            });
+            candidates.iter().find_map(|path| {
+                if let Some(previous) = &image.motion
+                    && previous.path == *path
+                    && fs::metadata(path).is_ok_and(|metadata| previous.matches_metadata(&metadata))
+                {
+                    return Some(previous.clone());
+                }
+                motion::paired_video(path)
+            })
+        });
+        if image.motion != source {
+            Arc::make_mut(image).motion = source;
+        }
     }
 
     images.sort_by(|left, right| {
@@ -238,10 +282,14 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
 
 fn index_revision(images: &[Arc<ImageRecord>], albums: &[Album]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-index-v2\0");
+    hasher.update(b"pixhelf-index-v6\0");
     for image in images {
         hasher.update(image.id.as_bytes());
         hasher.update(b"\0");
+        if let Some(motion) = &image.motion {
+            hasher.update(motion.id.as_bytes());
+            hasher.update(b"\0");
+        }
     }
     for album in albums {
         hasher.update(album.path.as_bytes());
@@ -405,6 +453,75 @@ mod tests {
         let removed = scan_gallery(temp.path(), Some(&added)).unwrap();
         assert_eq!(removed.revision, first.revision);
         assert!(removed.albums.is_empty());
+    }
+
+    #[test]
+    fn pairs_live_photos_and_tracks_video_changes_without_rebuilding_thumbnails() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("other")).unwrap();
+        for path in ["Photo.jpg", "other/Photo.jpg"] {
+            image::RgbImage::new(20, 10)
+                .save(temp.path().join(path))
+                .unwrap();
+        }
+        let plain = scan_gallery(temp.path(), None).unwrap();
+        let id = plain
+            .images
+            .iter()
+            .find(|image| image.name == "Photo.jpg" && image.album.is_empty())
+            .unwrap()
+            .id
+            .clone();
+        let video = temp.path().join("photo.MOV");
+        fs::write(&video, crate::motion::tests::video_bytes()).unwrap();
+        let paired = scan_gallery(temp.path(), Some(&plain)).unwrap();
+        assert_eq!(paired.images.len(), 2);
+        assert!(paired.image(&id).unwrap().motion.is_some());
+        assert!(
+            paired
+                .images
+                .iter()
+                .find(|image| image.album == "other")
+                .unwrap()
+                .motion
+                .is_none()
+        );
+        assert_ne!(plain.revision, paired.revision);
+        let stable = scan_gallery(temp.path(), Some(&paired)).unwrap();
+        assert_eq!(paired.revision, stable.revision);
+        assert!(Arc::ptr_eq(
+            paired.image(&id).unwrap(),
+            stable.image(&id).unwrap()
+        ));
+        let mut bytes = crate::motion::tests::video_bytes();
+        bytes.extend_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
+        fs::write(&video, bytes).unwrap();
+        let changed = scan_gallery(temp.path(), Some(&paired)).unwrap();
+        assert_ne!(
+            changed.image(&id).unwrap().motion,
+            paired.image(&id).unwrap().motion
+        );
+        assert_ne!(changed.revision, paired.revision);
+        fs::remove_file(video).unwrap();
+        let removed = scan_gallery(temp.path(), Some(&changed)).unwrap();
+        assert!(removed.image(&id).unwrap().motion.is_none());
+        assert_eq!(removed.revision, plain.revision);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn never_pairs_video_symlinks_outside_the_gallery() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        image::RgbImage::new(20, 10)
+            .save(gallery.join("photo.jpg"))
+            .unwrap();
+        let outside = temp.path().join("outside.mp4");
+        fs::write(&outside, crate::motion::tests::video_bytes()).unwrap();
+        std::os::unix::fs::symlink(outside, gallery.join("photo.mp4")).unwrap();
+        let index = scan_gallery(&gallery, None).unwrap();
+        assert!(index.images[0].motion.is_none());
     }
 
     #[test]

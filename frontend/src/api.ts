@@ -42,6 +42,7 @@ function isGalleryImage(value: unknown): value is GalleryImage {
   return isObject(value)
     && typeof value.id === "string"
     && typeof value.name === "string"
+    && (value.motion === undefined || typeof value.motion === "string")
     && isPositiveInteger(value.width)
     && isPositiveInteger(value.height);
 }

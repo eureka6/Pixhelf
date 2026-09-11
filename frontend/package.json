@@ -1,7 +1,7 @@
 {
   "name": "pixhelf-frontend",
   "private": true,
-  "version": "0.2.6",
+  "version": "0.2.7",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -13,10 +13,15 @@
     "auth-check": "node scripts/auth-check.mjs",
     "storage-check": "node scripts/storage-check.mjs",
     "albums-check": "node scripts/albums-check.mjs",
+    "album-hierarchy-check": "node scripts/album-hierarchy-check.mjs",
     "visual-check": "node scripts/visual-check.mjs",
     "navigation-motion-check": "node scripts/navigation-motion-check.mjs",
     "sidebar-resize-check": "node scripts/sidebar-resize-check.mjs",
     "viewer-resize-check": "node scripts/viewer-resize-check.mjs",
+    "live-photo-check": "node scripts/live-photo-app-check.mjs",
+    "live-photo-interaction-check": "node scripts/live-photo-interaction-check.mjs",
+    "live-photo-app-check": "node scripts/live-photo-app-check.mjs",
+    "live-photo-webkit-check": "node scripts/live-photo-app-check.mjs --webkit",
     "viewer-similar-check": "node scripts/viewer-similar-check.mjs"
   },
   "dependencies": {

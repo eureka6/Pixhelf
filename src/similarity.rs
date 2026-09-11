@@ -688,6 +688,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         ImageRecord {
+            motion: None,
             id: id.to_owned(),
             path,
             relative_path: id.to_owned(),

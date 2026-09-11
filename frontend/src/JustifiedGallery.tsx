@@ -17,6 +17,7 @@ import {
 import type { GalleryViewportAnchor } from "./galleryViewport";
 import { ImageIcon } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
+import { LivePhoto } from "./LivePhoto";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { useCardInteraction } from "./cardInteraction";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
@@ -387,7 +388,8 @@ const ImageCard = memo(function ImageCard({
           <ImageIcon size={24} />
         </span>
       ) : null}
-      <button type="button" className="photo-card-open" aria-label={`查看 ${image.name}`} aria-haspopup="dialog" />
+      {loaded && image.motion && <LivePhoto image={image} />}
+      <button type="button" className="photo-card-open" aria-label={`查看 ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
       <ImageCardActions image={image} onAction={handleAction} />
     </figure>
   );

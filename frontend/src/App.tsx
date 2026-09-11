@@ -13,7 +13,7 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
-import { AlbumHeading, AlbumsView } from "./AlbumsView";
+import { AlbumChildren, AlbumHeading, AlbumsView } from "./AlbumsView";
 import { ExternalStorageView } from "./ExternalStorageView";
 import { SettingsDialog } from "./SettingsDialog";
 import { authentication } from "./auth";
@@ -53,6 +53,7 @@ import {
   getDecodedViewerOriginal,
   prepareViewerImages,
 } from "./viewerAssets";
+import { stopLivePhotoPlayback } from "./LivePhoto";
 
 const PAGE_SIZE = 60;
 const SIMILAR_PAGE_SIZE = 30;
@@ -911,6 +912,7 @@ function App() {
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
+    stopLivePhotoPlayback();
     prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
     resetSimilarSearch();
     setViewerDiscoveredImages([]);
@@ -1339,6 +1341,7 @@ function App() {
         ) : (
           <>
             {selectedAlbum && <AlbumHeading album={selectedAlbum} onOpen={chooseAlbum} />}
+            {selectedAlbum && <AlbumChildren albums={summary?.albums} path={selectedAlbum.path} onOpen={chooseAlbum} />}
             {loading ? (
               <GallerySkeleton />
             ) : images.length ? (

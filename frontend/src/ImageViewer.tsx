@@ -15,6 +15,7 @@ import {
 } from "./icons";
 import { PhotoInformation } from "./PhotoInformation";
 import { ImageCardActions } from "./ImageCardActions";
+import { LIVE_PHOTO_PLAY_EVENT, LivePhoto } from "./LivePhoto";
 import { CARD_MENU_EVENT, useCardInteraction } from "./cardInteraction";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { SimilarImageGallery, SimilarImageSkeleton } from "./SimilarImages";
@@ -596,6 +597,7 @@ export function ImageViewer({
     snapshot.tabIndex = -1;
     snapshot.removeAttribute("aria-haspopup");
     snapshot.querySelector(".photo-card-controls")?.remove();
+    snapshot.querySelector(".live-photo")?.remove();
     snapshot.querySelectorAll<HTMLElement>("[id]").forEach((element) => {
       element.removeAttribute("id");
     });
@@ -1491,22 +1493,30 @@ export function ImageViewer({
     }
   };
 
-  const handleTouchTap = (point: PointerPoint) => {
-    const now = performance.now();
-    const lastTap = lastTapRef.current;
-    if (
-      lastTap &&
-      now - lastTap.at <= DOUBLE_TAP_DELAY_MS &&
-      pointDistance(lastTap.point, point) < 32
-    ) {
-      lastTapRef.current = null;
-      zoomAt(
-        transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
-        point,
-      );
-      return;
+  const handleImageTap = (point: PointerPoint, pointerType: string) => {
+    if (pointerType !== "mouse") {
+      const now = performance.now();
+      const lastTap = lastTapRef.current;
+      if (
+        lastTap &&
+        now - lastTap.at <= DOUBLE_TAP_DELAY_MS &&
+        pointDistance(lastTap.point, point) < 32
+      ) {
+        lastTapRef.current = null;
+        zoomAt(
+          transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
+          point,
+        );
+        return;
+      }
+      lastTapRef.current = { at: now, point };
     }
-    lastTapRef.current = { at: now, point };
+    const media = mediaRef.current;
+    const target = document.elementFromPoint(point.x, point.y);
+    if (image.motion && media && target && media.contains(target)
+      && !target.closest(".photo-card-controls")) {
+      media.dispatchEvent(new Event(LIVE_PHOTO_PLAY_EVENT));
+    }
   };
 
   const finishContact = (
@@ -1555,11 +1565,11 @@ export function ImageViewer({
     const deltaX = point.x - start.point.x;
     const deltaY = point.y - start.point.y;
     const elapsed = Math.max(1, performance.now() - start.startedAt);
-    const isTap = Math.hypot(deltaX, deltaY) < 10 && elapsed < 320;
+    const isTap = !gestureMode && Math.hypot(deltaX, deltaY) < 10 && elapsed < 320;
 
     if (start.transform.scale > MIN_SCALE) {
-      if (isTap && start.pointerType !== "mouse") {
-        handleTouchTap(point);
+      if (isTap) {
+        handleImageTap(point, start.pointerType);
         gestureGeometryRef.current = null;
         return;
       }
@@ -1623,8 +1633,8 @@ export function ImageViewer({
     }
 
     commitTransform(DEFAULT_TRANSFORM);
-    if (isTap && start.pointerType !== "mouse") {
-      handleTouchTap(point);
+    if (isTap) {
+      handleImageTap(point, start.pointerType);
     }
     gestureGeometryRef.current = null;
   };
@@ -2043,6 +2053,7 @@ export function ImageViewer({
                   })}
                 />
               )}
+              {image.motion && <LivePhoto image={image} autoPlay />}
               <ImageCardActions image={image} onAction={action => {
                 if (action === "view") {
                   commitTransform(DEFAULT_TRANSFORM);

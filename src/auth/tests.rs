@@ -197,12 +197,23 @@ async fn fixture() -> (TempDir, Router, String) {
 }
 
 async fn fixture_with_config(auth: AuthConfig) -> (TempDir, Router, String) {
+    fixture_with_motion(auth, false).await
+}
+
+async fn fixture_with_motion(auth: AuthConfig, live: bool) -> (TempDir, Router, String) {
     let temp = tempfile::tempdir().unwrap();
     let gallery = temp.path().join("gallery");
     std::fs::create_dir(&gallery).unwrap();
     image::RgbImage::from_pixel(40, 30, image::Rgb([220, 80, 40]))
         .save(gallery.join("private-photo.png"))
         .unwrap();
+    if live {
+        std::fs::write(
+            gallery.join("private-photo.mp4"),
+            crate::motion::tests::video_bytes(),
+        )
+        .unwrap();
+    }
     let index = scan_gallery(&gallery, None).unwrap();
     let id = index.images[0].id.clone();
     let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
@@ -288,6 +299,7 @@ async fn anonymous_requests_cannot_access_bootstrap_apis_or_conditional_media() 
         format!("/api/images/{id}/similar"),
         format!("/api/images/{id}/thumbnail"),
         format!("/api/images/{id}/original"),
+        format!("/api/images/{id}/motion/original/missing"),
         "/not-a-public-route".into(),
     ] {
         for method in [Method::GET, Method::HEAD] {
@@ -630,7 +642,7 @@ async fn an_explicit_public_url_still_restricts_login_addresses() {
 
 #[tokio::test]
 async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_logout() {
-    let (_temp, app, id) = fixture().await;
+    let (_temp, app, id) = fixture_with_motion(config(), true).await;
     let login = sign_in(&app, None).await;
     assert_eq!(login.status(), StatusCode::OK);
     let cookie = session_cookie(&login);
@@ -645,6 +657,16 @@ async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_lo
     let csrf = account["csrfToken"].as_str().unwrap();
     assert_eq!(csrf.len(), 64);
     assert_eq!(account["authenticated"], true);
+    let image = json_body(
+        call(
+            &app,
+            request(Method::GET, &format!("/api/images/{id}"), Some(&cookie)),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    let motion = image["motion"].as_str().unwrap().to_owned();
     let page = call(
         &app,
         request(Method::GET, "/", Some(&cookie)),
@@ -702,6 +724,7 @@ async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_lo
         "/api/images".into(),
         format!("/api/images/{id}/thumbnail"),
         format!("/api/images/{id}/original"),
+        motion.clone(),
     ] {
         let response = call(
             &app,
@@ -737,14 +760,17 @@ async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_lo
         }
     }
     let original = format!("/api/images/{id}/original");
-    let range = call(
-        &app,
-        request(Method::GET, &original, Some(&cookie)).header(header::RANGE, "bytes=0-7"),
-        Body::empty(),
-    )
-    .await;
-    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(to_bytes(range.into_body(), 100).await.unwrap().len(), 8);
+    for path in [&original, &motion] {
+        let range = call(
+            &app,
+            request(Method::GET, path, Some(&cookie)).header(header::RANGE, "bytes=0-7"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(range.headers()[header::CACHE_CONTROL], "private, no-cache");
+        assert_eq!(to_bytes(range.into_body(), 100).await.unwrap().len(), 8);
+    }
     for (origin, token) in [
         (ORIGIN, ""),
         (ORIGIN, "forged"),
@@ -791,6 +817,7 @@ async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_lo
         "/api/gallery".into(),
         format!("/api/images/{id}/thumbnail"),
         original,
+        motion,
     ] {
         assert_eq!(
             call(
