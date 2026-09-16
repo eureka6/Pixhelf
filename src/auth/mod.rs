@@ -822,7 +822,7 @@ pub async fn response_security(request: Request, next: Next) -> Response {
             .append(header::SET_COOKIE, hardened.unwrap_or(value));
     }
     response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     ));
     response
 }

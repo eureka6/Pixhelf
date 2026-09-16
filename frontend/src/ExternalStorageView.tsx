@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { ChevronLeft, ChevronRight, Cloud, Download, FileIcon, Folder, Grid, ImageIcon, ListIcon, LoaderCircle, RefreshCw, Settings, X } from "./icons";
+import { ChevronLeft, ChevronRight, Cloud, Download, FileIcon, Folder, Grid, ImageIcon, ListIcon, LoaderCircle, Play, RefreshCw, Settings, X } from "./icons";
+import { VideoPlayback } from "./VideoPlayback";
 import { formatCount, formatFileSize } from "./format";
 import { getStorageConfig, getStorageFiles, storageFileUrl } from "./storage";
 import type { StorageConfig, StorageEntry, StoragePage } from "./storage";
@@ -96,7 +97,7 @@ export function ExternalStorageView({ path, search, revision, onOpen, onConfigur
         {items.map(item => <article className="storage-entry" key={item.path} data-storage-path={item.path}>
           <button type="button" className="storage-entry-open" onClick={() => { if (item.isDir) onOpen(item.path); else setPreview(item); }} aria-label={`${item.isDir ? "打开文件夹" : "预览文件"} ${item.name}`}>
             <span className={`storage-entry-visual storage-kind-${item.kind}`}>
-              {item.kind === "image" && mode === "grid" ? <StorageThumbnail entry={item} /> : item.isDir ? <Folder size={mode === "grid" ? 34 : 20} strokeWidth={1.5} /> : item.kind === "image" ? <ImageIcon size={20} /> : <FileIcon size={mode === "grid" ? 30 : 20} strokeWidth={1.5} />}
+              {item.kind === "image" && mode === "grid" ? <StorageThumbnail entry={item} /> : item.isDir ? <Folder size={mode === "grid" ? 34 : 20} strokeWidth={1.5} /> : item.kind === "image" ? <ImageIcon size={20} /> : item.kind === "video" ? <Play size={mode === "grid" ? 30 : 20} /> : <FileIcon size={mode === "grid" ? 30 : 20} strokeWidth={1.5} />}
             </span>
             <strong className="storage-entry-name" title={item.name}>{item.name}</strong>
             <span className="storage-entry-size">{!item.isDir && formatFileSize(item.size)}</span>
@@ -126,10 +127,10 @@ function StoragePreview({ entry, images, onChange, onClose }: { entry: StorageEn
     return () => { ref.current?.close(); if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true }); };
   }, []);
   useEffect(() => setFailed(false), [entry.path]);
-  return <dialog ref={ref} className="storage-preview" aria-label={`预览 ${entry.name}`} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose(); } }} onKeyDown={event => { if (event.key === "ArrowLeft" && index > 0) { event.preventDefault(); onChange(images[index - 1]); } if (event.key === "ArrowRight" && index >= 0 && index < images.length - 1) { event.preventDefault(); onChange(images[index + 1]); } }}>
+  return <dialog ref={ref} className="storage-preview" aria-label={`预览 ${entry.name}`} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose(); } }} onKeyDown={event => { if ((event.target as HTMLElement).closest(".video-viewer-playback")) return; if (event.key === "ArrowLeft" && index > 0) { event.preventDefault(); onChange(images[index - 1]); } if (event.key === "ArrowRight" && index >= 0 && index < images.length - 1) { event.preventDefault(); onChange(images[index + 1]); } }}>
     <header><div><strong title={entry.name}>{entry.name}</strong><span>{formatFileSize(entry.size)}{entry.modified && ` · ${formatDate(entry.modified)}`}</span></div><a className="icon-button" href={storageFileUrl(entry.path, "download")} download={entry.name} aria-label="下载文件"><Download size={19} /></a><button className="icon-button" type="button" aria-label="关闭预览" onClick={onClose}><X size={21} /></button></header>
     <div className="storage-preview-stage">
-      {failed ? <p role="alert">文件暂时无法预览，可尝试下载或刷新目录。</p> : entry.kind === "image" ? <img key={entry.path} src={storageFileUrl(entry.path)} alt={entry.name} onError={() => setFailed(true)} /> : entry.kind === "video" ? <video key={entry.path} controls preload="metadata" src={storageFileUrl(entry.path)} onError={() => setFailed(true)} /> : entry.kind === "audio" ? <audio key={entry.path} controls preload="metadata" src={storageFileUrl(entry.path)} onError={() => setFailed(true)} /> : <div className="storage-unsupported"><FileIcon size={48} /><p>此文件可以下载后打开</p><a href={storageFileUrl(entry.path, "download")} download={entry.name}>下载文件</a></div>}
+      {failed ? <p role="alert">文件暂时无法预览，可尝试下载或刷新目录。</p> : entry.kind === "image" ? <img key={entry.path} src={storageFileUrl(entry.path)} alt={entry.name} onError={() => setFailed(true)} /> : entry.kind === "video" ? <VideoPlayback key={entry.path} source={storageFileUrl(entry.path)} name={entry.name} /> : entry.kind === "audio" ? <audio key={entry.path} controls preload="metadata" src={storageFileUrl(entry.path)} onError={() => setFailed(true)} /> : <div className="storage-unsupported"><FileIcon size={48} /><p>此文件可以下载后打开</p><a href={storageFileUrl(entry.path, "download")} download={entry.name}>下载文件</a></div>}
       {index > 0 && <button type="button" className="storage-preview-previous" aria-label="上一张" onClick={() => onChange(images[index - 1])}><ChevronLeft size={24} /></button>}
       {index >= 0 && index < images.length - 1 && <button type="button" className="storage-preview-next" aria-label="下一张" onClick={() => onChange(images[index + 1])}><ChevronRight size={24} /></button>}
     </div>

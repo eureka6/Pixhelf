@@ -1,7 +1,7 @@
 import { memo } from "preact/compat";
 import { useEffect, useState } from "preact/hooks";
 import { getPhotoDetails } from "./api";
-import { formatFileSize, formatPixelCount } from "./format";
+import { formatDuration, formatFileSize, formatPixelCount } from "./format";
 import { RefreshCw } from "./icons";
 import { HistogramLegend, PhotoHistogram } from "./PhotoHistogram";
 import type {
@@ -118,6 +118,7 @@ function ImageInformationPanel({
       ? "横向"
       : "竖向";
   const megapixels = image.width * image.height / 1_000_000;
+  const video = details?.video ?? image.video;
   const exif = details?.exif ?? [];
   const fieldByLabel = new Map(exif.map((field) => [field.label, field]));
   const capturedAt = fieldByLabel.get("拍摄时间");
@@ -156,7 +157,8 @@ function ImageInformationPanel({
       value: details ? formatFileSize(details.fileSize) : errorMessage ? "读取失败" : null,
       kind: "file-size",
     },
-    { label: "像素", value: formatPixelCount(megapixels), kind: "pixels" },
+    ...(video ? [{ label: "时长", value: formatDuration(video.duration), kind: "duration" }]
+      : [{ label: "像素", value: formatPixelCount(megapixels), kind: "pixels" }]),
     ...(colorSpace
       ? [{ label: "色彩空间", value: colorSpace.value, kind: "color-space" }]
       : []),
@@ -175,12 +177,17 @@ function ImageInformationPanel({
           listClassName="viewer-image-information-basic"
         />
 
-        <section className="viewer-image-information-group viewer-image-information-histogram">
+        {video ? <InformationSection title="视频编码" fields={[
+          { label: "视频编码", value: video.codec.toUpperCase(), kind: "video-codec" },
+          { label: "音频编码", value: video.audioCodec?.toUpperCase() ?? "无音轨", kind: "audio-codec" },
+          { label: "帧率", value: video.frameRate === null ? "未知" : `${Number(video.frameRate.toFixed(3))} fps`, kind: "frame-rate" },
+          { label: "封装格式", value: video.container, kind: "container" },
+        ]} /> : <section className="viewer-image-information-group viewer-image-information-histogram">
           <div className="viewer-image-information-group-heading">
             <h4>影调分布</h4>
             <HistogramLegend />
           </div>
-          {details ? (
+          {details?.histogram ? (
             <PhotoHistogram histogram={details.histogram} imageId={image.id} />
           ) : errorMessage ? (
             <PhotoDataError message={errorMessage} onRetry={onRetry} />
@@ -189,7 +196,7 @@ function ImageInformationPanel({
               <div className="viewer-photo-data-skeleton" />
             </div>
           )}
-        </section>
+        </section>}
       </div>
 
       {shooting.length > 0 && (
@@ -218,13 +225,14 @@ function ImageInformationPanel({
         </div>
       )}
 
+      {video && errorMessage && <PhotoDataError message={errorMessage} onRetry={onRetry} />}
       {loading && (
-        <div className="viewer-image-information-loading" aria-label="正在读取拍摄信息">
+        <div className="viewer-image-information-loading" aria-label={video ? "正在读取视频信息" : "正在读取拍摄信息"}>
           <span /><span /><span />
         </div>
       )}
 
-      {details && exif.length === 0 && (
+      {details && !video && exif.length === 0 && (
         <div className="viewer-image-information-empty">无拍摄参数</div>
       )}
     </div>
@@ -288,9 +296,9 @@ export const PhotoInformation = memo(function PhotoInformation({
   const { details, loading, errorMessage, retry } = usePhotoDetails(image.id);
 
   return (
-    <section className="viewer-photo-information" aria-label="图片信息">
+    <section className="viewer-photo-information" aria-label={image.video ? "视频信息" : "图片信息"}>
       {showHeading && <header className="viewer-photo-heading">
-        <h3>图片详情</h3>
+        <h3>{image.video ? "视频详情" : "图片详情"}</h3>
       </header>}
       <ImageInformationPanel
         image={image}

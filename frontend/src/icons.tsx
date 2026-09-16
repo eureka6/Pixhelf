@@ -36,12 +36,60 @@ export function ChevronLeft(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
 }
 
+export function Play(props: IconProps) {
+  return <Icon {...props}><path d="m8 5 11 7-11 7V5Z" /></Icon>;
+}
+
+export function Pause(props: IconProps) {
+  return <Icon {...props}><path d="M8 5v14M16 5v14" /></Icon>;
+}
+
+export function SkipBack(props: IconProps) {
+  return <Icon {...props}><path d="M19 5 8 12l11 7V5ZM4 5v14" /></Icon>;
+}
+
+export function SkipForward(props: IconProps) {
+  return <Icon {...props}><path d="m5 5 11 7-11 7V5Zm15 0v14" /></Icon>;
+}
+
+export function Sun(props: IconProps) {
+  return <Icon {...props}><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42m0-14.14-1.42 1.42M6.35 17.65l-1.42 1.42" /></Icon>;
+}
+
+export function PictureInPicture(props: IconProps) {
+  return <Icon {...props}><rect x="2" y="4" width="20" height="16" rx="3" /><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none" /></Icon>;
+}
+
+export function Expand(props: IconProps) {
+  return <Icon {...props}><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" /></Icon>;
+}
+
+export function Shrink(props: IconProps) {
+  return <Icon {...props}><path d="M3 8h5V3m8 0v5h5M8 21v-5H3m13 5v-5h5" /></Icon>;
+}
+
+export function Volume2(props: IconProps) {
+  return <Icon {...props}><path d="m11 5-6 4H2v6h3l6 4V5Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14" /></Icon>;
+}
+
+export function VolumeX(props: IconProps) {
+  return <Icon {...props}><path d="m11 5-6 4H2v6h3l6 4V5Zm6 4 5 6m0-6-5 6" /></Icon>;
+}
+
 export function ChevronRight(props: IconProps) {
   return <Icon {...props}><path d="m9 18 6-6-6-6" /></Icon>;
 }
 
+export function ArrowRight(props: IconProps) {
+  return <Icon {...props}><path d="M4 12h16m-6-6 6 6-6 6" /></Icon>;
+}
+
 export function ChevronUp(props: IconProps) {
   return <Icon {...props}><path d="m18 15-6-6-6 6" /></Icon>;
+}
+
+export function ChevronDown(props: IconProps) {
+  return <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
 }
 
 export function Dices(props: IconProps) {

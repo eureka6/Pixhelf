@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
 
+FROM --platform=$BUILDPLATFORM alpine:3.23 AS video-runtime
+ARG TARGETARCH
+COPY packaging/install-video-runtime.sh /install-video-runtime.sh
+RUN sh /install-video-runtime.sh "$TARGETARCH" /runtime
+
 FROM scratch AS model-base
 
 # Keep these pinned artifacts in sync with src/text_search/download.rs and the
@@ -20,13 +25,15 @@ ARG REVISION
 ARG SOURCE_URL
 
 LABEL org.opencontainers.image.title="Pixhelf" \
-      org.opencontainers.image.description="Self-hosted image gallery" \
+      org.opencontainers.image.description="Self-hosted photo and video gallery" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 
 ENV PIXHELF_TEXT_SEARCH_MODEL=/opt/pixhelf/models/chinese-clip-vit-base-patch16-f4a64596
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+COPY --from=video-runtime /runtime/ /
 COPY --chmod=0755 dist/pixhelf-${TARGETARCH}-linux /pixhelf
 
 WORKDIR /data

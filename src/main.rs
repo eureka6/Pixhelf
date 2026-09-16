@@ -9,6 +9,8 @@ mod storage;
 mod support;
 mod text_search;
 mod thumbs;
+mod video;
+mod video_jobs;
 mod web;
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
@@ -59,7 +61,7 @@ async fn run() -> Result<()> {
     if index.images.is_empty() {
         warn!(
             gallery = %config.gallery_dir.display(),
-            "图库为空，添加 JPEG、PNG 或 WebP 图片后会自动更新"
+            "图库为空，添加 JPEG、PNG、WebP 图片或视频后会自动更新"
         );
     }
     info!(
@@ -124,12 +126,16 @@ async fn run() -> Result<()> {
         start_automatic_text_search(Arc::clone(&thumbnails), files);
     }
 
+    let shutdown_videos = Arc::clone(&thumbnails.videos);
     axum::serve(
         listener,
         web::router(state, config.auth)
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_videos.shutdown();
+    })
     .await?;
     info!("Pixhelf 已停止");
     Ok(())

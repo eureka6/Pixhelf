@@ -8,6 +8,7 @@ import type {
   PhotoDetails,
   SortMode,
   ThumbnailStatus,
+  VideoMetadata,
 } from "./types";
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -43,8 +44,19 @@ function isGalleryImage(value: unknown): value is GalleryImage {
     && typeof value.id === "string"
     && typeof value.name === "string"
     && (value.motion === undefined || typeof value.motion === "string")
+    && (value.video === undefined || isVideoMetadata(value.video))
+    && (value.playback === undefined || typeof value.playback === "string")
+    && (value.preview === undefined || typeof value.preview === "string")
     && isPositiveInteger(value.width)
     && isPositiveInteger(value.height);
+}
+
+function isVideoMetadata(value: unknown): value is VideoMetadata {
+  const positiveOrNull = (number: unknown) => number === null
+    || (typeof number === "number" && Number.isFinite(number) && number > 0);
+  return isObject(value) && positiveOrNull(value.duration) && positiveOrNull(value.frameRate)
+    && typeof value.codec === "string" && typeof value.container === "string"
+    && (value.audioCodec === null || typeof value.audioCodec === "string");
 }
 
 function isGallerySummary(value: unknown): value is GallerySummary {
@@ -80,11 +92,12 @@ function isPhotoDetails(value: unknown): value is PhotoDetails {
     && value.exif.every((field) => isObject(field)
       && typeof field.label === "string"
       && typeof field.value === "string")
-    && isObject(value.histogram)
+    && (value.video === undefined || isVideoMetadata(value.video))
+    && ((value.histogram === null && isVideoMetadata(value.video)) || (isObject(value.histogram)
     && isHistogramChannel(value.histogram.red)
     && isHistogramChannel(value.histogram.green)
     && isHistogramChannel(value.histogram.blue)
-    && isHistogramChannel(value.histogram.luminance);
+    && isHistogramChannel(value.histogram.luminance)));
 }
 
 function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
@@ -96,6 +109,8 @@ function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
     && isNonNegativeInteger(value.failed)
     && typeof value.initialBatchReady === "boolean"
     && typeof value.backgroundComplete === "boolean"
+    && (value.videos === undefined || (isObject(value.videos)
+      && isBackgroundJobStatus(value.videos.playback) && isBackgroundJobStatus(value.videos.preview)))
     && isObject(value.textSearch)
     && typeof value.textSearch.enabled === "boolean"
     && isNonNegativeInteger(value.textSearch.total)
@@ -104,6 +119,11 @@ function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
     && isNonNegativeInteger(value.textSearch.processing)
     && isNonNegativeInteger(value.textSearch.failed)
     && typeof value.textSearch.backgroundComplete === "boolean";
+}
+
+function isBackgroundJobStatus(value: unknown): boolean {
+  return isObject(value) && [value.total, value.ready, value.queued, value.processing, value.failed].every(isNonNegativeInteger)
+    && typeof value.backgroundComplete === "boolean";
 }
 
 function isBootstrapData(value: unknown): value is BootstrapData {
@@ -245,8 +265,9 @@ export function getGalleryImage(imageId: string, signal?: AbortSignal): Promise<
   return requestJson(`/api/images/${encodeURIComponent(imageId)}`, isGalleryImage, signal);
 }
 
-export function searchByUploadedImage(file: File, options: { offset: number; limit: number }, signal?: AbortSignal): Promise<ImagesPage> {
+export function searchByUploadedImage(file: File, options: { offset: number; limit: number; exclude?: string }, signal?: AbortSignal): Promise<ImagesPage> {
   const params = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) });
+  if (options.exclude) params.set("exclude", options.exclude);
   return requestJson(`/api/images/similar?${params}`, isImagesPage, signal, SIMILAR_REQUEST_TIMEOUT_MS, {
     method: "POST", body: file, credentials: "same-origin", cache: "no-store", redirect: "error",
     headers: {

@@ -19,6 +19,17 @@ export interface GalleryImage {
   width: number;
   height: number;
   motion?: string;
+  video?: VideoMetadata;
+  playback?: string;
+  preview?: string;
+}
+
+export interface VideoMetadata {
+  duration: number | null;
+  codec: string;
+  audioCodec: string | null;
+  frameRate: number | null;
+  container: string;
 }
 
 export type ImageCardAction = "view" | "details" | "similar";
@@ -47,7 +58,8 @@ export interface PhotoDetails {
   fileSize: number;
   modifiedMs: number;
   exif: PhotoExifField[];
-  histogram: PhotoHistogram;
+  histogram: PhotoHistogram | null;
+  video?: VideoMetadata;
 }
 
 export interface ThumbnailStatus {
@@ -58,6 +70,7 @@ export interface ThumbnailStatus {
   failed: number;
   initialBatchReady: boolean;
   backgroundComplete: boolean;
+  videos?: { playback: BackgroundJobStatus; preview: BackgroundJobStatus };
   textSearch: {
     enabled: boolean;
     total: number;
@@ -67,6 +80,15 @@ export interface ThumbnailStatus {
     failed: number;
     backgroundComplete: boolean;
   };
+}
+
+export interface BackgroundJobStatus {
+  total: number;
+  ready: number;
+  queued: number;
+  processing: number;
+  failed: number;
+  backgroundComplete: boolean;
 }
 
 export interface BootstrapData {

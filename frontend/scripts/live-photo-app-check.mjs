@@ -2,7 +2,7 @@
 // backend process. Build the frontend before running this check.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { engine, isChromium, launchBrowser, loadSample, serveMotion, imageDimensions } from "./live-photo-fixture.mjs";
+import { engine, isChromium, launchBrowser, loadSample, serveMotion, serveLibmediaAsset, imageDimensions } from "./live-photo-fixture.mjs";
 
 const [html, js, css, filler, sample] = await Promise.all([
   readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
@@ -12,7 +12,6 @@ const [html, js, css, filler, sample] = await Promise.all([
   loadSample(),
 ]);
 const { name: sampleName, poster } = sample;
-const blackNativeSurface = process.env.PIXHELF_TEST_NATIVE_VIDEO_BLACK === "1";
 const browser = await launchBrowser();
 const probe = await browser.newPage();
 let dimensions;
@@ -38,40 +37,28 @@ const documentHtml = html.replace("__PIXHELF_AUTH__", JSON.stringify({ enabled: 
   .replace("__PIXHELF_BOOTSTRAP__", JSON.stringify({ summary, status, images: pageData }));
 
 async function state(page) {
-  return page.evaluate(() => ({
-    events: window.mediaEvents.slice(-24), inputs: window.inputEvents.slice(-16), scroll: scrollY,
-    layers: [...document.querySelectorAll(".live-photo")].map(layer => {
-      const video = layer.querySelector("video");
-      return {
-        parent: layer.parentElement.className, playing: layer.dataset.playing, loading: layer.dataset.loading, failed: layer.dataset.failed,
-        rect: layer.getBoundingClientRect().toJSON(), inert: !!layer.closest("[inert]"),
-        video: video && {
-          paused: video.paused, time: video.currentTime, width: video.videoWidth,
-          ready: video.readyState, network: video.networkState, src: video.currentSrc,
-          buffered: Array.from({ length: video.buffered.length }, (_, i) => [video.buffered.start(i), video.buffered.end(i)]),
-        },
-      };
-    }),
-  }));
+  return page.evaluate(() => ({ scroll: scrollY, layers: [...document.querySelectorAll(".media-preview")].map(layer => ({
+    parent: layer.parentElement.className, ...layer.dataset,
+    player: { ...layer.querySelector(".media-player-surface")?.dataset },
+  })) }));
 }
 
 async function playing(card) {
   await card.page().waitForFunction(element => {
-    const video = element.querySelector("video");
-    return element.querySelector(".live-photo")?.dataset.playing === "true"
-      && element.querySelector(".live-photo")?.dataset.loading === "false"
-      && video?.videoWidth > 0 && video.currentTime > 0 && !video.paused;
-  }, await card.elementHandle(), { timeout: 12_000 });
+    const player = element.querySelector(".media-player-surface");
+    return element.querySelector(".media-preview")?.dataset.playing === "true"
+      && element.querySelector(".media-preview")?.dataset.loading === "false"
+      && player?.querySelector("canvas")?.width > 0 && Number(player.dataset.currentTime) > .05
+      && player.dataset.playerState === "playing";
+  }, await card.elementHandle(), { timeout: 15_000 });
 }
 
 async function finished(card) {
-  const video = await card.locator("video").elementHandle();
-  assert.equal(await video.evaluate(video => video.loop), false, "live photos must not loop");
-  await card.page().waitForFunction(video => window.endedVideos.has(video), video, { timeout: 10_000 });
-  // The pause handler must not turn a natural ending into another play request.
-  await card.page().evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await video.evaluate(video => video.paused), true);
-  assert.equal(await card.locator(".live-photo").getAttribute("data-playing"), "false");
+  const player = await card.locator(".media-player-surface").elementHandle();
+  await card.page().waitForFunction(player => player.dataset.playerState === "destroyed", player, { timeout: 10_000 });
+  assert.equal(await player.evaluate(player => player.isConnected), false);
+  assert.equal(await card.locator(".media-preview").getAttribute("data-failed"), null);
+  assert.equal(await card.locator(".media-preview").getAttribute("data-playing"), "false");
 }
 
 async function visiblePicture(card, verifyMotion = false) {
@@ -82,8 +69,7 @@ async function visiblePicture(card, verifyMotion = false) {
       x: rect.x + rect.width * 0.15, y: rect.y + rect.height * 0.15,
       width: rect.width * 0.7, height: rect.height * 0.7,
     } });
-    // Inspect the rendered screenshot, not drawImage(video), which can succeed
-    // even when a compositor surface fails to paint after a DOM move.
+    // Check composited pixels to catch frames hidden by the poster or DOM moves.
     return card.page().evaluate(async base64 => {
       const image = new Image();
       image.src = `data:image/png;base64,${base64}`;
@@ -102,10 +88,10 @@ async function visiblePicture(card, verifyMotion = false) {
   if (verifyMotion) {
     let changed = false;
     for (let attempt = 0; attempt < 3 && !changed; attempt++) {
-      const before = await card.locator("video").evaluate(video => video.currentTime);
+      const before = await card.locator(".media-player-surface").evaluate(player => Number(player.dataset.currentTime));
       await card.page().waitForFunction(({ element, before }) => {
-        const video = element.querySelector("video");
-        return video.currentTime < before || video.currentTime - before > 0.4;
+        const time = Number(element.querySelector(".media-player-surface")?.dataset.currentTime);
+        return time < before || time - before > 0.4;
       }, { element: await card.elementHandle(), before });
       const next = await capture();
       changed = next.reduce((sum, value, i) => sum + Math.abs(value - pixels[i]), 0) / pixels.length > 0.2;
@@ -122,6 +108,7 @@ try {
     let holdMotion = null;
     let releaseMotion = () => {};
     page.on("pageerror", error => errors.push(error.message));
+    if (process.env.PIXHELF_TEST_DEBUG) page.on("console", message => console.log(message.type(), message.text()));
     await page.addInitScript(() => {
       window.mediaEvents = [];
       window.inputEvents = [];
@@ -129,25 +116,12 @@ try {
         document.addEventListener(type, event => window.inputEvents.push({ type, detail: event.detail,
           pointerType: event.pointerType, target: event.target.className }), true);
       }
-      window.endedVideos = new WeakSet();
-      for (const event of ["loadstart", "loadeddata", "playing", "pause", "ended", "error", "emptied", "resize", "seeking", "seeked", "waiting", "timeupdate"]) {
-        document.addEventListener(event, e => {
-          if (!(e.target instanceof HTMLVideoElement)) return;
-          const video = e.target;
-          if (event === "ended") window.endedVideos.add(video);
-          if (event === "playing") window.endedVideos.delete(video);
-          window.mediaEvents.push({ event, parent: video.closest(".viewer-media") ? "viewer" : "gallery",
-            paused: video.paused, time: video.currentTime, width: video.videoWidth, ready: video.readyState,
-            seeking: video.seeking, loading: video.closest(".live-photo")?.dataset.loading,
-            shown: video.closest(".live-photo")?.dataset.playing,
-            error: video.error?.message });
-        }, true);
-      }
     });
     await page.route("https://pixhelf.test/**", async route => {
       const url = new URL(route.request().url());
       const path = url.pathname;
       if (path === "/") return route.fulfill({ contentType: "text/html", body: documentHtml });
+      if (path.startsWith("/assets/libmedia/")) return serveLibmediaAsset(route);
       if (path === "/assets/app.js") return route.fulfill({ contentType: "text/javascript", body: js });
       if (path === "/assets/app.css") return route.fulfill({ contentType: "text/css", body: css });
       if (path === "/api/gallery") return route.fulfill({ json: summary });
@@ -173,11 +147,6 @@ try {
     });
     try {
       await page.goto("https://pixhelf.test/", { waitUntil: "networkidle" });
-      if (blackNativeSurface) {
-        // Fault injection: decoding continues, but the native video surface
-        // paints black. CSS does not affect drawImage(video) frame pixels.
-        await page.addStyleTag({ content: ".viewer-media .live-photo-video { filter: brightness(0) !important; }" });
-      }
       for (const index of [0, 26]) {
         const card = page.locator(`.image-card[data-image-id="photo-${index}"]`);
         await card.scrollIntoViewIfNeeded();
@@ -187,14 +156,14 @@ try {
         else await card.locator(".photo-card-open").tap();
         assert.equal(await page.locator(".image-viewer").count(), 0, "the first tap must play in the gallery");
         if (holdMotion) {
-          await card.locator(".live-photo-loading").waitFor({ state: "visible" });
-          assert.equal(await card.locator(".live-photo").getAttribute("data-playing"), "false");
+          await card.locator(".media-preview-loading").waitFor({ state: "visible" });
+          assert.equal(await card.locator(".media-preview").getAttribute("data-playing"), "false");
           await card.screenshot({ path: `/tmp/pixhelf-live-loading-card-${sampleName}-${engine.name()}-${width}.png` });
           if (width <= 720) {
             await card.locator(".photo-card-open").tap();
             const loadingViewer = page.locator(".viewer-media:not(.viewer-swipe-outgoing)");
             await loadingViewer.waitFor();
-            await loadingViewer.locator(".live-photo-loading").waitFor({ state: "visible" });
+            await loadingViewer.locator(".media-preview-loading").waitFor({ state: "visible" });
             assert.equal(await loadingViewer.getAttribute("data-image-id"), `photo-${index}`, "a second tap while loading must open the viewer");
             releaseMotion();
             holdMotion = null;
@@ -218,25 +187,20 @@ try {
           }
         }
         await playing(card);
-        assert.equal(await card.locator(".live-photo").getAttribute("data-loading"), "false");
+        assert.equal(await card.locator(".media-preview").getAttribute("data-loading"), "false");
         assert.equal(await page.locator(".image-viewer").count(), 0, "the first mobile tap should only play the live photo");
         await visiblePicture(card);
         if (index === 0) {
-          const galleryPlayer = await card.locator("video").elementHandle();
-          const galleryDimensions = await galleryPlayer.evaluate(video => [video.videoWidth, video.videoHeight]);
+          const galleryPlayer = await card.locator(".media-player-surface").elementHandle();
+          const galleryDimensions = await galleryPlayer.evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]);
           await finished(card);
           if (width > 720) {
-            const beforeReplay = motionRequests.length;
             await page.mouse.move(0, 0);
             await card.hover();
             await playing(card);
             await visiblePicture(card, true);
             await card.screenshot({ path: `/tmp/pixhelf-live-replay-card-${sampleName}-${engine.name()}-${width}.png` });
-            assert.deepEqual(await card.locator("video").evaluate(video => [video.videoWidth, video.videoHeight]), galleryDimensions, "replay must retain the original orientation");
-            if (isChromium) {
-              assert.equal(await card.locator("video").evaluate((video, previous) => video === previous, galleryPlayer), true, "replay should keep the current photo's player");
-              assert.equal(motionRequests.length, beforeReplay, "gallery replay should not request the original clip again");
-            }
+            assert.deepEqual(await card.locator(".media-player-surface").evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]), galleryDimensions, "replay must retain the original orientation");
             assert.equal(await page.locator(".image-viewer").count(), 0, "hovering again should replay a completed gallery clip");
           }
         }
@@ -248,22 +212,21 @@ try {
         assert.equal(await viewer.getAttribute("data-image-id"), `photo-${index}`, "the most recently played photo must open on the next tap, including after playback ends");
         await page.waitForFunction(() => getComputedStyle(document.querySelector(".image-viewer")).opacity === "1");
         if (holdMotion) {
-          assert.equal(await viewer.locator(".live-photo").getAttribute("data-playing"), "false");
-          await viewer.locator(".live-photo-loading").waitFor({ state: "visible" });
+          assert.equal(await viewer.locator(".media-preview").getAttribute("data-playing"), "false");
+          await viewer.locator(".media-preview-loading").waitFor({ state: "visible" });
           await visiblePicture(viewer);
           await page.screenshot({ path: `/tmp/pixhelf-live-loading-viewer-${sampleName}-${engine.name()}-${width}.png` });
           releaseMotion();
           holdMotion = null;
         }
         await playing(viewer);
-        assert.equal(await viewer.locator(".live-photo").getAttribute("data-loading"), "false");
+        assert.equal(await viewer.locator(".media-preview").getAttribute("data-loading"), "false");
         await visiblePicture(viewer, true);
         await page.screenshot({ path: `/tmp/pixhelf-live-app-${sampleName}-${engine.name()}-${width}-${index}.png` });
         if (index === 0) {
-          const viewerPlayer = await viewer.locator("video").elementHandle();
-          const viewerDimensions = await viewerPlayer.evaluate(video => [video.videoWidth, video.videoHeight]);
+          const viewerPlayer = await viewer.locator(".media-player-surface").elementHandle();
+          const viewerDimensions = await viewerPlayer.evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]);
           await finished(viewer);
-          const beforeReplay = motionRequests.length;
           await page.mouse.move(0, 0);
           await viewer.hover();
           await viewer.dispatchEvent("pixhelf:card-touch");
@@ -274,7 +237,7 @@ try {
               await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             }, display);
           }
-          assert.equal(await viewer.locator(".live-photo").getAttribute("data-playing"), "false", "hover, contact and visibility must not replay a completed viewer clip");
+          assert.equal(await viewer.locator(".media-preview").getAttribute("data-playing"), "false", "hover, contact and visibility must not replay a completed viewer clip");
           if (width > 720) {
             const rect = await viewer.boundingBox();
             const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
@@ -283,18 +246,15 @@ try {
             await page.mouse.move(x + 25, y, { steps: 2 });
             await page.mouse.move(x, y, { steps: 2 });
             await page.mouse.up();
-            assert.equal(await viewer.locator(".live-photo").getAttribute("data-playing"), "false", "a drag returning to its starting point is not a replay tap");
+            assert.equal(await viewer.locator(".media-preview").getAttribute("data-playing"), "false", "a drag returning to its starting point is not a replay tap");
             await viewer.click();
           } else await viewer.tap();
           await playing(viewer);
           await visiblePicture(viewer, true);
-          assert.deepEqual(await viewer.locator("video").evaluate(video => [video.videoWidth, video.videoHeight]), viewerDimensions);
+          assert.deepEqual(await viewer.locator(".media-player-surface").evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]), viewerDimensions);
           await page.screenshot({ path: `/tmp/pixhelf-live-replay-viewer-${sampleName}-${engine.name()}-${width}.png` });
           await finished(viewer);
-          if (isChromium) {
-            assert.equal(await viewer.locator("video").evaluate((video, previous) => video === previous, viewerPlayer), true);
-            assert.equal(motionRequests.length, beforeReplay, "viewer replay should not request the original clip again");
-          }
+
         }
         if (index === 26) {
           for (const direction of ["next", "previous"]) {
@@ -314,7 +274,7 @@ try {
             await playing(viewer);
             await page.waitForFunction(() => !document.querySelector(".image-viewer").hasAttribute("data-swipe-direction"));
             await visiblePicture(viewer, true);
-            assert.equal(await page.locator("video").count(), 1);
+            assert.equal(await page.locator(".media-player-surface").count(), 1);
           }
         }
         await page.locator(".viewer-close").click();
@@ -332,7 +292,7 @@ try {
       await page.locator(".album-folder").first().waitFor();
       await page.screenshot({ path: `/tmp/pixhelf-album-folders-${engine.name()}-${width}.png` });
       assert.deepEqual(errors, []);
-      console.log(`${engine.name()}: ${sampleName}, ${width}px app checks passed${blackNativeSurface ? " (canvas fallback)" : ""}`);
+      console.log(`${engine.name()}: ${sampleName}, ${width}px libmedia app checks passed`);
     } catch (error) {
       console.error(JSON.stringify({ motionRequests }, null, 2));
       console.error(JSON.stringify(await state(page), null, 2));

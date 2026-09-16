@@ -56,8 +56,9 @@ function wav() {
   return bytes;
 }
 const photo = png(1), sound = wav();
+const clip = await readFile(join(project, "frontend/scripts/fixtures/live-photo.mp4"));
 const entry = (name, is_dir = false) => ({ name, is_dir, size: is_dir ? 0 : name.endsWith(".png") ? photo.length : 128, modified: "2026-09-01T09:00:00Z", type: is_dir ? 1 : 0, thumb: "" });
-const rootEntries = [entry("项目 & 2026", true), entry("空目录", true), entry("山 + 海.png"), entry("秋日.png"), entry("自然声音.wav"), entry("说明.html"), ...Array.from({ length: 59 }, (_, index) => entry(`文档-${index + 1}.txt`))];
+const rootEntries = [entry("项目 & 2026", true), entry("空目录", true), entry("山 + 海.png"), entry("秋日.png"), entry("自然声音.wav"), entry("视频.mp4"), entry("说明.html"), ...Array.from({ length: 58 }, (_, index) => entry(`文档-${index + 1}.txt`))];
 const envelope = (response, code, data = null) => { response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ code, message: code === 200 ? "success" : "fixture error", data })); };
 async function listen(server) {
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -101,8 +102,8 @@ try {
     const url = new URL(request.url, mediaOrigin);
     const name = url.searchParams.get("name") || "photo.png";
     if (url.pathname === "/redirect") { response.writeHead(302, { Location: `/file?name=${encodeURIComponent(name)}` }); response.end(); return; }
-    const bytes = name.endsWith(".png") ? photo : name.endsWith(".wav") ? sound : Buffer.from("<script>window.untrustedRemoteHtml = true</script>");
-    const headers = { "Content-Type": name.endsWith(".png") ? "image/png" : name.endsWith(".wav") ? "audio/wav" : "text/html", "Accept-Ranges": "bytes", ETag: '"storage-fixture"', "Set-Cookie": "remote-cookie=must-not-forward" };
+    const bytes = name.endsWith(".png") ? photo : name.endsWith(".wav") ? sound : name.endsWith(".mp4") ? clip : Buffer.from("<script>window.untrustedRemoteHtml = true</script>");
+    const headers = { "Content-Type": name.endsWith(".png") ? "image/png" : name.endsWith(".wav") ? "audio/wav" : name.endsWith(".mp4") ? "video/mp4" : "text/html", "Accept-Ranges": "bytes", ETag: '"storage-fixture"', "Set-Cookie": "remote-cookie=must-not-forward" };
     if (request.headers["if-none-match"] === headers.ETag) { response.writeHead(304, headers); response.end(); return; }
     const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || "");
     if (range) {
@@ -210,7 +211,7 @@ try {
   assert.equal(await readFile(persistedPath, "utf8"), persisted, "a failed save overwrote the existing connection");
   await page.getByRole("button", { name: "加载更多", exact: true }).click(); await waitEntries(page, 65);
   await page.getByRole("button", { name: "打开搜索", exact: true }).click();
-  await page.getByRole("searchbox", { name: "筛选已加载文件", exact: true }).fill("文档-59"); await waitEntries(page, 1);
+  await page.getByRole("searchbox", { name: "筛选已加载文件", exact: true }).fill("文档-58"); await waitEntries(page, 1);
   await page.getByRole("button", { name: "清空搜索", exact: true }).click(); await waitEntries(page, 65);
   await page.getByRole("button", { name: "收起搜索", exact: true }).click();
   await page.getByRole("button", { name: "打开文件夹 项目 & 2026", exact: true }).click(); await waitEntries(page, 1);
@@ -241,6 +242,12 @@ try {
   await page.getByRole("button", { name: "预览文件 自然声音.wav", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".storage-preview audio")?.readyState >= 1);
   await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "预览文件 视频.mp4", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".storage-preview .video-viewer-stage")?.dataset.videoState === "ready");
+  await page.getByRole("button", { name: "播放视频", exact: true }).click();
+  await page.waitForFunction(() => Number(document.querySelector(".storage-preview .media-player-surface")?.dataset.currentTime) > .2);
+  assert.equal(await page.locator(".storage-preview video").count(), 0);
+  await page.getByRole("button", { name: "关闭预览", exact: true }).click();
 
   for (const width of [1440, 720, 390, 320]) {
     await page.setViewportSize({ width, height: 900 });
@@ -264,7 +271,7 @@ try {
     await page.getByRole("button", { name: "上一张", exact: true }).click();
     assert.equal(await page.locator(".storage-preview img").getAttribute("alt"), "秋日.png");
     await page.keyboard.press("Escape");
-    await navigate(page, "图片"); await page.locator(".image-card").waitFor();
+    await navigate(page, "图片与视频"); await page.locator(".image-card").waitFor();
     await navigate(page, "外部存储"); await waitEntries(page, 60);
     console.log(JSON.stringify({ width, directoryBrowser: true, settingsBackdrop: true, stableBackground: true, preview: true }));
   }

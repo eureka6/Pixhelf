@@ -22,3 +22,12 @@ export function formatPixelCount(megapixels: number): string {
     ? `${megapixels.toFixed(1)} MP`
     : `${Math.round(megapixels * 1000)} KP`;
 }
+
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "时长未知";
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  const remainder = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`;
+}

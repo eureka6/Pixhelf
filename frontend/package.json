@@ -4,13 +4,18 @@
   "version": "0.2.7",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-libmedia.mjs",
     "dev": "vite --host 0.0.0.0",
+    "prebuild": "node scripts/prepare-libmedia.mjs",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "justified-layout-check": "node scripts/justified-layout-check.mjs",
     "card-actions-check": "node scripts/card-actions-check.mjs",
     "image-search-check": "node scripts/image-search-check.mjs",
     "auth-check": "node scripts/auth-check.mjs",
+    "video-check": "node scripts/video-check.mjs",
+    "video-preview-check": "node scripts/video-preview-check.mjs",
+    "libmedia-formats-check": "node scripts/libmedia-formats-check.mjs",
     "storage-check": "node scripts/storage-check.mjs",
     "albums-check": "node scripts/albums-check.mjs",
     "album-hierarchy-check": "node scripts/album-hierarchy-check.mjs",
@@ -25,6 +30,7 @@
     "viewer-similar-check": "node scripts/viewer-similar-check.mjs"
   },
   "dependencies": {
+    "@libmedia/avplayer": "1.3.1",
     "preact": "^10.27.1"
   },
   "devDependencies": {

@@ -1,17 +1,17 @@
 import type { RefObject } from "preact";
 import { useLayoutEffect } from "preact/hooks";
 
-export const CARD_SELECTOR = ".image-card, .viewer-similar-card, .viewer-media";
+export const CARD_SELECTOR = ".image-card, .viewer-similar-card, .viewer-media, .video-viewer-stage";
 export const CARD_MENU_EVENT = "pixhelf:card-menu";
 export const CARD_TOUCH_EVENT = "pixhelf:card-touch";
 export type CardMenuRequest = { touch: boolean; point?: { x: number; y: number } };
 
 let feedbackCard: HTMLElement | null = null;
 let feedbackVisibility: IntersectionObserver | null = null;
-let lastPlayedLivePhoto: string | null = null;
+let lastPlayedPreview: string | null = null;
 
-export function markLivePhotoPlayed(imageId: string): void {
-  lastPlayedLivePhoto = imageId;
+export function markCardPreviewPlayed(imageId: string): void {
+  lastPlayedPreview = imageId;
 }
 
 export function clearCardFeedback(card?: HTMLElement): void {
@@ -33,7 +33,7 @@ function activateCardFeedback(card: HTMLElement): void {
   feedbackVisibility.observe(card);
 }
 
-export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = true) {
+export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = true, touchLongPress = true) {
   useLayoutEffect(() => {
     const gallery = ref.current;
     if (!enabled || !gallery) return;
@@ -52,6 +52,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
     const cardAt = (target: EventTarget | null) => {
       if (!(target instanceof Element) || target.closest(".photo-card-controls, [inert]")) return null;
       const card = target.closest<HTMLElement>(CARD_SELECTOR);
+      if (card?.matches(".video-viewer-stage") && target.closest("button, a, input, .video-controls-region")) return null;
       return card && gallery.contains(card) ? card : null;
     };
     const cancel = () => {
@@ -92,7 +93,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       // A new contact can select a menu item; only the opening gesture is consumed.
       consumed = null;
       cancel();
-      if (event.pointerType === "mouse" || !event.isPrimary || event.button !== 0) return;
+      if (!touchLongPress || event.pointerType === "mouse" || !event.isPrimary || event.button !== 0) return;
       const card = cardAt(event.target);
       if (!card) return;
       touchCard(card);
@@ -116,6 +117,8 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       const card = cardAt(event.target);
       if (!card) return;
       event.preventDefault();
+      // The video gesture handler owns touch long presses and consumes their clicks.
+      if (!touchLongPress && fromTouch(event)) return;
       const pointerId = contact?.pointerId;
       cancel();
       show(card, { touch: fromTouch(event), point: event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : undefined }, pointerId);
@@ -142,12 +145,12 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       if (!touch || event.detail === 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       const card = cardAt(event.target);
       if (!card || card.matches(".viewer-media")) return;
-      const live = card.querySelector<HTMLElement>(".live-photo");
-      if (!live || live.dataset.failed === "true"
-        || live.dataset.playing === "true" || live.dataset.loading === "true"
-        || card.dataset.imageId === lastPlayedLivePhoto) return;
-      // The most recently played photo opens even after playback ends. Once a
-      // different live photo plays, this photo needs a playback tap again.
+      const preview = card.querySelector<HTMLElement>(".media-preview");
+      if (!preview || preview.dataset.failed === "true"
+        || preview.dataset.playing === "true" || preview.dataset.loading === "true"
+        || card.dataset.imageId === lastPlayedPreview) return;
+      // The most recently previewed card opens even after playback ends. Once
+      // another live photo or video plays, this card needs a preview tap again.
       event.preventDefault();
       event.stopImmediatePropagation();
       activateCardFeedback(card);
@@ -196,5 +199,5 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       if (feedbackCard && (gallery.contains(feedbackCard) || !feedbackCard.isConnected)) clearCardFeedback();
       listeners.abort();
     };
-  }, [enabled, ref]);
+  }, [enabled, ref, touchLongPress]);
 }

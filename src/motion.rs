@@ -241,9 +241,7 @@ fn video_mime(file: &mut File, offset: u64, length: u64) -> Option<&'static str>
             b"mdat" => media = size > header_size,
             _ => {}
         }
-        if mime.is_none() {
-            return None;
-        }
+        mime?;
         position += size;
     }
     None

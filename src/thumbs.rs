@@ -49,6 +49,7 @@ const MAX_ATTEMPTS: u8 = 3;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct ThumbnailManager {
+    pub videos: Arc<crate::video_jobs::VideoManager>,
     cache_root: PathBuf,
     entries: RwLock<HashMap<String, Arc<ThumbEntry>>>,
     queue: JobQueue,
@@ -100,6 +101,7 @@ pub struct ThumbnailStatus {
     pub initial_batch_ready: bool,
     pub background_complete: bool,
     pub text_search: TextSearchStatus,
+    pub videos: crate::video_jobs::VideoStatus,
 }
 
 impl ThumbnailManager {
@@ -134,6 +136,7 @@ impl ThumbnailManager {
         }
         purge_temporary_files(&cache_root);
         Ok(Arc::new(Self {
+            videos: crate::video_jobs::VideoManager::new(&cache_dir)?,
             cache_root,
             entries: RwLock::new(HashMap::new()),
             queue: JobQueue::default(),
@@ -182,6 +185,7 @@ impl ThumbnailManager {
     }
 
     pub fn reconcile(&self, records: &[Arc<ImageRecord>]) {
+        self.videos.reconcile(records);
         let current_ids: HashSet<&str> = records.iter().map(|record| record.id.as_str()).collect();
         let mut missing = Vec::new();
         {
@@ -243,6 +247,7 @@ impl ThumbnailManager {
     }
 
     pub fn start_workers(self: &Arc<Self>, count: usize) {
+        self.videos.start_worker();
         for worker in 0..count {
             let manager = Arc::clone(self);
             tokio::spawn(async move {
@@ -365,6 +370,7 @@ impl ThumbnailManager {
                 .text_search()
                 .as_deref()
                 .map_or_else(TextSearchStatus::disabled, |index| index.status()),
+            videos: self.videos.status(),
         }
     }
 
@@ -395,6 +401,7 @@ impl ThumbnailManager {
     }
 
     pub async fn cleanup_stale(&self) {
+        self.videos.cleanup_stale().await;
         let valid_ids: HashSet<String> = read_lock(&self.entries).keys().cloned().collect();
         let root = self.cache_root.clone();
         if let Err(error) =
@@ -581,13 +588,18 @@ fn shard_path(root: &Path, id: &str) -> PathBuf {
 
 fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
     record.ensure_source_is_current()?;
-    let reader = ImageReader::open(&record.path)
-        .with_context(|| format!("cannot open {}", record.path.display()))?
-        .with_guessed_format()?;
-    let mut decoder = reader.into_decoder()?;
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder)?;
-    image.apply_orientation(orientation);
+    let image = if record.video.is_some() {
+        crate::video::thumbnail(record, THUMBNAIL_EDGE)?
+    } else {
+        let reader = ImageReader::open(&record.path)
+            .with_context(|| format!("cannot open {}", record.path.display()))?
+            .with_guessed_format()?;
+        let mut decoder = reader.into_decoder()?;
+        let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+        let mut image = DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        image
+    };
     let (width, height) = image.dimensions();
     let image = if width.max(height) > THUMBNAIL_EDGE {
         image.resize(THUMBNAIL_EDGE, THUMBNAIL_EDGE, FilterType::Triangle)

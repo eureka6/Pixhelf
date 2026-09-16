@@ -2,6 +2,17 @@ use super::*;
 use axum::http::{Method, Request};
 use tower::ServiceExt;
 
+#[test]
+fn video_containers_with_application_mime_types_are_previewable() {
+    for name in ["clip.MXF", "clip.RM", "clip.RMVB", "clip.SWF"] {
+        assert!(mime_type(name).starts_with("application/"), "{name}");
+        assert_eq!(file_kind(name, false), "video", "{name}");
+        assert_eq!(file_kind(name, true), "folder", "{name}");
+    }
+    assert_eq!(file_kind("song.ogg", false), "audio");
+    assert_eq!(file_kind("notes.txt", false), "file");
+}
+
 fn input(changes: Value) -> ConfigInput {
     let mut value = json!({
         "name": "家庭文件", "url": "http://openlist:5244/files", "rootPath": "/照片",

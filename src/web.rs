@@ -40,10 +40,7 @@ const INDEX_HTML: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/frontend/dist/index.html"
 ));
-const APP_JS: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/frontend/dist/assets/app.js"
-));
+include!(concat!(env!("OUT_DIR"), "/frontend_assets.rs"));
 const APP_CSS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/frontend/dist/assets/app.css"
@@ -136,6 +133,7 @@ struct ImagesQuery {
 struct SimilarImagesQuery {
     offset: Option<usize>,
     limit: Option<usize>,
+    exclude: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +244,12 @@ struct ImageView {
     height: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     motion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video: Option<crate::video::VideoMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playback: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
 }
 
 impl From<&ImageRecord> for ImageView {
@@ -255,6 +259,9 @@ impl From<&ImageRecord> for ImageView {
             name: record.name.clone(),
             width: record.width,
             height: record.height,
+            video: record.video.clone(),
+            playback: crate::video_jobs::url(record, crate::video_jobs::VideoKind::Playback),
+            preview: crate::video_jobs::url(record, crate::video_jobs::VideoKind::Preview),
             motion: record
                 .motion
                 .as_ref()
@@ -288,6 +295,10 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
         .route("/api/images/{id}/thumbnail", get(thumbnail))
         .route("/api/images/{id}/original", get(original))
         .route(
+            "/api/images/{id}/video/{version}/{kind}",
+            get(prepared_video),
+        )
+        .route(
             "/api/images/{id}/motion/original/{version}",
             get(motion_video),
         )
@@ -307,8 +318,7 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
         .layer(session_layer);
     Router::new()
         .route("/api/health", get(health))
-        .route("/assets/{version}/app.js", get(app_js))
-        .route("/assets/{version}/app.css", get(app_css))
+        .route("/assets/{version}/{*path}", get(frontend_asset))
         .merge(application)
         .layer(middleware::from_fn(auth::response_security))
         .layer(CompressionLayer::new().quality(CompressionLevel::Precise(5)))
@@ -461,6 +471,7 @@ async fn uploaded_similar_images(
     Query(query): Query<SimilarImagesQuery>,
     bytes: Bytes,
 ) -> Response {
+    let exclude = query.exclude.clone();
     let query = query.normalize();
     let index = Arc::clone(&*state.index.read().await);
     let source_id = format!("upload-{}", blake3::hash(&bytes).to_hex());
@@ -511,6 +522,19 @@ async fn uploaded_similar_images(
             }
         };
         cache_similarity_ranking(key, Arc::clone(&ranking));
+        ranking
+    };
+    // Keep the cached ranking reusable for ordinary uploads and video frames.
+    // Exclude the source video before pagination so totals and offsets agree.
+    let ranking = if let Some(exclude) = exclude {
+        Arc::new(
+            ranking
+                .iter()
+                .filter(|image| image.id != exclude)
+                .cloned()
+                .collect(),
+        )
+    } else {
         ranking
     };
     (
@@ -1000,12 +1024,17 @@ async fn image_details(
         );
     }
 
-    let thumbnail = match state.thumbnails.ensure_ready(&id).await {
-        Ok(path) => path,
-        Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
-        Err(error) => {
-            error!(%id, %error, "无法准备直方图源图片");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    let thumbnail = if image.video.is_some() {
+        // Video details do not depend on a poster or an image histogram.
+        image.path.clone()
+    } else {
+        match state.thumbnails.ensure_ready(&id).await {
+            Ok(path) => path,
+            Err(ThumbnailError::NotFound) => return StatusCode::NOT_FOUND.into_response(),
+            Err(error) => {
+                error!(%id, %error, "无法准备直方图源图片");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     };
     let details = match tokio::task::spawn_blocking({
@@ -1082,13 +1111,83 @@ async fn original(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    serve_file(
+    let mut response = serve_file(
         image.path.clone(),
         request,
         &format!("\"original-{id}\""),
         "public, max-age=31536000, immutable",
     )
-    .await
+    .await?;
+    if image.video.is_some()
+        && let Some(mime) = crate::video::mime_type(&image.path)
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    }
+    Ok(response)
+}
+
+#[derive(Default, Deserialize)]
+struct VideoQuery {
+    #[serde(default)]
+    status: bool,
+    retry: Option<String>,
+}
+
+async fn prepared_video(
+    State(state): State<AppState>,
+    Path((id, version, kind)): Path<(String, String, String)>,
+    Query(query): Query<VideoQuery>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    use crate::video_jobs::{self, PreparedAsset, VideoKind};
+    let kind = match kind.as_str() {
+        "playback.mp4" => VideoKind::Playback,
+        "preview.mp4" => VideoKind::Preview,
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    let record = {
+        let index = state.index.read().await;
+        index.image(&id).cloned().ok_or(StatusCode::NOT_FOUND)?
+    };
+    if video_jobs::version(&record).as_deref() != Some(&version) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let current = Arc::clone(&record);
+    tokio::task::spawn_blocking(move || video_jobs::ensure_current(&current))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let asset = state
+        .thumbnails
+        .videos
+        .request(&record, kind, query.retry.is_some())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let (status, phase) = match asset {
+        PreparedAsset::Ready(path) if !query.status => {
+            return serve_file(
+                path,
+                request,
+                &format!("\"video-{version}-{}\"", kind.name()),
+                "private, max-age=31536000, immutable",
+            )
+            .await;
+        }
+        PreparedAsset::Ready(_) => (StatusCode::OK, "ready"),
+        PreparedAsset::Pending(phase) => (StatusCode::ACCEPTED, phase),
+        PreparedAsset::Failed => (StatusCode::UNPROCESSABLE_ENTITY, "failed"),
+    };
+    let mut response = (status, Json(serde_json::json!({ "state": phase }))).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if status == StatusCode::ACCEPTED {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+    }
+    Ok(response)
 }
 
 async fn motion_video(
@@ -1205,12 +1304,29 @@ async fn motion_video(
 
 async fn serve_file(
     path: std::path::PathBuf,
-    request: Request,
+    mut request: Request,
     etag: &str,
     cache_control: &'static str,
 ) -> Result<Response, StatusCode> {
     if is_not_modified(request.headers(), etag) {
         return Ok(not_modified(etag, cache_control));
+    }
+
+    // ServeFile knows file dates but not our content-version ETags. Resolve ETag
+    // If-Range here so seeking resumes only the representation the browser has.
+    if let Some(validator) = request
+        .headers()
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with('"') || value.starts_with("W/"))
+    {
+        if validator != etag {
+            request.headers_mut().remove(header::RANGE);
+        }
+        request.headers_mut().remove(header::IF_RANGE);
+    }
+    if request.method() != Method::GET {
+        request.headers_mut().remove(header::RANGE);
     }
 
     let response = ServeFile::new(path)
@@ -1247,7 +1363,7 @@ fn revision_etag(kind: &str, revision: &str) -> String {
 
 fn images_etag(revision: &str, query: &ImageRequest, text_search_token: Option<&str>) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-images-query-v2\0");
+    hasher.update(b"pixhelf-images-query-v3\0");
     hasher.update(query.album.as_deref().unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     hasher.update(query.search.as_deref().unwrap_or_default().as_bytes());
@@ -1288,7 +1404,7 @@ fn similar_images_etag(
     query: SimilarImagesRequest,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-similar-images-v4\0");
+    hasher.update(b"pixhelf-similar-images-v5\0");
     hasher.update(source_id.as_bytes());
     hasher.update(&ready.to_le_bytes());
     hasher.update(&failed.to_le_bytes());
@@ -1322,24 +1438,23 @@ fn not_modified(etag: &str, cache_control: &'static str) -> Response {
     )
 }
 
-async fn app_js(Path(version): Path<String>, headers: HeaderMap) -> Response {
-    embedded_asset(
-        &version,
-        APP_JS,
-        "text/javascript; charset=utf-8",
-        "js",
-        &headers,
-    )
-}
-
-async fn app_css(Path(version): Path<String>, headers: HeaderMap) -> Response {
-    embedded_asset(
-        &version,
-        APP_CSS,
-        "text/css; charset=utf-8",
-        "css",
-        &headers,
-    )
+async fn frontend_asset(
+    Path((version, path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((_, content)) = FRONTEND_ASSETS.iter().find(|(name, _)| *name == path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = if path.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        "text/plain; charset=utf-8"
+    };
+    embedded_asset(&version, content, content_type, &path, &headers)
 }
 
 fn embedded_asset(
@@ -1537,6 +1652,7 @@ mod tests {
             modified_ms: 40,
             modified_ns: 40,
             motion: None,
+            video: None,
         };
         let view = ImageView::from(&record);
         let json = serde_json::to_string(&view).unwrap();
@@ -1951,6 +2067,7 @@ mod tests {
                 modified_ms: 1,
                 modified_ns: 1,
                 motion: None,
+                video: None,
             })
         };
         let query = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));
@@ -2263,6 +2380,40 @@ mod tests {
                 );
             }
         }
+        // A video-frame upload can omit its source video without changing the
+        // shared cached ranking used by the same image's ordinary uploads.
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        for exclude in [true, false] {
+            let mut request = upload(encoded.get_ref().clone(), 0);
+            if exclude {
+                *request.uri_mut() =
+                    format!("/api/images/similar?offset=0&limit=1&exclude={source_id}")
+                        .parse()
+                        .unwrap();
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(page["total"], if exclude { 1 } else { 2 });
+            assert_eq!(
+                page["items"][0]["name"],
+                if exclude { "nearby.png" } else { "source.png" }
+            );
+            assert_eq!(
+                page["nextOffset"],
+                if exclude {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(1)
+                }
+            );
+        }
         let response = app
             .clone()
             .oneshot(upload(b"invalid image".to_vec(), 0))
@@ -2430,6 +2581,363 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_video_api_reports_jobs_and_serves_seekable_cached_mp4s() {
+        use crate::video_jobs::{self, VideoKind};
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        let path = gallery.join("clip.mov");
+        let original = include_bytes!("../frontend/scripts/fixtures/live-photo-hevc.mov");
+        std::fs::write(&path, original).unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let record = Arc::clone(&index.images[0]);
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails: Arc::clone(&thumbnails),
+        });
+        let url = video_jobs::url(&record, VideoKind::Playback).unwrap();
+        let get = |uri: String| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        let pending = get(format!("{url}?status=true")).await.unwrap();
+        assert_eq!(pending.status(), StatusCode::ACCEPTED);
+        assert_eq!(pending.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(pending.headers()[header::RETRY_AFTER], "2");
+        assert_eq!(
+            get(url.clone()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        thumbnails.videos.start_worker();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !thumbnails.videos.status().playback.background_complete
+                || !thumbnails.videos.status().preview.background_complete
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let ready = get(format!("{url}?status=true")).await.unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(ready.headers()[header::CACHE_CONTROL], "no-store");
+        let response = get(url.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        let etag = response.headers()[header::ETAG].clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_ne!(bytes.as_ref(), original);
+        for (method, range, status) in [
+            (Method::HEAD, "bytes=10-29", StatusCode::OK),
+            (Method::GET, "bytes=10-29", StatusCode::PARTIAL_CONTENT),
+            (
+                Method::GET,
+                "bytes=999999999-",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(&url)
+                        .header(header::RANGE, range)
+                        .header(header::IF_RANGE, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            if method == Method::HEAD {
+                assert_eq!(
+                    response.headers()[header::CONTENT_LENGTH],
+                    bytes.len().to_string()
+                );
+                assert!(
+                    axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            } else if status == StatusCode::PARTIAL_CONTENT {
+                assert_eq!(
+                    response.headers()[header::CONTENT_RANGE],
+                    format!("bytes 10-29/{}", bytes.len())
+                );
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    &bytes[10..30]
+                );
+            }
+        }
+        let cached = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&url)
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        let metadata = get(format!("/api/images/{}", record.id)).await.unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(metadata.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["playback"], url);
+        assert_eq!(
+            metadata["preview"],
+            video_jobs::url(&record, VideoKind::Preview).unwrap()
+        );
+        let wrong_version = url.replace(&video_jobs::version(&record).unwrap(), "old-version");
+        assert_eq!(
+            get(wrong_version).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::write(&path, b"replaced").unwrap();
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&url)
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+        thumbnails.videos.shutdown();
+    }
+
+    #[tokio::test]
+    async fn standalone_video_metadata_posters_and_original_ranges() {
+        let temp = tempfile::tempdir().unwrap();
+        let gallery = temp.path().join("gallery");
+        std::fs::create_dir(&gallery).unwrap();
+        let source = include_bytes!("../frontend/scripts/fixtures/live-photo.mp4");
+        let path = gallery.join("video.MP4");
+        std::fs::write(&path, source).unwrap();
+        let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
+        let id = index.images[0].id.clone();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        let poster = thumbnails.ensure_ready(&id).await.unwrap();
+        let poster = image::open(poster).unwrap();
+        assert!(poster.width() > 0 && poster.width().max(poster.height()) <= 720);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails,
+        });
+        let url = format!("/api/images/{id}/original");
+        let etag = format!("\"original-{id}\"");
+        for (range, validator, expected_status, expected) in [
+            (None, None, StatusCode::OK, source.as_slice()),
+            (
+                Some("bytes=8-31"),
+                None,
+                StatusCode::PARTIAL_CONTENT,
+                &source[8..32],
+            ),
+            (
+                Some("bytes=-16"),
+                None,
+                StatusCode::PARTIAL_CONTENT,
+                &source[source.len() - 16..],
+            ),
+            (
+                Some("bytes=0-15"),
+                Some(etag.as_str()),
+                StatusCode::PARTIAL_CONTENT,
+                &source[..16],
+            ),
+            (
+                Some("bytes=0-15"),
+                Some("\"old\""),
+                StatusCode::OK,
+                source.as_slice(),
+            ),
+        ] {
+            let mut request = Request::builder().uri(&url);
+            if let Some(range) = range {
+                request = request.header(header::RANGE, range);
+            }
+            if let Some(validator) = validator {
+                request = request.header(header::IF_RANGE, validator);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), source.len())
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(&url)
+                    .header(header::RANGE, "bytes=0-15")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(
+            head.headers()[header::CONTENT_LENGTH],
+            source.len().to_string()
+        );
+        assert!(
+            axum::body::to_bytes(head.into_body(), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&url)
+                    .header(header::RANGE, "bytes=999999999-")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        for route in [
+            format!("/api/images/{id}"),
+            format!("/api/images/{id}/details"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["video"]["codec"], "h264");
+            assert!(value["histogram"].is_null());
+        }
+        std::fs::write(path, b"replaced").unwrap();
+        let stale = app
+            .oneshot(
+                Request::builder()
+                    .uri(url)
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pic/pixhelf-video-testset (or PIXHELF_VIDEO_TESTSET), ffmpeg and ffprobe"]
+    async fn video_compatibility_testset() {
+        let root = std::path::PathBuf::from(
+            std::env::var("PIXHELF_VIDEO_TESTSET")
+                .unwrap_or_else(|_| "pic/pixhelf-video-testset".into()),
+        );
+        let manifest = std::fs::read_to_string(root.join("manifest.csv")).unwrap();
+        let rows: Vec<_> = manifest
+            .lines()
+            .skip(1)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.split('|').collect::<Vec<_>>())
+            .collect();
+        let index = crate::gallery::scan_gallery(&root, None).unwrap();
+        assert_eq!(index.images.len(), rows.len());
+        let temp = tempfile::tempdir().unwrap();
+        let thumbnails = ThumbnailManager::new(temp.path().to_owned()).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(2);
+        let records = index.images.clone();
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails: Arc::clone(&thumbnails),
+        });
+        for row in rows {
+            let record = records
+                .iter()
+                .find(|record| record.name == row[0])
+                .expect("test video is indexed");
+            let video = record.video.as_ref().unwrap();
+            assert!(record.motion.is_none());
+            assert_eq!(video.codec, row[2], "{} codec", row[0]);
+            assert_eq!(video.audio_codec.as_deref().unwrap_or(""), row[3]);
+            assert_eq!(record.width, row[4].parse::<u32>().unwrap());
+            assert_eq!(record.height, row[5].parse::<u32>().unwrap());
+            if row[6] == "N/A" {
+                assert!(video.duration.is_none());
+            } else {
+                assert!((video.duration.unwrap() - row[6].parse::<f64>().unwrap()).abs() < 0.1);
+            }
+            let poster = thumbnails.ensure_ready(&record.id).await.unwrap();
+            let poster = image::open(poster).unwrap();
+            assert_eq!(
+                (poster.width(), poster.height()),
+                (record.width, record.height)
+            );
+            let bytes = std::fs::read(&record.path).unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/images/{}/original", record.id))
+                        .header(header::RANGE, "bytes=32-63")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                crate::video::mime_type(&record.path).unwrap()
+            );
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 32)
+                    .await
+                    .unwrap(),
+                &bytes[32..64]
+            );
+        }
+        assert_eq!(thumbnails.status().failed, 0);
+    }
+
+    #[tokio::test]
     async fn indexed_images_expose_original_with_immutable_cache() {
         let temp = tempfile::tempdir().unwrap();
         let gallery = temp.path().join("gallery");
@@ -2570,6 +3078,47 @@ mod tests {
         );
         assert_eq!(
             request("/assets/stale/app.js").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn libmedia_assets_are_embedded_and_versioned() {
+        for (path, mime) in [
+            ("libmedia/avplayer.js", "text/javascript; charset=utf-8"),
+            ("libmedia/wasm/decode/h264-simd.wasm", "application/wasm"),
+        ] {
+            let uri = format!("/assets/{ASSET_VERSION}/{path}");
+            let response = request(&uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+            let etag = response.headers()[header::ETAG].clone();
+            let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            if path.ends_with(".wasm") {
+                assert!(body.starts_with(b"\0asm"));
+            }
+            let cached = empty_router()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::IF_NONE_MATCH, etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(
+                request(&format!("/assets/stale/{path}")).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            request(&format!("/assets/{ASSET_VERSION}/missing.wasm"))
+                .await
+                .status(),
             StatusCode::NOT_FOUND
         );
     }

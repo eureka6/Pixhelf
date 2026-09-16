@@ -11,6 +11,8 @@ fn main() {
         "frontend/tsconfig.json",
         "frontend/tsconfig.app.json",
         "frontend/vite.config.ts",
+        "frontend/libmedia-assets.json",
+        "frontend/scripts/prepare-libmedia.mjs",
         "frontend/src",
     ] {
         println!("cargo:rerun-if-changed={path}");
@@ -29,18 +31,52 @@ fn main() {
         assert!(status.success(), "frontend build failed");
     }
 
-    let asset_version = asset_version(&frontend_dir);
+    let assets_dir = frontend_dir.join("dist/assets");
+    let mut assets = Vec::new();
+    collect_assets(&assets_dir, &mut assets);
+    assets.sort();
+    let mut embedded = String::from("const FRONTEND_ASSETS: &[(&str, &[u8])] = &[\n");
+    for path in &assets {
+        let name = path
+            .strip_prefix(&assets_dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        embedded.push_str(&format!(
+            "({name:?}, include_bytes!({:?})),\n",
+            path.to_string_lossy()
+        ));
+    }
+    embedded.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frontend_assets.rs"),
+        embedded,
+    )
+    .expect("write embedded frontend assets");
+    let asset_version = asset_version(&frontend_dir, &assets);
     println!("cargo:rustc-env=PIXHELF_ASSET_VERSION={asset_version}");
 }
 
-fn asset_version(frontend_dir: &std::path::Path) -> String {
+fn collect_assets(directory: &std::path::Path, assets: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).expect("read frontend assets") {
+        let entry = entry.expect("read frontend asset");
+        if entry.file_type().expect("asset type").is_dir() {
+            collect_assets(&entry.path(), assets);
+        } else {
+            assets.push(entry.path());
+        }
+    }
+}
+
+fn asset_version(frontend_dir: &std::path::Path, assets: &[PathBuf]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
-    for relative in [
-        "dist/index.html",
-        "dist/assets/app.js",
-        "dist/assets/app.css",
-    ] {
-        let path = frontend_dir.join(relative);
+    for path in std::iter::once(frontend_dir.join("dist/index.html")).chain(assets.iter().cloned())
+    {
+        let relative = path
+            .strip_prefix(frontend_dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         let content = fs::read(&path)
             .unwrap_or_else(|error| panic!("cannot read built asset {}: {error}", path.display()));
         for byte in relative.bytes().chain(content) {

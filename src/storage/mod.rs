@@ -423,10 +423,12 @@ fn file_kind(name: &str, directory: bool) -> &'static str {
         let mime = mime_type(name);
         if mime.starts_with("image/") {
             "image"
-        } else if mime.starts_with("video/") {
-            "video"
         } else if mime.starts_with("audio/") {
             "audio"
+        } else if mime.starts_with("video/")
+            || crate::video::mime_type(std::path::Path::new(name)).is_some()
+        {
+            "video"
         } else {
             "file"
         }
@@ -447,13 +449,12 @@ fn mime_type(name: &str) -> &'static str {
         "gif" => "image/gif",
         "avif" => "image/avif",
         "bmp" => "image/bmp",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
         "mp3" => "audio/mpeg",
         "ogg" => "audio/ogg",
         "wav" => "audio/wav",
         "m4a" => "audio/mp4",
-        _ => "application/octet-stream",
+        _ => crate::video::mime_type(std::path::Path::new(name))
+            .unwrap_or("application/octet-stream"),
     }
 }
 

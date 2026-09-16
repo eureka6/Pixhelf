@@ -271,7 +271,7 @@ export function Sidebar({
     <>
       <nav className="album-nav" aria-label="主导航">
         <NavigationButton
-          label="图片"
+          label="图片与视频"
           count={summary?.total ?? 0}
           active={activeSection === "library"}
           onClick={() => onChoose("library")}

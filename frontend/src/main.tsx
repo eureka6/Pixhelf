@@ -10,6 +10,7 @@ import "./PhotoInformation.css";
 import "./auth.css";
 import "./settings.css";
 import "./storage.css";
+import "./video.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing #root application container");

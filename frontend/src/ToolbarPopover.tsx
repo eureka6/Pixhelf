@@ -3,6 +3,7 @@ import { useEffect, useRef } from "preact/hooks";
 
 type ToolbarPopoverProps = {
   children: ComponentChildren;
+  disabled?: boolean;
   closeLabel: string;
   icon: ComponentChildren;
   id: string;
@@ -17,6 +18,7 @@ type ToolbarPopoverProps = {
 
 export function ToolbarPopover({
   children,
+  disabled = false,
   closeLabel,
   icon,
   id,
@@ -69,6 +71,7 @@ export function ToolbarPopover({
       <button
         ref={triggerRef}
         type="button"
+        disabled={disabled}
         className={`icon-button toolbar-popover-trigger ${triggerClassName}`}
         onClick={() => onOpenChange(!open)}
         aria-label={triggerLabel}

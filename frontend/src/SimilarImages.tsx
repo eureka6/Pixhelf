@@ -4,7 +4,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { ImageIcon, LoaderCircle } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
-import { LivePhoto } from "./LivePhoto";
+import { MediaPreview } from "./MediaPreview";
+import { VideoBadge } from "./VideoBadge";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
 import type { GalleryMetrics } from "./galleryMetrics";
 import { useCardInteraction } from "./cardInteraction";
@@ -69,8 +70,9 @@ const SimilarImageCard = memo(function SimilarImageCard({
           <ImageIcon size={24} />
         </span>
       )}
-      {loaded && image.motion && <LivePhoto image={image} />}
-      <button type="button" className="photo-card-open" aria-label={`查看相似图片 ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
+      {loaded && (image.motion || image.video) && <MediaPreview image={image} />}
+      {image.video && <VideoBadge video={image.video} />}
+      <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放相似视频" : "查看相似图片"} ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
       <ImageCardActions image={image} onAction={handleAction} />
     </figure>
   );

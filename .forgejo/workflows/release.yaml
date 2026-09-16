@@ -25,6 +25,7 @@ jobs:
             ca-certificates \
             curl \
             file \
+            ffmpeg \
             pkg-config \
             python3-venv
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
@@ -110,6 +111,7 @@ jobs:
           path: |
             dist/
             compose.yml
+            packaging/install-video-runtime.sh
           if-no-files-found: error
 
   publish:
@@ -117,7 +119,7 @@ jobs:
     if: forgejo.event_name != 'pull_request'
     runs-on: docker
     container:
-      image: docker.io/library/node:22-alpine
+      image: docker.io/library/node:22-alpine3.23
     env:
       DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pixhelf
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -333,6 +335,11 @@ jobs:
             base_ref="$local_registry/staging:${arch}-base"
             configured_ref="$local_registry/staging:${arch}"
 
+            runtime_root="$platform_dir/video-runtime"
+            sh packaging/install-video-runtime.sh "$arch" "$runtime_root"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+              -cf "$platform_dir/video-runtime.tar" -C "$runtime_root" .
+
             mkdir -p "$rootfs"
             install -m 0755 "$asset" "$rootfs/pixhelf"
             tar \
@@ -347,6 +354,7 @@ jobs:
 
             crane append --insecure \
               --base "$model_base_ref" \
+              --new_layer "$platform_dir/video-runtime.tar" \
               --new_layer "$platform_dir/layer.tar" \
               --new_tag "$base_ref"
             crane mutate --insecure "$base_ref" \
@@ -356,8 +364,9 @@ jobs:
               --workdir /data \
               --exposed-ports 3002/tcp \
               --env "PIXHELF_TEXT_SEARCH_MODEL=$model_path" \
+              --env 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
               --label org.opencontainers.image.title=Pixhelf \
-              --label 'org.opencontainers.image.description=Self-hosted image gallery' \
+              --label 'org.opencontainers.image.description=Self-hosted photo and video gallery' \
               --label "org.opencontainers.image.version=$IMAGE_VERSION" \
               --label "org.opencontainers.image.revision=$REVISION" \
               --label "org.opencontainers.image.source=$SOURCE_URL"
@@ -392,13 +401,13 @@ jobs:
                   process.stdin.on("data", (chunk) => input += chunk);
                   process.stdin.on("end", () => {
                     const manifest = JSON.parse(input);
-                    if (manifest.layers?.length !== 2) {
+                    if (manifest.layers?.length !== 3) {
                       throw new Error(`application image has ${manifest.layers?.length ?? 0} layers`);
                     }
                     if (manifest.layers[0].digest !== process.env.EXPECTED_MODEL_LAYER) {
                       throw new Error("application image does not reuse the model base layer");
                     }
-                    process.stdout.write(manifest.layers[1].digest);
+                    process.stdout.write(manifest.layers[2].digest);
                   });'
             )"
 

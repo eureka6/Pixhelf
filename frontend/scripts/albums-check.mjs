@@ -54,7 +54,7 @@ async function navigate(page, title) {
     await page.locator(".gallery-sidebar-toggle").click();
   }
   const panel = page.viewportSize().width <= 720 ? ".mobile-sidebar" : ".desktop-sidebar";
-  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图片", "相册", "相似图片", "外部存储"]);
+  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图片与视频", "相册", "相似图片", "外部存储"]);
   await page.locator(`${panel} .album-link`).getByText(title, { exact: true }).click();
   if (title === "相册") await page.locator(".albums-grid").waitFor();
   else await page.locator(".image-card").nth(24).waitFor();
@@ -142,7 +142,7 @@ try {
     assert.equal(imageRequests.length, requestsBeforeCatalog, "catalog search fetched images");
 
     await openAlbum(page, "空相册");
-    await page.getByText("相册暂无图片", { exact: true }).waitFor();
+    await page.getByText("相册暂无内容", { exact: true }).waitFor();
     assert.equal(await page.locator(".image-card").count(), 0);
     await catalog(page);
     await openAlbum(page, "项目 & 2026/同名");
@@ -184,7 +184,7 @@ try {
     await page.locator(".viewer-close").click();
     await page.locator(".image-viewer").waitFor({ state: "detached" });
     await page.locator(".viewer-return-layer").waitFor({ state: "detached" });
-    await navigate(page, "图片");
+    await navigate(page, "图片与视频");
     assert.equal(new URL(page.url()).search, "");
     assert.equal(await page.locator(".album-heading").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -205,7 +205,7 @@ try {
       await mkdir(join(gallery, "新增空相册"));
       await card(page, "新增空相册").waitFor({ timeout: 20_000 });
       await openAlbum(page, "新增空相册");
-      await page.getByText("相册暂无图片", { exact: true }).waitFor();
+      await page.getByText("相册暂无内容", { exact: true }).waitFor();
       await rm(join(gallery, "新增空相册"), { recursive: true });
       await page.locator(".albums-grid").waitFor({ timeout: 20_000 });
       await waitCount(page, ".album-card", 6);

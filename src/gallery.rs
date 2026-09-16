@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,6 +13,7 @@ use tracing::warn;
 use walkdir::WalkDir;
 
 use crate::motion::{self, MotionSource};
+use crate::video::{self, VideoMetadata};
 
 #[derive(Clone, Debug)]
 pub struct ImageRecord {
@@ -28,6 +29,7 @@ pub struct ImageRecord {
     pub modified_ms: u64,
     pub(crate) modified_ns: u128,
     pub motion: Option<MotionSource>,
+    pub video: Option<VideoMetadata>,
 }
 
 impl ImageRecord {
@@ -50,7 +52,7 @@ impl ImageRecord {
         let metadata = fs::metadata(&self.path)
             .with_context(|| format!("cannot inspect {}", self.path.display()))?;
         if !self.matches_metadata(&metadata) {
-            bail!("source image changed since the gallery scan");
+            bail!("source media changed since the gallery scan");
         }
         Ok(())
     }
@@ -114,6 +116,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     let mut images = Vec::new();
     let mut albums = BTreeMap::<String, Album>::new();
     let mut videos = HashMap::<(PathBuf, String), Vec<PathBuf>>::new();
+    let mut video_paths = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
@@ -146,10 +149,13 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         if !entry.file_type().is_file() {
             continue;
         }
-        if motion::is_video_path(entry.path()) {
-            if let Some(key) = motion::pairing_key(entry.path()) {
-                videos.entry(key).or_default().push(entry.into_path());
+        if video::mime_type(entry.path()).is_some() {
+            if motion::is_video_path(entry.path())
+                && let Some(key) = motion::pairing_key(entry.path())
+            {
+                videos.entry(key).or_default().push(entry.path().to_owned());
             }
+            video_paths.push(entry.into_path());
             continue;
         }
         if !is_supported_image(entry.path()) {
@@ -222,6 +228,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
             modified_ms: fingerprint.modified_ms,
             modified_ns: fingerprint.modified_ns,
             motion,
+            video: None,
         }));
     }
 
@@ -254,6 +261,67 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         }
     }
 
+    let paired_paths: HashSet<_> = images
+        .iter()
+        .filter_map(|image| image.motion.as_ref().filter(|source| source.offset == 0))
+        .map(|source| source.path.clone())
+        .collect();
+    for path in video_paths {
+        if paired_paths.contains(&path) {
+            continue;
+        }
+        let relative = path.strip_prefix(root)?;
+        let Some(relative_path) = path_to_url(relative) else {
+            continue;
+        };
+        let existing = previous_by_path.get(relative_path.as_str()).copied();
+        let result = (|| -> Result<Arc<ImageRecord>> {
+            let metadata = fs::metadata(&path)?;
+            let fingerprint = FileFingerprint::from_metadata(&metadata);
+            if let Some(existing) = existing
+                && existing.video.is_some()
+                && existing.matches_metadata(&metadata)
+            {
+                return Ok(Arc::clone(existing));
+            }
+            let (width, height, video) = video::probe(&path)?;
+            let record = ImageRecord {
+                id: image_id(&relative_path, fingerprint.size, fingerprint.modified_ns),
+                path: path.clone(),
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&relative_path)
+                    .to_owned(),
+                album: relative
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .and_then(path_to_url)
+                    .unwrap_or_default(),
+                search_key: relative_path.to_lowercase(),
+                relative_path,
+                width,
+                height,
+                size: fingerprint.size,
+                modified_ms: fingerprint.modified_ms,
+                modified_ns: fingerprint.modified_ns,
+                motion: None,
+                video: Some(video),
+            };
+            record.ensure_source_is_current()?;
+            Ok(Arc::new(record))
+        })();
+        match result {
+            Ok(record) => images.push(record),
+            Err(error) => {
+                warn!(path = %path.display(), error = %format!("{error:#}"), "无法读取视频信息");
+                if let Some(existing) = existing {
+                    images.push(Arc::clone(existing));
+                }
+            }
+        }
+    }
+
     images.sort_by(|left, right| {
         natord::compare_ignore_case(&left.relative_path, &right.relative_path)
     });
@@ -282,7 +350,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
 
 fn index_revision(images: &[Arc<ImageRecord>], albums: &[Album]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-index-v6\0");
+    hasher.update(b"pixhelf-index-v7\0");
     for image in images {
         hasher.update(image.id.as_bytes());
         hasher.update(b"\0");
@@ -347,6 +415,48 @@ fn path_to_url(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_videos_join_the_gallery_and_reuse_unchanged_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let video = temp.path().join("-独立视频.MP4");
+        fs::write(
+            &video,
+            include_bytes!("../frontend/scripts/fixtures/live-photo.mp4"),
+        )
+        .unwrap();
+        fs::write(temp.path().join("broken.mkv"), b"incomplete video").unwrap();
+        let index = scan_gallery(temp.path(), None).unwrap();
+        assert_eq!(index.images.len(), 1);
+        let record = &index.images[0];
+        assert!(record.motion.is_none());
+        assert_eq!(record.video.as_ref().unwrap().codec, "h264");
+        assert!(record.video.as_ref().unwrap().duration.unwrap() > 0.0);
+        let stable = scan_gallery(temp.path(), Some(&index)).unwrap();
+        assert!(Arc::ptr_eq(record, &stable.images[0]));
+        image::RgbImage::new(20, 10)
+            .save(temp.path().join("-独立视频.jpg"))
+            .unwrap();
+        let paired = scan_gallery(temp.path(), Some(&stable)).unwrap();
+        assert_eq!(paired.images.len(), 1);
+        assert!(paired.images[0].video.is_none());
+        assert!(paired.images[0].motion.is_some());
+        fs::remove_file(temp.path().join("-独立视频.jpg")).unwrap();
+        let unpaired = scan_gallery(temp.path(), Some(&paired)).unwrap();
+        assert_eq!(unpaired.images.len(), 1);
+        assert_eq!(unpaired.images[0].id, record.id);
+        fs::write(&video, b"being replaced").unwrap();
+        let incomplete = scan_gallery(temp.path(), Some(&unpaired)).unwrap();
+        assert_eq!(incomplete.images[0].id, record.id);
+        assert!(incomplete.images[0].ensure_source_is_current().is_err());
+        fs::remove_file(video).unwrap();
+        assert!(
+            scan_gallery(temp.path(), Some(&incomplete))
+                .unwrap()
+                .images
+                .is_empty()
+        );
+    }
 
     #[test]
     fn swaps_dimensions_for_quarter_turns() {

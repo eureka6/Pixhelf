@@ -12,7 +12,9 @@ pub(crate) struct PhotoDetails {
     pub(crate) file_size: u64,
     pub(crate) modified_ms: u64,
     pub(crate) exif: Vec<ExifField>,
-    pub(crate) histogram: PhotoHistogram,
+    pub(crate) histogram: Option<PhotoHistogram>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video: Option<crate::video::VideoMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -32,14 +34,18 @@ pub(crate) struct PhotoHistogram {
 impl PhotoDetails {
     pub(crate) fn read(record: &ImageRecord, thumbnail: &Path) -> Result<Self> {
         record.ensure_source_is_current()?;
-        let exif = read_exif(&record.path)?;
-        let histogram = read_histogram(thumbnail)?;
+        let (exif, histogram) = if record.video.is_some() {
+            (Vec::new(), None)
+        } else {
+            (read_exif(&record.path)?, Some(read_histogram(thumbnail)?))
+        };
         record.ensure_source_is_current()?;
         Ok(Self {
             file_size: record.size,
             modified_ms: record.modified_ms,
             exif,
             histogram,
+            video: record.video.clone(),
         })
     }
 }

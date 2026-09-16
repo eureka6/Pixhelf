@@ -3,6 +3,14 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { chromium, webkit } from "playwright-core";
 
+export async function serveLibmediaAsset(route) {
+  const path = new URL(route.request().url()).pathname;
+  const prefix = "/assets/libmedia/";
+  if (!path.startsWith(prefix) || path.includes("..")) throw new Error(`Invalid asset path: ${path}`);
+  const body = await readFile(new URL(`../dist${path}`, import.meta.url));
+  return route.fulfill({ body, contentType: path.endsWith(".wasm") ? "application/wasm" : "text/javascript" });
+}
+
 export const engine = process.argv.includes("--webkit") || process.env.PIXHELF_TEST_ENGINE === "webkit" ? webkit : chromium;
 export const isChromium = engine === chromium;
 
@@ -51,7 +59,7 @@ export function serveMotion(route, { clip, contentType }) {
   const start = range ? Number(range[1]) : 0;
   const end = range?.[2] ? Math.min(Number(range[2]), clip.length - 1) : clip.length - 1;
   return route.fulfill({ status: range ? 206 : 200, body: clip.subarray(start, end + 1), headers: {
-    "content-type": contentType, "accept-ranges": "bytes",
+    "content-type": contentType, "accept-ranges": "bytes", "content-length": String(end - start + 1),
     "cache-control": "private, max-age=31536000, immutable", "etag": '"original-motion-v2-fixture"',
     ...(range ? { "content-range": `bytes ${start}-${end}/${clip.length}` } : {}),
   } });

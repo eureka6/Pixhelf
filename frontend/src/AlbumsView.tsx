@@ -71,7 +71,7 @@ export function AlbumChildren({ albums, path, onOpen }: { albums: Album[] | unde
             <span className="album-folder-icon"><Folder size={22} strokeWidth={1.6} /></span>
             <span className="album-folder-details">
               <strong title={album.name}>{album.name}</strong>
-              <span>{formatCount(album.count)} 张照片</span>
+              <span>{formatCount(album.count)} 项</span>
             </span>
             <ChevronRight size={16} />
           </a>
@@ -99,7 +99,7 @@ export function AlbumHeading({ album, onOpen }: { album: Album; onOpen: (path: s
           );
         })}
       </nav>
-      <span aria-label={`${album.count} 张图片`}>{formatCount(album.count)} 张</span>
+      <span aria-label={`${album.count} 项图片与视频`}>{formatCount(album.count)} 项</span>
     </header>
   );
 }

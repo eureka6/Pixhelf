@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { memo } from "preact/compat";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Check, Copy, Download, ExternalLink, ImageIcon, Info, ScanSearch } from "./icons";
+import { Check, Copy, Download, ExternalLink, ImageIcon, Info, Play, ScanSearch } from "./icons";
 import { CARD_MENU_EVENT, CARD_SELECTOR } from "./cardInteraction";
 import type { CardMenuRequest } from "./cardInteraction";
 import type { GalleryImage, ImageCardAction } from "./types";
@@ -31,9 +31,11 @@ async function copyFilename(name: string, container: HTMLElement): Promise<void>
   }
 }
 
-export const ImageCardActions = memo(function ImageCardActions({ image, onAction }: {
+export const ImageCardActions = memo(function ImageCardActions({ image, onAction, onMenuChange, similarDisabled = false }: {
   image: GalleryImage;
   onAction: (action: ImageCardAction) => void;
+  onMenuChange?: (open: boolean) => void;
+  similarDisabled?: boolean;
 }) {
   const controlsRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -41,6 +43,8 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
   const open = request !== null;
   const [copyState, setCopyState] = useState<"idle" | "pending" | "done" | "failed">("idle");
   const originalUrl = viewerOriginalUrl(image);
+
+  useLayoutEffect(() => { onMenuChange?.(open); }, [open, onMenuChange]);
 
   const closeMenu = (restoreFocus = false) => {
     const menu = menuRef.current;
@@ -83,7 +87,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
       y: Math.max(0, Math.min((request.point?.y ?? origin.top + 24) - origin.top, origin.height)),
     };
     // The viewer may still be animating its zoom when the menu opens.
-    const fixedPoint = card.matches(".viewer-media") ? request.point : undefined;
+    const fixedPoint = card.matches(".viewer-media, .video-viewer-stage") ? request.point : undefined;
     const position = () => {
       const cardRect = card.getBoundingClientRect();
       const x = fixedPoint?.x ?? cardRect.left + anchor.x;
@@ -204,17 +208,17 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
       onContextMenu={event => event.stopPropagation()}
     >
       {open && (
-        <div ref={menuRef} className="photo-card-menu" role="menu" aria-label="图片操作" onKeyDown={handleMenuKey}>
+        <div ref={menuRef} className="photo-card-menu" role="menu" aria-label={image.video ? "视频操作" : "图片操作"} onKeyDown={handleMenuKey}>
           <div className="photo-card-menu-heading" role="presentation">
             <strong>{image.name}</strong>
             <span>{image.width.toLocaleString()} × {image.height.toLocaleString()}</span>
           </div>
-          <button type="button" role="menuitem" onClick={() => choose("view")}><ImageIcon size={17} /><span>查看大图</span></button>
-          <button type="button" role="menuitem" onClick={() => choose("details")}><Info size={17} /><span>图片信息</span></button>
-          <button type="button" role="menuitem" onClick={() => choose("similar")}><ScanSearch size={17} /><span>查找相似图片</span></button>
+          <button type="button" role="menuitem" onClick={() => choose("view")}>{image.video ? <Play size={17} /> : <ImageIcon size={17} />}<span>{image.video ? "播放视频" : "查看大图"}</span></button>
+          <button type="button" role="menuitem" onClick={() => choose("details")}><Info size={17} /><span>{image.video ? "视频信息" : "图片信息"}</span></button>
+          <button type="button" role="menuitem" aria-disabled={similarDisabled} disabled={similarDisabled} onClick={() => choose("similar")}><ScanSearch size={17} /><span>{image.video ? "查找相似画面" : "查找相似图片"}</span></button>
           <div className="photo-card-menu-divider" role="separator" />
-          <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>下载原图</span></a>
-          <a role="menuitem" href={originalUrl} target="_blank" rel="noopener noreferrer" onClick={() => closeMenu()}><ExternalLink size={17} /><span>在新标签页打开原图</span></a>
+          <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>{image.video ? "下载原视频" : "下载原图"}</span></a>
+          <a role="menuitem" href={originalUrl} target="_blank" rel="noopener noreferrer" onClick={() => closeMenu()}><ExternalLink size={17} /><span>{image.video ? "在新标签页打开原视频" : "在新标签页打开原图"}</span></a>
           <button type="button" role="menuitem" aria-disabled={copyState === "pending"} onClick={async () => {
             const menu = menuRef.current;
             if (!menu || copyState === "pending") return;

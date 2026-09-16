@@ -39,6 +39,7 @@ import {
   getGallery,
   getImages,
   getSimilarImages,
+  searchByUploadedImage,
   getStatus,
   takeInitialBootstrap,
 } from "./api";
@@ -53,7 +54,8 @@ import {
   getDecodedViewerOriginal,
   prepareViewerImages,
 } from "./viewerAssets";
-import { stopLivePhotoPlayback } from "./LivePhoto";
+import { stopMediaPreview } from "./MediaPreview";
+import type { VideoFrame } from "./videoFrame";
 
 const PAGE_SIZE = 60;
 const SIMILAR_PAGE_SIZE = 30;
@@ -77,6 +79,7 @@ type ImagePageState = {
 
 type SimilarImagePageState = {
   source: GalleryImage | null;
+  frame?: VideoFrame;
   images: GalleryImage[];
   total: number;
   nextOffset: number | null;
@@ -532,7 +535,8 @@ function App() {
         const next = await getStatus(controller.signal);
         if (controller.signal.aborted) return;
         setStatus(next);
-        const complete = next.backgroundComplete && next.textSearch.backgroundComplete;
+        const complete = next.backgroundComplete && next.textSearch.backgroundComplete
+          && (!next.videos || (next.videos.playback.backgroundComplete && next.videos.preview.backgroundComplete));
         timer = window.setTimeout(poll, complete ? 10000 : 1500);
       } catch {
         if (!controller.signal.aborted) timer = window.setTimeout(poll, 5000);
@@ -542,6 +546,8 @@ function App() {
       ? (
           INITIAL_BOOTSTRAP.status.backgroundComplete
           && INITIAL_BOOTSTRAP.status.textSearch.backgroundComplete
+          && (!INITIAL_BOOTSTRAP.status.videos || (INITIAL_BOOTSTRAP.status.videos.playback.backgroundComplete
+            && INITIAL_BOOTSTRAP.status.videos.preview.backgroundComplete))
             ? 10_000
             : 1_500
         )
@@ -708,8 +714,9 @@ function App() {
     activateLocation({ section: "similar", path: source.id });
   }, [activateLocation]);
 
-  const searchSimilar = useCallback((source: GalleryImage, force = false) => {
+  const searchSimilar = useCallback((source: GalleryImage, force = false, capturedFrame?: VideoFrame) => {
     const sameSource = similarPage.source?.id === source.id;
+    const frame = capturedFrame ?? (sameSource ? similarPage.frame : undefined);
     if (!force && sameSource && (similarLoading || !similarError)) return;
 
     similarControllerRef.current?.abort();
@@ -719,20 +726,19 @@ function App() {
     const controller = new AbortController();
     const requestVersion = ++similarRequestVersionRef.current;
     similarControllerRef.current = controller;
-    setSimilarPage({ source, images: [], total: 0, nextOffset: null });
+    setSimilarPage({ source, frame, images: [], total: 0, nextOffset: null });
     setSimilarLoading(true);
     setSimilarLoadingMore(false);
     setSimilarError(null);
 
-    void getSimilarImages(
-      source.id,
-      { offset: 0, limit: SIMILAR_PAGE_SIZE },
-      controller.signal,
-    )
+    const options = { offset: 0, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
+    void (frame ? searchByUploadedImage(frame.file, options, controller.signal)
+      : getSimilarImages(source.id, options, controller.signal))
       .then((page) => {
         if (requestVersion !== similarRequestVersionRef.current) return;
         setSimilarPage({
           source,
+          frame,
           images: page.items,
           total: page.total,
           nextOffset: page.nextOffset,
@@ -750,7 +756,11 @@ function App() {
           if (requestVersion === similarRequestVersionRef.current) setSimilarLoading(false);
         }
       });
-  }, [similarError, similarLoading, similarPage.source?.id]);
+  }, [similarError, similarLoading, similarPage.source?.id, similarPage.frame]);
+
+  const searchVideoFrame = useCallback((source: GalleryImage, frame: VideoFrame) => {
+    searchSimilar(source, true, frame);
+  }, [searchSimilar]);
 
   useEffect(() => {
     const complete = Boolean(status?.backgroundComplete);
@@ -763,6 +773,7 @@ function App() {
 
   const loadMoreSimilar = useCallback((): Promise<GalleryImage[]> => {
     const source = similarPage.source;
+    const frame = similarPage.frame;
     const offset = similarPage.nextOffset;
     if (!source || similarLoading || offset === null) return Promise.resolve([]);
     const pending = similarLoadMorePromiseRef.current;
@@ -776,15 +787,14 @@ function App() {
 
     const promise = (async () => {
       try {
-        const page = await getSimilarImages(
-          source.id,
-          { offset, limit: SIMILAR_PAGE_SIZE },
-          controller.signal,
-        );
+        const options = { offset, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
+        const page = await (frame ? searchByUploadedImage(frame.file, options, controller.signal)
+          : getSimilarImages(source.id, options, controller.signal));
         if (requestVersion !== similarRequestVersionRef.current) return [];
         setSimilarPage((current) => current.source?.id === source.id
           ? {
               source,
+              frame,
               images: appendUniqueImages(current.images, page.items),
               total: page.total,
               nextOffset: page.nextOffset,
@@ -809,7 +819,7 @@ function App() {
     })();
     similarLoadMorePromiseRef.current = promise;
     return promise;
-  }, [similarLoading, similarPage.nextOffset, similarPage.source]);
+  }, [similarLoading, similarPage.nextOffset, similarPage.source, similarPage.frame]);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -912,7 +922,7 @@ function App() {
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
-    stopLivePhotoPlayback();
+    stopMediaPreview();
     prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
     resetSimilarSearch();
     setViewerDiscoveredImages([]);
@@ -1178,8 +1188,9 @@ function App() {
     prepareViewerImages([candidate], 0);
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
-    searchSimilar(candidate);
-  }, [openSimilarSearch, searchSimilar]);
+    if (candidate.video) resetSimilarSearch();
+    else searchSimilar(candidate);
+  }, [openSimilarSearch, resetSimilarSearch, searchSimilar]);
 
   const navigateViewer = useCallback((direction: -1 | 1) => {
     const currentImageId = viewerImageIdRef.current;
@@ -1301,6 +1312,18 @@ function App() {
       />
 
       <main className="content" aria-busy={pageLoading || pageLoadingMore}>
+        {!browsingStorage && status?.videos && <div className="background-video-tasks" aria-label="视频准备任务">
+          {(["playback", "preview"] as const).map(kind => {
+            const job = status.videos![kind];
+            if (!job.total || (job.backgroundComplete && !job.failed)) return null;
+            const label = kind === "playback" ? "视频播放" : "视频预览";
+            return <div key={kind} className="background-video-task">
+              <span>{job.backgroundComplete ? label : `正在准备${label}`} · {job.ready}/{job.total}
+                {job.failed > 0 && ` · ${job.failed} 个失败`}</span>
+              <progress aria-label={`${label}准备进度`} max={job.total} value={job.ready + job.failed} />
+            </div>;
+          })}
+        </div>}
         {error && !browsingStorage && !browsingSimilar && (
           <div className="error-banner" role="alert">
             <span>{error}</span>
@@ -1354,10 +1377,10 @@ function App() {
             ) : (
               <div className="empty-state">
                 <ImageIcon size={30} strokeWidth={1.6} />
-                <strong>{selectedAlbum?.count === 0 ? "相册暂无图片" : summary?.total === 0 ? "图库暂无图片" : "没有找到图片"}</strong>
+                <strong>{selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
                 <span>
                   {summary?.total === 0 || selectedAlbum?.count === 0
-                    ? "添加图片后将自动显示"
+                    ? "添加图片或视频后将自动显示"
                     : textSearchReady && debouncedSearch
                       ? "换一种自然语言描述，或减少限定词"
                       : "请调整相册或搜索条件"}
@@ -1368,7 +1391,7 @@ function App() {
             <div ref={sentinelRef} className="load-sentinel" aria-live="polite">
               {loadingMore && <LoaderCircle className="spin" size={21} aria-label="加载更多" />}
               {!loading && nextOffset === null && images.length > 0 && (
-                <span>已显示全部 {formatCount(total)} 张图片</span>
+                <span>已显示全部 {formatCount(total)} 项</span>
               )}
             </div>
           </>
@@ -1391,6 +1414,7 @@ function App() {
           hasMore={viewerCanLoadMore}
           loadingMore={pageLoadingMore || similarLoadingMore}
           onNavigate={navigateViewer}
+          onLoadMoreImages={galleryViewerIndex >= 0 ? loadMore : loadMoreSimilar}
           onClose={closeViewer}
           similarActive={similarActive}
           similarImages={similarActive ? similarPage.images : []}
@@ -1400,6 +1424,8 @@ function App() {
           similarLoadingMore={similarActive && similarLoadingMore}
           similarError={similarActive ? similarError : null}
           onSearchSimilar={searchSimilar}
+          onSearchVideoFrame={searchVideoFrame}
+          similarFrameTime={similarActive ? similarPage.frame?.time : undefined}
           onLoadMoreSimilar={loadMoreSimilar}
           onOpenImage={openViewerImage}
         />

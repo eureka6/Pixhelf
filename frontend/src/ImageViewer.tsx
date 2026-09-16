@@ -14,8 +14,10 @@ import {
   X,
 } from "./icons";
 import { PhotoInformation } from "./PhotoInformation";
+import { VideoViewer } from "./VideoViewer";
+import type { VideoFrame } from "./videoFrame";
 import { ImageCardActions } from "./ImageCardActions";
-import { LIVE_PHOTO_PLAY_EVENT, LivePhoto } from "./LivePhoto";
+import { MEDIA_PREVIEW_PLAY_EVENT, MediaPreview } from "./MediaPreview";
 import { CARD_MENU_EVENT, useCardInteraction } from "./cardInteraction";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { SimilarImageGallery, SimilarImageSkeleton } from "./SimilarImages";
@@ -138,12 +140,13 @@ type IdleScheduler = Window & {
   cancelIdleCallback?: (handle: number) => void;
 };
 
-type ImageViewerProps = {
+export type ImageViewerProps = {
   images: GalleryImage[];
   activeIndex: number;
   hasMore: boolean;
   loadingMore: boolean;
   onNavigate: (direction: -1 | 1) => void;
+  onLoadMoreImages: () => Promise<GalleryImage[]>;
   onClose: () => void;
   similarActive: boolean;
   similarImages: GalleryImage[];
@@ -153,11 +156,17 @@ type ImageViewerProps = {
   similarLoadingMore: boolean;
   similarError: string | null;
   onSearchSimilar: (image: GalleryImage) => void;
+  onSearchVideoFrame: (image: GalleryImage, frame: VideoFrame) => void;
+  similarFrameTime?: number;
   onLoadMoreSimilar: () => void;
   onOpenImage: (image: GalleryImage, action?: ImageCardAction) => void;
 };
 
-export function ImageViewer({
+export function ImageViewer(props: ImageViewerProps) {
+  return props.images[props.activeIndex]?.video ? <VideoViewer {...props} /> : <PhotoViewer {...props} />;
+}
+
+function PhotoViewer({
   images,
   activeIndex,
   hasMore,
@@ -597,7 +606,7 @@ export function ImageViewer({
     snapshot.tabIndex = -1;
     snapshot.removeAttribute("aria-haspopup");
     snapshot.querySelector(".photo-card-controls")?.remove();
-    snapshot.querySelector(".live-photo")?.remove();
+    snapshot.querySelector(".media-preview")?.remove();
     snapshot.querySelectorAll<HTMLElement>("[id]").forEach((element) => {
       element.removeAttribute("id");
     });
@@ -1085,7 +1094,7 @@ export function ImageViewer({
       for (const offset of [1, -1]) {
         if (disposed) return;
         const candidate = images[activeIndex + offset];
-        if (!candidate) continue;
+        if (!candidate || candidate.video) continue;
         const render = viewportRenderDimensions(candidate, viewport);
         const strategy = selectViewerSourceStrategy(
           candidate,
@@ -1515,7 +1524,7 @@ export function ImageViewer({
     const target = document.elementFromPoint(point.x, point.y);
     if (image.motion && media && target && media.contains(target)
       && !target.closest(".photo-card-controls")) {
-      media.dispatchEvent(new Event(LIVE_PHOTO_PLAY_EVENT));
+      media.dispatchEvent(new Event(MEDIA_PREVIEW_PLAY_EVENT));
     }
   };
 
@@ -2053,7 +2062,7 @@ export function ImageViewer({
                   })}
                 />
               )}
-              {image.motion && <LivePhoto image={image} autoPlay />}
+              {image.motion && <MediaPreview image={image} autoPlay />}
               <ImageCardActions image={image} onAction={action => {
                 if (action === "view") {
                   commitTransform(DEFAULT_TRANSFORM);

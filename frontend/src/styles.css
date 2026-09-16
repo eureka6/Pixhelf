@@ -837,7 +837,7 @@ select:focus-visible,
   animation: feedback-in var(--motion-medium) ease-out both;
 }
 
-.live-photo {
+.media-preview {
   position: absolute;
   z-index: 2;
   inset: 0;
@@ -846,37 +846,24 @@ select:focus-visible,
   pointer-events: none;
 }
 
-.viewer-media > .live-photo { z-index: 4; }
+.viewer-media > .media-preview { z-index: 4; }
 
-.live-photo-viewport {
+.media-preview-viewport {
   position: absolute;
   inset: 0;
   overflow: hidden;
   opacity: 0;
 }
 
-.live-photo[data-playing="true"] .live-photo-viewport {
+.media-preview[data-playing="true"] .media-preview-viewport {
   opacity: 1;
 }
 
-.live-photo-video {
+.media-preview-player {
   width: 100%;
   height: 100%;
-  display: block;
-  object-fit: cover;
   transition: transform var(--motion-medium) var(--ease-standard);
 }
-
-.viewer-media .live-photo-canvas {
-  position: absolute;
-  z-index: 1;
-  inset: 0;
-  object-fit: cover;
-}
-
-.viewer-media .live-photo-canvas[hidden] { display: none; }
-
-.viewer-media .live-photo-canvas:not([hidden]) ~ .live-photo-video { opacity: 0; }
 
 .live-photo-badge {
   position: absolute;
@@ -894,9 +881,9 @@ select:focus-visible,
   line-height: 1;
 }
 
-.live-photo[data-failed="true"] .live-photo-badge::after { content: "· 暂不可播放"; }
+.media-preview[data-failed="true"] .live-photo-badge::after { content: "· 暂不可播放"; }
 
-.live-photo-loading {
+.media-preview-loading {
   position: absolute;
   z-index: 3;
   bottom: 10px;
@@ -911,36 +898,29 @@ select:focus-visible,
   box-shadow: 0 0 0 1px rgba(255, 255, 255, .15);
 }
 
-.viewer-media .live-photo-loading { width: 64px; bottom: 16px; }
+.viewer-media .media-preview-loading { width: 64px; bottom: 16px; }
 
-.live-photo[data-loading="true"] .live-photo-loading {
+.media-preview[data-loading="true"] .media-preview-loading {
   display: block;
-  animation: live-loading-in 140ms ease-out 120ms both;
+  animation: preview-loading-in 140ms ease-out 120ms both;
 }
 
-.live-photo-progress {
+.media-preview-loading::after {
+  content: "";
   display: block;
   width: 30%;
   height: 100%;
   border-radius: inherit;
   background: rgba(255, 255, 255, .92);
-  animation: live-loading-progress 1s ease-in-out infinite;
+  animation: preview-loading-progress 1s ease-in-out infinite;
 }
 
-.live-photo[data-buffer-known="true"] .live-photo-progress {
-  animation: none;
-  width: 100%;
-  transform-origin: left;
-  transform: scaleX(var(--live-buffer-progress, 0));
-  transition: transform 160ms ease-out;
-}
-
-@keyframes live-loading-progress {
+@keyframes preview-loading-progress {
   from { transform: translateX(-100%); }
   to { transform: translateX(350%); }
 }
 
-@keyframes live-loading-in {
+@keyframes preview-loading-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
@@ -953,8 +933,8 @@ select:focus-visible,
 
 .image-card[data-card-active="true"][data-loaded="true"] img,
 .viewer-similar-card[data-card-active="true"][data-loaded="true"] img,
-.image-card[data-card-active="true"] .live-photo-video,
-.viewer-similar-card[data-card-active="true"] .live-photo-video {
+.image-card[data-card-active="true"] .media-preview-player,
+.viewer-similar-card[data-card-active="true"] .media-preview-player {
   transform: scale(1.04);
 }
 
@@ -1686,8 +1666,8 @@ select:focus-visible,
 
   .image-card[data-loaded="true"]:hover img,
   .viewer-similar-card[data-loaded="true"]:hover img,
-  .image-card:hover .live-photo-video,
-  .viewer-similar-card:hover .live-photo-video {
+  .image-card:hover .media-preview-player,
+  .viewer-similar-card:hover .media-preview-player {
     transform: scale(1.04);
   }
 }
@@ -1898,8 +1878,8 @@ select:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .image-card[data-card-active="true"] img,
   .viewer-similar-card[data-card-active="true"] img,
-  .image-card[data-card-active="true"] .live-photo-video,
-  .viewer-similar-card[data-card-active="true"] .live-photo-video {
+  .image-card[data-card-active="true"] .media-preview-player,
+  .viewer-similar-card[data-card-active="true"] .media-preview-player {
     transform: none;
   }
 
@@ -1916,8 +1896,8 @@ select:focus-visible,
 
   .image-card[data-loaded="true"]:hover img,
   .viewer-similar-card[data-loaded="true"]:hover img,
-  .image-card:hover .live-photo-video,
-  .viewer-similar-card:hover .live-photo-video {
+  .image-card:hover .media-preview-player,
+  .viewer-similar-card:hover .media-preview-player {
     transform: none;
   }
 

@@ -115,6 +115,7 @@
 .photo-card-feedback:empty { display: none; }
 
 .viewer-similar-card .photo-card-controls,
+.video-viewer-stage .photo-card-controls,
 .viewer-media .photo-card-controls {
   --card-menu-bg: #202a25;
   --card-menu-ink: #eef4f0;

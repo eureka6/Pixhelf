@@ -365,7 +365,7 @@ export function getDecodedViewerOriginal(source: string): HTMLImageElement | nul
 
 export function preloadOriginalImage(image: GalleryImage): void {
   if (
-    supportsViewerViewportBitmaps()
+    image.video || supportsViewerViewportBitmaps()
     || !canPreloadViewerNeighbors()
   ) return;
   getViewerOriginalAsset(image, 0, "low");
@@ -396,12 +396,12 @@ export function prepareViewerImages(
 
   // The active desktop original is always requested. Neighboring originals are
   // speculative and respect Save-Data/slow-network signals.
-  getViewerOriginalAsset(images[activeIndex]!, 0, "high");
+  if (!images[activeIndex]!.video) getViewerOriginalAsset(images[activeIndex]!, 0, "high");
   if (!canPreloadViewerNeighbors()) return;
   for (let distance = 1; distance <= ORIGINAL_PRELOAD_DISTANCE; distance += 1) {
     const next = images[activeIndex + distance];
     const previous = images[activeIndex - distance];
-    if (next) getViewerOriginalAsset(next, 0, distance === 1 ? "high" : "low");
-    if (previous) getViewerOriginalAsset(previous, 0, distance === 1 ? "high" : "low");
+    if (next && !next.video) getViewerOriginalAsset(next, 0, distance === 1 ? "high" : "low");
+    if (previous && !previous.video) getViewerOriginalAsset(previous, 0, distance === 1 ? "high" : "low");
   }
 }
