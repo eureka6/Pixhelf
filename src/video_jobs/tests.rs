@@ -238,21 +238,11 @@ async fn prepared_videos_keep_portrait_rotation() {
     let temp = tempfile::tempdir().unwrap();
     let gallery = temp.path().join("gallery");
     fs::create_dir(&gallery).unwrap();
-    let mut command = Command::new("ffmpeg");
-    command
-        .args([
-            "-v",
-            "error",
-            "-nostdin",
-            "-display_rotation",
-            "90",
-            "-i",
-            "frontend/scripts/fixtures/live-photo.mp4",
-            "-c",
-            "copy",
-        ])
-        .arg(gallery.join("portrait.mp4"));
-    video::run_cancellable(&mut command, 1024, Duration::from_secs(10), &|| false).unwrap();
+    fs::write(
+        gallery.join("portrait.mp4"),
+        include_bytes!("../../frontend/scripts/fixtures/portrait-video.mp4"),
+    )
+    .unwrap();
     let index = crate::gallery::scan_gallery(&gallery, None).unwrap();
     let record = &index.images[0];
     assert!(record.height > record.width);

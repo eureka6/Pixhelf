@@ -3,6 +3,14 @@ and an H.264 animation. `live-photo-hevc.mov` is an HEVC fixture with silent AAC
 audio, also used by the Rust response tests. Rust video preparation tests and the
 backend playback checks require FFmpeg (`ffmpeg`, `ffprobe`, libx264 and AAC).
 
+`portrait-video.mp4` is a stream copy of `live-photo.mp4` with a 90° display
+rotation, so rotation tests do not depend on version-specific FFmpeg options.
+Regenerate with FFmpeg 7.1 from this directory:
+
+```sh
+ffmpeg -display_rotation 90 -i live-photo.mp4 -c copy portrait-video.mp4
+```
+
 ## Offline browser checks
 
 Run from `frontend` after installing Playwright Chromium or WebKit and its runtime
