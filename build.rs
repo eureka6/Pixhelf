@@ -1,4 +1,18 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{collections::BTreeMap, env, fs, path::PathBuf, process::Command};
+
+#[derive(serde::Deserialize)]
+struct PackedGroup {
+    filename: String,
+    length: usize,
+    files: Vec<PackedFile>,
+}
+
+#[derive(serde::Deserialize)]
+struct PackedFile {
+    name: String,
+    offset: usize,
+    length: usize,
+}
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
@@ -13,6 +27,7 @@ fn main() {
         "frontend/vite.config.ts",
         "frontend/libmedia-assets.json",
         "frontend/scripts/prepare-libmedia.mjs",
+        "frontend/scripts/pack-assets.mjs",
         "frontend/src",
     ] {
         println!("cargo:rerun-if-changed={path}");
@@ -29,30 +44,78 @@ fn main() {
             );
 
         assert!(status.success(), "frontend build failed");
+    } else {
+        println!("cargo:rerun-if-changed=frontend/dist");
     }
 
     let assets_dir = frontend_dir.join("dist/assets");
+    let output_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let packed_dir = output_dir.join("frontend-packed");
+    let status = Command::new("node")
+        .arg(frontend_dir.join("scripts/pack-assets.mjs"))
+        .arg(&assets_dir)
+        .arg(&packed_dir)
+        .status()
+        .expect("failed to run frontend asset packing; install Node.js");
+    assert!(status.success(), "frontend asset packing failed");
+    let groups: Vec<PackedGroup> = serde_json::from_slice(
+        &fs::read(packed_dir.join("manifest.json")).expect("read packed asset manifest"),
+    )
+    .expect("invalid packed asset manifest");
+    let mut packed_files = BTreeMap::new();
+    let mut embedded = String::from("const ASSET_GROUPS: &[AssetGroup] = &[\n");
+    for (index, group) in groups.iter().enumerate() {
+        embedded.push_str(&format!(
+            "AssetGroup {{ compressed: include_bytes!({:?}), length: {} }},\n",
+            packed_dir.join(&group.filename).to_string_lossy(),
+            group.length,
+        ));
+        for file in &group.files {
+            assert!(file.offset + file.length <= group.length);
+            assert!(
+                packed_files
+                    .insert(file.name.as_str(), (index, file.offset, file.length))
+                    .is_none(),
+                "duplicate packed asset"
+            );
+        }
+    }
+    embedded.push_str("];\nconst FRONTEND_ASSETS: &[Asset] = &[\n");
     let mut assets = Vec::new();
     collect_assets(&assets_dir, &mut assets);
     assets.sort();
-    let mut embedded = String::from("const FRONTEND_ASSETS: &[(&str, &[u8])] = &[\n");
     for path in &assets {
         let name = path
             .strip_prefix(&assets_dir)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        embedded.push_str(&format!(
-            "({name:?}, include_bytes!({:?})),\n",
-            path.to_string_lossy()
-        ));
+        let source = match packed_files.remove(name.as_str()) {
+            Some((group, offset, length)) => {
+                format!(
+                    "AssetSource::Packed {{ group: {group}, offset: {offset}, length: {length} }}"
+                )
+            }
+            None => {
+                assert!(
+                    !name.starts_with("libmedia/"),
+                    "unpacked libmedia asset: {name}"
+                );
+                format!(
+                    "AssetSource::Plain(include_bytes!({:?}))",
+                    path.to_string_lossy()
+                )
+            }
+        };
+        embedded.push_str(&format!("Asset {{ name: {name:?}, source: {source} }},\n"));
     }
+    assert!(
+        packed_files.is_empty(),
+        "packed assets missing from frontend output"
+    );
     embedded.push_str("];\n");
-    fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("frontend_assets.rs"),
-        embedded,
-    )
-    .expect("write embedded frontend assets");
+    fs::write(output_dir.join("frontend_assets.rs"), embedded)
+        .expect("write embedded frontend assets");
     let asset_version = asset_version(&frontend_dir, &assets);
     println!("cargo:rustc-env=PIXHELF_ASSET_VERSION={asset_version}");
 }

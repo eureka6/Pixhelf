@@ -24,6 +24,7 @@ use tower_http::{
 use tracing::error;
 
 use crate::{
+    assets,
     auth::{self, AuthConfig, AuthState, AuthView},
     gallery::{Album, GalleryIndex, ImageRecord},
     photo_details::PhotoDetails,
@@ -40,7 +41,6 @@ const INDEX_HTML: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/frontend/dist/index.html"
 ));
-include!(concat!(env!("OUT_DIR"), "/frontend_assets.rs"));
 const APP_CSS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/frontend/dist/assets/app.css"
@@ -1442,8 +1442,22 @@ async fn frontend_asset(
     Path((version, path)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let Some((_, content)) = FRONTEND_ASSETS.iter().find(|(name, _)| *name == path) else {
+    if version != ASSET_VERSION {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(asset) = assets::find(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let etag = format!("\"asset-{path}-{ASSET_VERSION}\"");
+    if is_not_modified(&headers, &etag) {
+        return not_modified(&etag, "public, max-age=31536000, immutable");
+    }
+    let content = match asset.read().await {
+        Ok(content) => content,
+        Err(error) => {
+            error!(%path, %error, "无法读取内置前端资源");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
     let content_type = if path.ends_with(".js") {
         "text/javascript; charset=utf-8"
@@ -1454,24 +1468,6 @@ async fn frontend_asset(
     } else {
         "text/plain; charset=utf-8"
     };
-    embedded_asset(&version, content, content_type, &path, &headers)
-}
-
-fn embedded_asset(
-    version: &str,
-    content: &'static [u8],
-    content_type: &'static str,
-    kind: &str,
-    headers: &HeaderMap,
-) -> Response {
-    if version != ASSET_VERSION {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let etag = format!("\"asset-{kind}-{ASSET_VERSION}\"");
-    if is_not_modified(headers, &etag) {
-        return not_modified(&etag, "public, max-age=31536000, immutable");
-    }
-
     let mut response = Response::new(Body::from(content));
     response
         .headers_mut()
@@ -3096,9 +3092,34 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
                 .await
                 .unwrap();
+            let original = std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("frontend/dist/assets")
+                    .join(path),
+            )
+            .unwrap();
+            assert_eq!(body.as_ref(), original);
             if path.ends_with(".wasm") {
                 assert!(body.starts_with(b"\0asm"));
             }
+            let compressed = empty_router()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::ACCEPT_ENCODING, "br")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(compressed.headers()[header::CONTENT_ENCODING], "br");
+            assert_eq!(compressed.headers()[header::CONTENT_TYPE], mime);
+            let encoded = axum::body::to_bytes(compressed.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            let mut decoded = Vec::new();
+            brotli::BrotliDecompress(&mut encoded.as_ref(), &mut decoded).unwrap();
+            assert_eq!(decoded, original);
             let cached = empty_router()
                 .oneshot(
                     Request::builder()

@@ -76,6 +76,11 @@ jobs:
             cargo zigbuild --release --locked --target "$target"
             file "$binary"
 
+            if [ "$(wc -c < "$binary")" -gt 26214400 ]; then
+              echo "${binary} exceeds the 25 MiB release size budget"
+              exit 1
+            fi
+
             if ! readelf -h "$binary" | grep -q "Machine:.*${machine}"; then
               echo "Unexpected architecture for ${binary}"
               exit 1
