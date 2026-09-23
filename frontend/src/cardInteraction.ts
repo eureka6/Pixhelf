@@ -1,7 +1,7 @@
 import type { RefObject } from "preact";
 import { useLayoutEffect } from "preact/hooks";
 
-export const CARD_SELECTOR = ".image-card, .viewer-similar-card, .viewer-media, .video-viewer-stage";
+export const CARD_SELECTOR = ".image-card, .viewer-similar-card, .viewer-media, .video-viewer-stage, .album-card, .album-folder";
 export const CARD_MENU_EVENT = "pixhelf:card-menu";
 export const CARD_TOUCH_EVENT = "pixhelf:card-touch";
 export type CardMenuRequest = { touch: boolean; point?: { x: number; y: number } };
@@ -33,7 +33,7 @@ function activateCardFeedback(card: HTMLElement): void {
   feedbackVisibility.observe(card);
 }
 
-export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = true, touchLongPress = true) {
+export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = true, touchLongPress = true, menus = true) {
   useLayoutEffect(() => {
     const gallery = ref.current;
     if (!enabled || !gallery) return;
@@ -50,7 +50,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
     const fromTouch = (event: MouseEvent) => event instanceof PointerEvent && event.pointerType
       ? event.pointerType !== "mouse" : gallery.dataset.cardInput === "touch";
     const cardAt = (target: EventTarget | null) => {
-      if (!(target instanceof Element) || target.closest(".photo-card-controls, [inert]")) return null;
+      if (!(target instanceof Element) || target.closest(".photo-card-controls, .photo-card-select, [inert]")) return null;
       const card = target.closest<HTMLElement>(CARD_SELECTOR);
       if (card?.matches(".video-viewer-stage") && target.closest("button, a, input, .video-controls-region")) return null;
       return card && gallery.contains(card) ? card : null;
@@ -105,7 +105,10 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       }, 500);
     };
     const move = (event: PointerEvent) => {
-      if (event.pointerType === "mouse") input("mouse");
+      if (event.pointerType === "mouse") {
+        input("mouse");
+        if (feedbackCard && gallery.contains(feedbackCard)) clearCardFeedback();
+      }
       if (!consumed && contact?.pointerId === event.pointerId
         && Math.hypot(event.clientX - contact.x, event.clientY - contact.y) > 10) cancel();
     };
@@ -114,6 +117,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       // Keep click suppression through pointerup/pointercancel: browsers may still send a click.
     };
     const context = (event: MouseEvent) => {
+      if (!menus) return;
       const card = cardAt(event.target);
       if (!card) return;
       event.preventDefault();
@@ -144,7 +148,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       touchClick = false;
       if (!touch || event.detail === 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       const card = cardAt(event.target);
-      if (!card || card.matches(".viewer-media")) return;
+      if (!card || card.matches(".viewer-media") || card.closest('[data-selecting="true"]')) return;
       const preview = card.querySelector<HTMLElement>(".media-preview");
       if (!preview || preview.dataset.failed === "true"
         || preview.dataset.playing === "true" || preview.dataset.loading === "true"
@@ -166,7 +170,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       touchClick = false;
       consumed = null;
       cancel();
-      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      if (menus && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
         const card = cardAt(event.target);
         if (card) { event.preventDefault(); show(card, { touch: false }); }
       }
@@ -199,5 +203,5 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       if (feedbackCard && (gallery.contains(feedbackCard) || !feedbackCard.isConnected)) clearCardFeedback();
       listeners.abort();
     };
-  }, [enabled, ref, touchLongPress]);
+  }, [enabled, ref, touchLongPress, menus]);
 }

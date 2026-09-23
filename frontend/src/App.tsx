@@ -1,5 +1,6 @@
 import {
   ImageIcon,
+  Heart,
   LoaderCircle,
   RefreshCw,
 } from "./icons";
@@ -13,7 +14,9 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
-import { AlbumChildren, AlbumHeading, AlbumsView } from "./AlbumsView";
+import { AlbumBackLink, AlbumGrid, AlbumsView } from "./AlbumsView";
+import { useAlbumSelection } from "./SelectableAlbums";
+import { LocalStorageView, type LocalMediaPage } from "./LocalStorageView";
 import { ExternalStorageView } from "./ExternalStorageView";
 import { SettingsDialog } from "./SettingsDialog";
 import { authentication } from "./auth";
@@ -33,11 +36,16 @@ import { SimilarSearchView } from "./SimilarSearchView";
 import { useImageSimilarity } from "./useImageSimilarity";
 import type { ImageSearchSource } from "./useImageSimilarity";
 import { appendUniqueImages } from "./galleryImages";
-import { GallerySkeleton, JustifiedGallery } from "./JustifiedGallery";
-import type { JustifiedGalleryHandle } from "./JustifiedGallery";
+import { GallerySkeleton } from "./JustifiedGallery";
+import { SelectableGallery, type SelectableGalleryHandle } from "./SelectableGallery";
+import { TrashView } from "./TrashView";
+import { MANAGEMENT_CHANGED, useManagement } from "./management";
+import { ensureSelectionHistory, handleSelectionHistory, writeHistoryState } from "./selectionHistory";
+import { useSelectionDismiss } from "./useSelectionDismiss";
 import {
   getGallery,
   getImages,
+  getGalleryImage,
   getSimilarImages,
   searchByUploadedImage,
   getStatus,
@@ -56,6 +64,7 @@ import {
 } from "./viewerAssets";
 import { stopMediaPreview } from "./MediaPreview";
 import type { VideoFrame } from "./videoFrame";
+import { galleryHistoryState, readViewerHistoryEntry, viewerHistoryState, type SimilarImagePageState, type ViewerBranch, type ViewerHistoryEntry } from "./viewerHistory";
 
 const PAGE_SIZE = 60;
 const SIMILAR_PAGE_SIZE = 30;
@@ -67,8 +76,6 @@ const MOBILE_NAV_EXIT_MS = 240;
 const VIEWER_RETURN_SETTLE_MS = 32;
 const VIEWER_RETURN_TIMEOUT_MS = 480;
 const VIEWER_RETURN_ANIMATION_MS = 260;
-const VIEWER_HISTORY_STATE_KEY = "__pixhelfViewer";
-const VIEWER_HISTORY_STATE_VERSION = 1;
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
 type ImagePageState = {
@@ -77,20 +84,8 @@ type ImagePageState = {
   nextOffset: number | null;
 };
 
-type SimilarImagePageState = {
-  source: GalleryImage | null;
-  frame?: VideoFrame;
-  images: GalleryImage[];
-  total: number;
-  nextOffset: number | null;
-};
-
-type ViewerHistoryEntry = {
-  version: number;
-  image: GalleryImage;
-};
-
 type ViewerReturnRequest = ViewerAnchor & {
+  parentImageId?: string;
   imageId: string;
   sequence: number;
 };
@@ -114,42 +109,6 @@ const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
   total: 0,
   nextOffset: null,
 };
-
-function readViewerHistoryEntry(state: unknown): ViewerHistoryEntry | null {
-  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
-  const value = (state as Record<string, unknown>)[VIEWER_HISTORY_STATE_KEY];
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const entry = value as Record<string, unknown>;
-  const image = entry.image;
-  if (
-    entry.version !== VIEWER_HISTORY_STATE_VERSION
-    || !image
-    || typeof image !== "object"
-    || Array.isArray(image)
-  ) return null;
-  const candidate = image as Record<string, unknown>;
-  if (
-    typeof candidate.id !== "string"
-    || typeof candidate.name !== "string"
-    || typeof candidate.width !== "number"
-    || typeof candidate.height !== "number"
-  ) return null;
-  return value as ViewerHistoryEntry;
-}
-
-function viewerHistoryState(image: GalleryImage): Record<string, unknown> {
-  const current = window.history.state;
-  const preserved = current && typeof current === "object" && !Array.isArray(current)
-    ? current as Record<string, unknown>
-    : {};
-  return {
-    ...preserved,
-    [VIEWER_HISTORY_STATE_KEY]: {
-      version: VIEWER_HISTORY_STATE_VERSION,
-      image,
-    } satisfies ViewerHistoryEntry,
-  };
-}
 
 function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
   if (!flight) return;
@@ -336,12 +295,16 @@ function createExploreSeed(): string {
 }
 
 function App() {
+  const manager = useManagement();
   useVisualViewportTop();
   const [location, setLocation] = useState(readGalleryLocation);
   const locationRef = useRef(location);
   const { section, path } = location;
   const album = section === "albums" ? path : "";
+  const browsingLocal = section === "local";
   const browsingStorage = section === "storage";
+  const browsingFavorites = section === "favorites";
+  const browsingTrash = section === "trash";
   const browsingSimilar = section === "similar";
   const browsingAlbums = section === "albums" && !album;
   const hasInitialImages = Boolean(INITIAL_BOOTSTRAP && section === "library");
@@ -363,13 +326,14 @@ function App() {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exploreSeed, setExploreSeed] = useState("");
-  const [loading, setLoading] = useState(!hasInitialImages && !browsingAlbums && !browsingStorage && !browsingSimilar);
+  const [loading, setLoading] = useState(!hasInitialImages && !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [storageRevision, setStorageRevision] = useState(0);
+  const [localMedia, setLocalMedia] = useState<LocalMediaPage | null>(null);
   const [infoImage, setInfoImage] = useState<GalleryImage | null>(null);
   const [uploadedQuery, setUploadedQuery] = useState<File | null>(null);
   const [galleryQuerySnapshot, setGalleryQuerySnapshot] = useState<GalleryImage | null>(null);
@@ -380,9 +344,19 @@ function App() {
     : uploadedQuery ? { kind: "upload", file: uploadedQuery } : null,
   [queryImageId, galleryQuerySnapshot, uploadedQuery]);
   const imageSimilarity = useImageSimilarity(querySource, browsingSimilar);
-  const galleryLayoutRef = useRef<JustifiedGalleryHandle>(null);
+  const [selectionToolbar, setSelectionToolbar] = useState<HTMLDivElement | null>(null);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+  const galleryLayoutRef = useRef<SelectableGalleryHandle>(null);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
   const [viewerDiscoveredImages, setViewerDiscoveredImages] = useState<GalleryImage[]>([]);
+  const [viewerBranch, setViewerBranch] = useState<ViewerBranch | null>(null);
+  const viewerBranchRef = useRef<ViewerBranch | null>(null);
+  const [viewerLoadingMore, setViewerLoadingMore] = useState(false);
+  const viewerLoadJobRef = useRef<{ images: GalleryImage[]; controller: AbortController; promise: Promise<GalleryImage[]> } | null>(null);
+  const updateViewerBranch = useCallback((branch: ViewerBranch | null) => {
+    viewerBranchRef.current = branch;
+    setViewerBranch(branch);
+  }, []);
   const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
     EMPTY_SIMILAR_IMAGE_PAGE,
   );
@@ -414,6 +388,10 @@ function App() {
     status?.textSearch.enabled ? 500 : 250,
   );
   const debouncedSearch = search.trim() ? delayedSearch : "";
+  const requestImages = useCallback((offset: number, signal: AbortSignal) => getImages({
+    album, favorites: browsingFavorites, search: debouncedSearch,
+    sort: exploreSeed ? "explore" : "name-asc", seed: exploreSeed, offset, limit: PAGE_SIZE,
+  }, signal), [album, browsingFavorites, debouncedSearch, exploreSeed]);
   const requestVersionRef = useRef(0);
   const summaryRevisionRef = useRef<string | null>(
     INITIAL_BOOTSTRAP?.summary.revision ?? null,
@@ -434,12 +412,44 @@ function App() {
   const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const viewerHistoryActiveRef = useRef(false);
   const viewerHistoryClosingRef = useRef(false);
-  const { images, total, nextOffset } = browsingSimilar ? imageSimilarity : imagePage;
-  const pageLoadingMore = browsingSimilar ? imageSimilarity.loadingMore : loadingMore;
+  const { images, total, nextOffset } = browsingSimilar ? imageSimilarity : browsingLocal && localMedia ? localMedia : imagePage;
+  const pageLoadingMore = browsingSimilar ? imageSimilarity.loadingMore : browsingLocal ? Boolean(localMedia?.loadingMore) : loadingMore;
   const selectedAlbum = useMemo(() => summary?.albums.find(item => item.path === album), [summary, album]);
+  const visibleAlbums = useMemo(() => {
+    const albums = summary?.albums ?? [];
+    const query = search.trim().toLocaleLowerCase();
+    if (browsingFavorites) return albums.filter(item => manager.favoriteAlbums.has(item.path) && (!query || item.path.toLocaleLowerCase().includes(query)));
+    if (browsingAlbums) return albums.filter(item => !query || item.path.toLocaleLowerCase().includes(query));
+    return [];
+  }, [summary, search, browsingFavorites, browsingAlbums, manager.favoriteAlbums]);
+  const albumSelection = useAlbumSelection(visibleAlbums, `${section}:${path}:${search}`, () => galleryLayoutRef.current?.clearSelection());
+  const selectionActive = selectedIds.size > 0 || Boolean(albumSelection.selection?.active);
+  const clearSelection = useCallback(() => {
+    galleryLayoutRef.current?.clearSelection();
+    setSelectedIds(new Set());
+    albumSelection.clear();
+  }, [albumSelection.clear]);
+  const selectionStateRef = useRef({ active: selectionActive, clear: clearSelection });
+  selectionStateRef.current = { active: selectionActive, clear: clearSelection };
+  useSelectionDismiss(selectionActive, manager.busy, Boolean(viewerImageId), clearSelection);
+  useEffect(() => {
+    const changed = (event: Event) => {
+      const action = (event as CustomEvent<string>).detail;
+      if (action !== "favorite") {
+        setViewerImageId(null);
+        setViewerDiscoveredImages([]);
+        updateViewerBranch(null);
+        viewerLoadJobRef.current?.controller.abort();
+        if (browsingSimilar) imageSimilarity.retry();
+      }
+      if (action !== "favorite" || browsingFavorites) setReloadToken(value => value + 1);
+    };
+    window.addEventListener(MANAGEMENT_CHANGED, changed);
+    return () => window.removeEventListener(MANAGEMENT_CHANGED, changed);
+  }, [browsingFavorites, browsingSimilar, imageSimilarity.retry]);
   const viewerImages = useMemo(
-    () => appendUniqueImages(images, viewerDiscoveredImages),
-    [images, viewerDiscoveredImages],
+    () => viewerBranch?.images ?? appendUniqueImages(images, viewerDiscoveredImages),
+    [images, viewerDiscoveredImages, viewerBranch],
   );
 
   useLayoutEffect(() => {
@@ -453,8 +463,10 @@ function App() {
   useEffect(() => () => {
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
+    loadMoreControllerRef.current?.abort();
     similarControllerRef.current?.abort();
     similarLoadMoreControllerRef.current?.abort();
+    viewerLoadJobRef.current?.controller.abort();
   }, []);
 
   useEffect(() => {
@@ -488,6 +500,7 @@ function App() {
     const controller = new AbortController();
     getGallery(controller.signal)
       .then((next) => {
+        if (controller.signal.aborted) return;
         summaryRevisionRef.current = next.revision;
         setSummary(next);
       })
@@ -571,25 +584,15 @@ function App() {
     setLoadingMore(false);
     setError(null);
     setImagePage(EMPTY_IMAGE_PAGE);
-    if (browsingAlbums || browsingStorage || browsingSimilar) {
+    if (browsingAlbums || browsingLocal || browsingStorage || browsingTrash || browsingSimilar) {
       setLoading(false);
       return;
     }
     const controller = new AbortController();
     setLoading(true);
-    getImages(
-      {
-        album,
-        search: debouncedSearch,
-        sort: exploreSeed ? "explore" : "name-asc",
-        seed: exploreSeed,
-        offset: 0,
-        limit: PAGE_SIZE,
-      },
-      controller.signal,
-    )
+    requestImages(0, controller.signal)
       .then((page) => {
-        if (requestVersion !== requestVersionRef.current) return;
+        if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return;
         setImagePage({
           images: page.items,
           total: page.total,
@@ -597,7 +600,7 @@ function App() {
         });
       })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
           setError(errorMessage(reason, "无法读取图片"));
         }
       })
@@ -613,10 +616,11 @@ function App() {
       loadMorePromiseRef.current = null;
       loadMoreController?.abort();
     };
-  }, [location, debouncedSearch, exploreSeed, reloadToken, textSearchReady]);
+  }, [location, requestImages, reloadToken, textSearchReady]);
 
   const loadMoreLibrary = useCallback((): Promise<GalleryImage[]> => {
-    if (browsingAlbums || browsingStorage || browsingSimilar || loading || nextOffset === null) return Promise.resolve([]);
+    const offset = imagePage.nextOffset;
+    if (browsingAlbums || browsingLocal || browsingStorage || browsingTrash || browsingSimilar || loading || offset === null) return Promise.resolve([]);
     const pending = loadMorePromiseRef.current;
     if (pending) return pending;
 
@@ -627,24 +631,11 @@ function App() {
 
     const promise = (async () => {
       try {
-        const page = await getImages(
-          {
-            album,
-            search: debouncedSearch,
-            sort: exploreSeed ? "explore" : "name-asc",
-            seed: exploreSeed,
-            offset: nextOffset,
-            limit: PAGE_SIZE,
-          },
-          controller.signal,
-        );
-        if (requestVersion !== requestVersionRef.current) return [];
-        setImagePage((current) => ({
-          images: appendUniqueImages(current.images, page.items),
-          total: page.total,
-          nextOffset: page.nextOffset,
-        }));
-        return page.items;
+        const page = await requestImages(offset, controller.signal);
+        if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return [];
+        const images = appendUniqueImages(imagePage.images, page.items);
+        setImagePage({ images, total: page.total, nextOffset: page.nextOffset });
+        return images.slice(imagePage.images.length);
       } catch (reason) {
         if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
           setError(errorMessage(reason, "无法继续加载图片"));
@@ -660,8 +651,8 @@ function App() {
     })();
     loadMorePromiseRef.current = promise;
     return promise;
-  }, [location, debouncedSearch, exploreSeed, loading, nextOffset]);
-  const loadMore = browsingSimilar ? imageSimilarity.loadMore : loadMoreLibrary;
+  }, [location, requestImages, loading, imagePage]);
+  const loadMore = browsingSimilar ? imageSimilarity.loadMore : browsingLocal && localMedia ? localMedia.loadMore : loadMoreLibrary;
 
   const resetSimilarSearch = useCallback(() => {
     similarRequestVersionRef.current += 1;
@@ -677,6 +668,7 @@ function App() {
   }, []);
 
   const activateLocation = useCallback((next: GalleryLocation) => {
+    clearSelection();
     locationRef.current = next;
     if (next.section === "similar") lastSimilarPathRef.current = next.path;
     requestVersionRef.current++;
@@ -684,7 +676,7 @@ function App() {
     loadMoreControllerRef.current?.abort();
     setLocation(next);
     setImagePage(EMPTY_IMAGE_PAGE);
-    setLoading(next.section === "library" || (next.section === "albums" && Boolean(next.path)));
+    setLoading(next.section === "library" || next.section === "favorites" || (next.section === "albums" && Boolean(next.path)));
     setLoadingMore(false);
     setError(null);
     setSearch("");
@@ -695,19 +687,21 @@ function App() {
     viewerImageIdRef.current = null;
     setViewerImageId(null);
     setViewerDiscoveredImages([]);
+    updateViewerBranch(null);
+    viewerLoadJobRef.current?.controller.abort();
     setViewerReturnRequest(null);
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     resetSimilarSearch();
-  }, [resetSimilarSearch]);
+  }, [resetSimilarSearch, clearSelection]);
 
   const openSimilarSearch = useCallback((source: GalleryImage) => {
     setGalleryQuerySnapshot(source);
     const href = galleryHref("similar", source.id);
     if (viewerHistoryActiveRef.current || readViewerHistoryEntry(window.history.state)) {
-      window.history.replaceState(null, "", href);
+      writeHistoryState(null, href, true);
     } else if (href !== window.location.pathname + window.location.search) {
-      window.history.pushState(null, "", href);
+      writeHistoryState(null, href);
     }
     viewerHistoryActiveRef.current = false;
     viewerHistoryClosingRef.current = false;
@@ -743,7 +737,6 @@ function App() {
           total: page.total,
           nextOffset: page.nextOffset,
         });
-        setViewerDiscoveredImages((current) => appendUniqueImages(current, page.items));
       })
       .catch((reason: unknown) => {
         if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
@@ -800,7 +793,6 @@ function App() {
               nextOffset: page.nextOffset,
             }
           : current);
-        setViewerDiscoveredImages((current) => appendUniqueImages(current, page.items));
         return page.items;
       } catch (reason) {
         if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
@@ -840,7 +832,7 @@ function App() {
   }, [compactLayout, loadMore, nextOffset]);
 
   const viewerIndex = viewerImageId
-    ? viewerImages.findIndex((image) => image.id === viewerImageId)
+    ? viewerBranch?.index ?? viewerImages.findIndex((image) => image.id === viewerImageId)
     : -1;
   const galleryViewerIndex = viewerImageId
     ? images.findIndex((image) => image.id === viewerImageId)
@@ -849,64 +841,115 @@ function App() {
   const similarActive = Boolean(
     viewerImage && similarPage.source?.id === viewerImage.id,
   );
-  const viewerCanLoadMore = Boolean(
-    viewerImage && (
-      images.some((candidate) => candidate.id === viewerImage.id)
-        ? nextOffset !== null
-        : similarActive && similarPage.nextOffset !== null
-    ),
-  );
+  const viewerCanLoadMore = Boolean(viewerImage && (viewerBranch ? viewerBranch.nextOffset !== null : nextOffset !== null));
+
+  const recordViewerHistory = useCallback((snapshot: GalleryImage, branch: ViewerBranch | null, replace = false,
+    similarPage: SimilarImagePageState | null = null, returnAnchor: ViewerHistoryEntry["returnAnchor"] = null) => {
+    const current = readViewerHistoryEntry(window.history.state);
+    const entry: ViewerHistoryEntry = { version: 3, image: snapshot, branch,
+      depth: branch ? branch.parent.depth + 1 : 1,
+      session: current?.session ?? `${Date.now()}-${Math.random()}`, similarPage, returnAnchor,
+      detached: replace ? current?.detached : undefined };
+    try {
+      writeHistoryState(viewerHistoryState(entry), window.location.href, Boolean(replace && current));
+      viewerHistoryActiveRef.current = true;
+      viewerHistoryClosingRef.current = false;
+    } catch {
+      viewerHistoryActiveRef.current = false;
+    }
+    return entry;
+  }, []);
+
+  const loadMoreViewer = useCallback((): Promise<GalleryImage[]> => {
+    const branch = viewerBranchRef.current;
+    if (!branch) return loadMore();
+    if (branch.nextOffset === null) return Promise.resolve([]);
+    const pending = viewerLoadJobRef.current;
+    if (pending?.images === branch.images) return pending.promise;
+    pending?.controller.abort();
+    const controller = new AbortController();
+    setViewerLoadingMore(true);
+    const options = { offset: branch.nextOffset, limit: SIMILAR_PAGE_SIZE, exclude: branch.source.id };
+    const job = { images: branch.images, controller, promise: Promise.resolve([] as GalleryImage[]) };
+    job.promise = (async () => {
+      try {
+        const page = await (branch.frame ? searchByUploadedImage(branch.frame.file, options, controller.signal)
+          : getSimilarImages(branch.source.id, options, controller.signal));
+        const current = viewerBranchRef.current;
+        if (controller.signal.aborted || current?.images !== branch.images) return [];
+        const next = { ...current, images: appendUniqueImages(current.images, page.items), total: page.total, nextOffset: page.nextOffset };
+        updateViewerBranch(next);
+        const entry = readViewerHistoryEntry(window.history.state);
+        recordViewerHistory(next.images[next.index]!, next, true, entry?.similarPage, entry?.returnAnchor);
+        return next.images.slice(current.images.length);
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(errorMessage(reason, "无法继续加载相似图片"));
+        return [];
+      } finally {
+        if (viewerLoadJobRef.current === job) {
+          viewerLoadJobRef.current = null;
+          setViewerLoadingMore(false);
+        }
+      }
+    })();
+    viewerLoadJobRef.current = job;
+    return job.promise;
+  }, [loadMore, recordViewerHistory, updateViewerBranch]);
 
   const closeViewerState = useCallback(() => {
     const currentImageId = viewerImageIdRef.current;
     if (!currentImageId) return;
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = createViewerReturnFlight();
+    const hasGallery = Boolean(document.querySelector(".content .justified-gallery"));
+    viewerReturnFlightRef.current = hasGallery ? createViewerReturnFlight() : null;
     const anchor = viewerAnchorRef.current ?? {
       cardRatio: 0.5,
       viewportRatio: 0.5,
       fallbackScrollY: window.scrollY,
     };
     viewerReturnSequenceRef.current += 1;
-    setViewerReturnRequest({
+    setViewerReturnRequest(hasGallery ? {
       ...anchor,
       imageId: currentImageId,
       sequence: viewerReturnSequenceRef.current,
-    });
+    } : null);
+    if (!hasGallery) viewerAnchorRef.current = null;
     resetSimilarSearch();
     setViewerDiscoveredImages([]);
+    updateViewerBranch(null);
+    viewerLoadJobRef.current?.controller.abort();
     viewerImageIdRef.current = null;
     setViewerImageId(null);
-  }, [resetSimilarSearch]);
+  }, [resetSimilarSearch, updateViewerBranch]);
 
-  const restoreViewerFromHistory = useCallback((snapshot: GalleryImage) => {
+  const restoreViewerFromHistory = useCallback((requested: ViewerHistoryEntry, returning = false) => {
+    const child = viewerBranchRef.current;
+    const currentImageId = viewerImageIdRef.current;
+    let entry = requested;
+    if (returning && child && currentImageId) {
+      const parent = child.parent;
+      entry = { ...parent, similarPage: { source: child.source, images: child.images, total: child.total,
+        nextOffset: child.nextOffset, frame: child.frame },
+        returnAnchor: parent.returnAnchor ? { ...parent.returnAnchor, imageId: currentImageId } : null };
+      try { writeHistoryState(viewerHistoryState(entry), window.location.href, true); } catch { /* Restoring the UI still works. */ }
+    }
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
+    viewerReturnFlightRef.current = returning ? createViewerReturnFlight() : null;
+    const snapshot = entry.image;
+    updateViewerBranch(entry.branch);
+    viewerLoadJobRef.current?.controller.abort();
     const card = imageCardById(snapshot.id);
-    viewerAnchorRef.current = card ? captureViewerAnchor(card) : null;
+    if (!currentImageId) viewerAnchorRef.current = card ? captureViewerAnchor(card) : null;
     prepareViewerImages([snapshot], 0);
     resetSimilarSearch();
-    setViewerDiscoveredImages((current) => appendUniqueImages(current, [snapshot]));
-    setViewerReturnRequest(null);
+    if (entry.similarPage) setSimilarPage(entry.similarPage);
+    setViewerDiscoveredImages(current => appendUniqueImages(current, [snapshot]));
+    viewerReturnSequenceRef.current += 1;
+    setViewerReturnRequest(entry.returnAnchor ? { ...entry.returnAnchor, parentImageId: snapshot.id,
+      sequence: viewerReturnSequenceRef.current } : null);
     viewerImageIdRef.current = snapshot.id;
     setViewerImageId(snapshot.id);
-  }, [resetSimilarSearch]);
-
-  const enterViewerHistory = useCallback((snapshot: GalleryImage) => {
-    try {
-      const state = viewerHistoryState(snapshot);
-      if (readViewerHistoryEntry(window.history.state)) {
-        window.history.replaceState(state, "", window.location.href);
-      } else {
-        window.history.pushState(state, "", window.location.href);
-      }
-      viewerHistoryActiveRef.current = true;
-      viewerHistoryClosingRef.current = false;
-    } catch {
-      viewerHistoryActiveRef.current = false;
-      viewerHistoryClosingRef.current = false;
-    }
-  }, []);
+  }, [resetSimilarSearch, updateViewerBranch]);
 
   const openViewer = useCallback((
     imageId: string,
@@ -918,7 +961,10 @@ function App() {
     if (!snapshot) return;
     if (action === "details") { setInfoImage(snapshot); return; }
     if (action === "similar") { openSimilarSearch(snapshot); return; }
-    if (!viewerImageIdRef.current && snapshot) enterViewerHistory(snapshot);
+    if (!viewerImageIdRef.current) {
+      if (!authentication.guest) ensureSelectionHistory();
+      recordViewerHistory(snapshot, null);
+    }
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
@@ -926,24 +972,39 @@ function App() {
     prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
     resetSimilarSearch();
     setViewerDiscoveredImages([]);
+    updateViewerBranch(null);
+    viewerLoadJobRef.current?.controller.abort();
     setViewerReturnRequest(null);
     viewerImageIdRef.current = imageId;
     setViewerImageId(imageId);
-  }, [enterViewerHistory, images, openSimilarSearch, resetSimilarSearch]);
+  }, [recordViewerHistory, images, openSimilarSearch, resetSimilarSearch, updateViewerBranch]);
 
   const closeViewer = useCallback(() => {
     if (!viewerImageIdRef.current || viewerHistoryClosingRef.current) return;
-    if (
-      viewerHistoryActiveRef.current
-      && readViewerHistoryEntry(window.history.state)
-    ) {
+    const entry = readViewerHistoryEntry(window.history.state);
+    if (viewerHistoryActiveRef.current && entry && !entry.detached && entry.depth < window.history.length) {
       viewerHistoryClosingRef.current = true;
       window.history.back();
       return;
     }
-    viewerHistoryActiveRef.current = false;
-    closeViewerState();
-  }, [closeViewerState]);
+    const parent = viewerBranchRef.current?.parent;
+    if (parent) {
+      restoreViewerFromHistory(parent, true);
+      const restored = readViewerHistoryEntry(window.history.state);
+      if (restored) writeHistoryState(viewerHistoryState({ ...restored, detached: true }), window.location.href, true);
+    } else {
+      try { writeHistoryState(galleryHistoryState(), window.location.href, true); } catch { /* History can be unavailable. */ }
+      viewerHistoryActiveRef.current = false;
+      closeViewerState();
+    }
+  }, [closeViewerState, restoreViewerFromHistory]);
+
+  const selectViewerImage = useCallback((image: GalleryImage) => {
+    galleryLayoutRef.current?.select(image);
+  }, []);
+  const selectViewerImages = useCallback((images: GalleryImage[]) => {
+    galleryLayoutRef.current?.selectAll(images);
+  }, []);
 
   useEffect(() => {
     const applyHistoryState = (state: unknown) => {
@@ -955,42 +1016,37 @@ function App() {
       viewerHistoryActiveRef.current = Boolean(entry);
       viewerHistoryClosingRef.current = false;
       if (entry) {
-        if (viewerImageIdRef.current !== entry.image.id) {
-          restoreViewerFromHistory(entry.image);
-        }
+        const parent = viewerBranchRef.current?.parent;
+        restoreViewerFromHistory(entry, Boolean(parent && parent.session === entry.session && parent.depth === entry.depth));
       } else if (viewerImageIdRef.current) {
         closeViewerState();
       }
     };
-    const onPopState = (event: PopStateEvent) => applyHistoryState(event.state);
+    const onPopState = (event: PopStateEvent) => {
+      const selection = selectionStateRef.current;
+      if (!handleSelectionHistory(event, selection.active, selection.clear)) applyHistoryState(event.state);
+    };
     window.addEventListener("popstate", onPopState);
     const currentEntry = readViewerHistoryEntry(window.history.state);
     viewerHistoryActiveRef.current = Boolean(currentEntry);
     if (currentEntry && !viewerImageIdRef.current) {
-      restoreViewerFromHistory(currentEntry.image);
+      restoreViewerFromHistory(currentEntry);
     }
     return () => window.removeEventListener("popstate", onPopState);
   }, [activateLocation, closeViewerState, restoreViewerFromHistory]);
 
   useLayoutEffect(() => {
-    if (!viewerImage || !viewerHistoryActiveRef.current) return;
-    const entry = readViewerHistoryEntry(window.history.state);
-    if (!entry || entry.image.id === viewerImage.id) return;
-    try {
-      window.history.replaceState(
-        viewerHistoryState(viewerImage),
-        "",
-        window.location.href,
-      );
-    } catch {
-      viewerHistoryActiveRef.current = false;
-    }
-  }, [viewerImage]);
-
-  useLayoutEffect(() => {
-    if (viewerImageId || !viewerReturnRequest) return;
+    if (!viewerReturnRequest) return;
     const request = viewerReturnRequest;
+    if (request.parentImageId ? viewerImageId !== request.parentImageId : Boolean(viewerImageId)) return;
+    const scrollRoot = request.parentImageId ? document.querySelector<HTMLElement>(".image-viewer") ?? undefined : undefined;
+    if (request.parentImageId && !scrollRoot) return;
+    const gallerySelector = scrollRoot ? ".viewer-similar-gallery" : ".justified-gallery";
+    const findGallery = () => (scrollRoot ?? document).querySelector<HTMLElement>(gallerySelector);
+    const getScroll = () => scrollRoot?.scrollTop ?? window.scrollY;
+    const setScroll = (top: number) => scrollRoot ? scrollRoot.scrollTo({ top, behavior: "instant" }) : scrollWindowImmediately(top);
     const requestFlight = viewerReturnFlightRef.current;
+    if (scrollRoot && requestFlight) scrollRoot.append(requestFlight.layer);
     let frame = 0;
     let settleTimer = 0;
     let timeoutTimer = 0;
@@ -1005,7 +1061,7 @@ function App() {
     let resizeObserverPrimed = false;
 
     const observeLayout = (card: HTMLElement) => {
-      const gallery = card.closest<HTMLElement>(".justified-gallery");
+      const gallery = card.closest<HTMLElement>(gallerySelector);
       if (resizeObserver && card !== observedCard) {
         if (observedCard) resizeObserver.unobserve(observedCard);
         resizeObserver.observe(card);
@@ -1019,30 +1075,48 @@ function App() {
     };
 
     const alignToCard = (): HTMLElement | null => {
-      const card = imageCardById(request.imageId);
-      if (!card) return null;
+      const card = imageCardById(request.imageId, findGallery());
+      if (!card || card.getBoundingClientRect().height <= 0) return null;
       observeLayout(card);
 
-      const targetScroll = scrollTopForAnchor(card, request);
-      if (Math.abs(targetScroll - window.scrollY) > 0.5) {
-        scrollWindowImmediately(targetScroll);
+      const targetScroll = scrollTopForAnchor(card, request, scrollRoot);
+      if (Math.abs(targetScroll - getScroll()) > 0.5) {
+        setScroll(targetScroll);
       }
       return card;
     };
 
-    const finalize = (card: HTMLElement | null) => {
-      if (finished) return;
-      finished = true;
+    const informationLoading = () => Boolean(scrollRoot?.querySelector('.viewer-photo-information[aria-busy="true"]'));
+    const releaseRequest = () => {
       stopped = true;
-      disposeViewerReturnFlight(requestFlight);
-      if (viewerReturnFlightRef.current === requestFlight) viewerReturnFlightRef.current = null;
-      if (card?.isConnected) card.focus({ preventScroll: true });
-      setViewerReturnRequest((current) => {
+      setViewerReturnRequest(current => {
         if (current?.sequence !== request.sequence) return current;
-        viewerAnchorRef.current = null;
+        if (!request.parentImageId) viewerAnchorRef.current = null;
         return null;
       });
     };
+    const settleReturn = () => {
+      if (!scrollRoot) { releaseRequest(); return; }
+      window.clearTimeout(settleTimer);
+      // Metadata can finish before its final layout is painted. Recheck the
+      // anchor after layout settles instead of releasing it in that same frame.
+      settleTimer = window.setTimeout(() => {
+        if (stopped || !finished || informationLoading()) return;
+        alignToCard();
+        releaseRequest();
+      }, VIEWER_RETURN_SETTLE_MS);
+    };
+    const finalize = (card: HTMLElement | null) => {
+      if (finished) return;
+      finished = true;
+      disposeViewerReturnFlight(requestFlight);
+      if (viewerReturnFlightRef.current === requestFlight) viewerReturnFlightRef.current = null;
+      if (card?.isConnected) card.focus({ preventScroll: true });
+      // Returning after a reload can fetch metadata above the waterfall. Keep
+      // its card anchored through that layout change, until the user takes over.
+      if (!informationLoading()) settleReturn();
+    };
+    const takeOver = () => { if (finished) releaseRequest(); };
 
     const pauseAnimationForLayout = () => {
       const flight = requestFlight;
@@ -1072,8 +1146,9 @@ function App() {
     const complete = () => {
       if (stopped || animating) return;
       const card = alignToCard();
+      if (finished) { if (!informationLoading()) settleReturn(); return; }
       if (!card) {
-        scrollWindowImmediately(scrollTopForAnchor(null, request));
+        setScroll(scrollTopForAnchor(null, request, scrollRoot));
       }
 
       const flight = requestFlight;
@@ -1142,6 +1217,7 @@ function App() {
       frame = window.requestAnimationFrame(() => {
         frame = 0;
         alignToCard();
+        if (finished) { if (!informationLoading()) settleReturn(); return; }
         window.clearTimeout(settleTimer);
         settleTimer = window.setTimeout(complete, VIEWER_RETURN_SETTLE_MS);
       });
@@ -1155,8 +1231,15 @@ function App() {
       schedule();
     });
     const mutationObserver = new MutationObserver(schedule);
-    const gallery = document.querySelector(".justified-gallery");
+    const gallery = findGallery();
     if (gallery) mutationObserver.observe(gallery, { childList: true });
+    if (scrollRoot) {
+      resizeObserver.observe(scrollRoot);
+      const information = scrollRoot.querySelector(".viewer-photo-information");
+      if (information) resizeObserver.observe(information);
+      mutationObserver.observe(scrollRoot, { attributes: true, attributeFilter: ["aria-busy"], subtree: true });
+      for (const event of ["pointerdown", "wheel", "keydown"]) scrollRoot.addEventListener(event, takeOver, true);
+    }
     window.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("resize", schedule);
     schedule();
@@ -1171,65 +1254,110 @@ function App() {
       window.clearTimeout(timeoutTimer);
       resizeObserver?.disconnect();
       mutationObserver.disconnect();
+      for (const event of ["pointerdown", "wheel", "keydown"]) scrollRoot?.removeEventListener(event, takeOver, true);
       window.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);
     };
   }, [viewerImageId, viewerReturnRequest]);
 
   useEffect(() => {
-    if (!viewerImageId || galleryViewerIndex < 0 || nextOffset === null) return;
+    if (!viewerImageId || viewerBranch || galleryViewerIndex < 0 || nextOffset === null) return;
     if (galleryViewerIndex >= images.length - 5) void loadMore();
-  }, [galleryViewerIndex, images.length, loadMore, nextOffset, viewerImageId]);
+  }, [galleryViewerIndex, images.length, loadMore, nextOffset, viewerImageId, viewerBranch]);
+
+  const showViewerImage = useCallback((candidate: GalleryImage, branch: ViewerBranch | null) => {
+    if (viewerHistoryClosingRef.current) return;
+    recordViewerHistory(candidate, branch, true);
+    updateViewerBranch(branch);
+    setViewerDiscoveredImages(current => appendUniqueImages(current, [candidate]));
+    prepareViewerImages([candidate], 0);
+    viewerImageIdRef.current = candidate.id;
+    setViewerImageId(candidate.id);
+    resetSimilarSearch();
+    setViewerReturnRequest(null);
+  }, [recordViewerHistory, resetSimilarSearch, updateViewerBranch]);
 
   const openViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view") => {
     if (action === "details") { setInfoImage(candidate); return; }
     if (action === "similar") { openSimilarSearch(candidate); return; }
-    setViewerDiscoveredImages((current) => appendUniqueImages(current, [candidate]));
-    prepareViewerImages([candidate], 0);
+    if (candidate.id === viewerImageIdRef.current) return;
+    const branch = viewerBranchRef.current;
+    const index = branch?.images.findIndex(image => image === candidate) ?? -1;
+    showViewerImage(candidate, branch && index >= 0 ? { ...branch, index } : null);
+  }, [openSimilarSearch, showViewerImage]);
+
+  const openRelatedViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view", pointerY?: number) => {
+    if (action !== "view") { openViewerImage(candidate, action); return; }
+    if (!viewerImage || candidate.id === viewerImage.id) return;
+    const index = similarPage.images.findIndex(image => image.id === candidate.id);
+    const viewer = document.querySelector<HTMLElement>(".image-viewer");
+    const card = imageCardById(candidate.id, viewer?.querySelector(".viewer-similar-gallery") ?? null);
+    if (index < 0 || !viewer || !card) return;
+    const returnAnchor = { ...captureViewerAnchor(card, pointerY, viewer), imageId: candidate.id };
+    const parent = recordViewerHistory(viewerImage, viewerBranch, true, similarPage, returnAnchor);
+    const branch: ViewerBranch = { ...similarPage, source: viewerImage, index, parent };
+    viewerLoadJobRef.current?.controller.abort();
+    stopMediaPreview();
+    disposeViewerReturnFlight(viewerReturnFlightRef.current);
+    viewerReturnFlightRef.current = null;
+    recordViewerHistory(candidate, branch);
+    updateViewerBranch(branch);
+    prepareViewerImages(branch.images, index);
+    resetSimilarSearch();
+    setViewerReturnRequest(null);
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
-    if (candidate.video) resetSimilarSearch();
-    else searchSimilar(candidate);
-  }, [openSimilarSearch, resetSimilarSearch, searchSimilar]);
+  }, [openViewerImage, recordViewerHistory, resetSimilarSearch, similarPage, updateViewerBranch, viewerBranch, viewerImage]);
 
   const navigateViewer = useCallback((direction: -1 | 1) => {
     const currentImageId = viewerImageIdRef.current;
-    if (!currentImageId) return;
-    const currentIndex = viewerImages.findIndex((image) => image.id === currentImageId);
+    if (!currentImageId || viewerHistoryClosingRef.current) return;
+    const branch = viewerBranchRef.current;
+    const candidates = branch?.images ?? viewerImages;
+    const currentIndex = candidates.findIndex(image => image.id === currentImageId);
     if (currentIndex < 0) return;
-    const target = viewerImages[currentIndex + direction];
+    const target = candidates[currentIndex + direction];
     if (target) {
-      viewerImageIdRef.current = target.id;
-      setViewerImageId(target.id);
+      showViewerImage(target, branch ? { ...branch, index: currentIndex + direction } : null);
       return;
     }
-    if (direction < 0) return;
-
-    const startingId = currentImageId;
-    const pending = similarPage.source?.id === currentImageId
-      && similarPage.nextOffset !== null
-      ? loadMoreSimilar()
-      : nextOffset !== null && images.some((candidate) => candidate.id === currentImageId)
-        ? loadMore()
-        : Promise.resolve([]);
-    void pending.then((incoming) => {
+    if (direction < 0 || !viewerCanLoadMore) return;
+    const startingBranch = branch;
+    void loadMoreViewer().then(incoming => {
       const next = incoming[0];
-      if (!next || viewerImageIdRef.current !== startingId) return;
-      viewerImageIdRef.current = next.id;
-      setViewerImageId(next.id);
+      if (!next || viewerImageIdRef.current !== currentImageId) return;
+      const branch = viewerBranchRef.current;
+      if (startingBranch && (!branch || branch.source !== startingBranch.source || branch.index !== startingBranch.index)) return;
+      showViewerImage(next, branch ? { ...branch, index: branch.images.indexOf(next) } : null);
     });
-  }, [images, loadMore, loadMoreSimilar, nextOffset, similarPage, viewerImages]);
+  }, [loadMoreViewer, showViewerImage, viewerCanLoadMore, viewerImages]);
 
   const navigateTo = (section: GallerySection, path = "", replace = false) => {
     const href = galleryHref(section, path);
     if (href !== window.location.pathname + window.location.search) {
-      window.history[replace ? "replaceState" : "pushState"](null, "", href);
+      writeHistoryState(null, href, replace);
     }
     viewerHistoryActiveRef.current = false;
     viewerHistoryClosingRef.current = false;
     activateLocation({ section, path: section === "storage" ? path || "/" : section === "library" ? "" : path });
   };
   const chooseAlbum = (path: string) => navigateTo("albums", path);
+  const openLocal = (path: string) => navigateTo("local", path);
+  const viewAlbumCover = async (id: string) => {
+    const origin = locationRef.current;
+    try {
+      const image = await getGalleryImage(id);
+      if (locationRef.current === origin) {
+        viewerAnchorRef.current = null;
+        openViewerImage(image);
+      }
+    } catch (reason) { manager.notify(errorMessage(reason, "无法读取封面"), true); }
+  };
+  const viewLocalImage = (id: string) => {
+    const image = localMedia?.images.find(image => image.id === id);
+    if (image) { viewerAnchorRef.current = null; openViewerImage(image); }
+    else void viewAlbumCover(id);
+  };
   const changeSearch = (value: string) => {
     setSearch(value);
     setExploreSeed("");
@@ -1240,7 +1368,8 @@ function App() {
     setReloadToken((value) => value + 1);
   };
   const startExploring = () => {
-    if (browsingAlbums || browsingStorage || browsingSimilar) navigateTo("library");
+    if (section !== "library" && !album && !browsingFavorites) navigateTo("library");
+    setSearch("");
     setSearchOpen(false);
     setMobileNavOpen(false);
     setViewerImageId(null);
@@ -1253,7 +1382,7 @@ function App() {
     }
   }, [album, summary]);
 
-  const pageLoading = browsingSimilar ? imageSimilarity.loading : browsingStorage ? false : browsingAlbums ? !summary : loading;
+  const pageLoading = browsingSimilar ? imageSimilarity.loading : (browsingLocal || browsingStorage || browsingTrash) ? false : browsingAlbums ? !summary : loading;
   return (
     <div
       className="app-shell"
@@ -1268,14 +1397,16 @@ function App() {
         search={search}
         searchOpen={searchOpen}
         onSearchOpenChange={setSearchOpen}
-        searchMode={textSearchMode}
+        searchMode={browsingFavorites || browsingTrash ? "filename" : textSearchMode}
         albumSearch={browsingAlbums}
         storageSearch={browsingStorage}
+        localSearch={browsingLocal}
         similarSearch={browsingSimilar}
         onSearchChange={changeSearch}
         onExplore={startExploring}
         exploreActive={Boolean(exploreSeed)}
         exploreLoading={Boolean(exploreSeed) && loading}
+        exploreScope={selectedAlbum?.name ?? (browsingFavorites ? "收藏" : undefined)}
         onHome={goHome}
         onToggleNavigation={() => {
           if (compactLayout) {
@@ -1312,7 +1443,7 @@ function App() {
       />
 
       <main className="content" aria-busy={pageLoading || pageLoadingMore}>
-        {!browsingStorage && status?.videos && <div className="background-video-tasks" aria-label="视频准备任务">
+        {!browsingLocal && !browsingStorage && !browsingTrash && status?.videos && <div className="background-video-tasks" aria-label="视频准备任务">
           {(["playback", "preview"] as const).map(kind => {
             const job = status.videos![kind];
             if (!job.total || (job.backgroundComplete && !job.failed)) return null;
@@ -1324,7 +1455,7 @@ function App() {
             </div>;
           })}
         </div>}
-        {error && !browsingStorage && !browsingSimilar && (
+        {error && !browsingLocal && !browsingStorage && !browsingSimilar && (
           <div className="error-banner" role="alert">
             <span>{error}</span>
             <button
@@ -1338,7 +1469,7 @@ function App() {
           </div>
         )}
 
-        {browsingSimilar ? (
+        {(browsingFavorites || browsingTrash || browsingLocal) && authentication.guest ? <div className="empty-state"><strong>图库管理仅限管理员访问</strong><a href="/login">管理员登录</a></div> : browsingLocal ? <LocalStorageView path={path} search={search} albums={summary?.albums ?? []} onOpen={openLocal} onAlbum={chooseAlbum} onImage={viewLocalImage} onMediaChange={setLocalMedia} /> : browsingTrash ? <TrashView search={search} /> : browsingSimilar ? (
           <SimilarSearchView
             source={querySource}
             results={imageSimilarity}
@@ -1347,6 +1478,8 @@ function App() {
             onClear={() => { setUploadedQuery(null); setGalleryQuerySnapshot(null); navigateTo("similar"); }}
             onOpen={openViewer}
             layoutRef={galleryLayoutRef}
+            toolbarTarget={selectionToolbar}
+            onSelectionChange={setSelectedIds}
             preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
           />
         ) : browsingStorage ? (
@@ -1360,26 +1493,31 @@ function App() {
             onConfigure={() => setSettingsSection("storage")}
           />
         ) : browsingAlbums ? (
-          <AlbumsView albums={summary?.albums} search={search} onOpen={chooseAlbum} />
+          <AlbumsView albums={summary?.albums} search={search} onOpen={chooseAlbum} onStorage={openLocal} onCover={id => void viewAlbumCover(id)} selection={albumSelection.selection} />
         ) : (
           <>
-            {selectedAlbum && <AlbumHeading album={selectedAlbum} onOpen={chooseAlbum} />}
-            {selectedAlbum && <AlbumChildren albums={summary?.albums} path={selectedAlbum.path} onOpen={chooseAlbum} />}
+            {selectedAlbum && <AlbumBackLink onOpen={chooseAlbum} />}
+            {browsingFavorites && <header className="management-page-heading"><h1><Heart size={23} />收藏</h1><span>{visibleAlbums.length ? `${visibleAlbums.length} 个相册 · ${total} 个文件` : `${total} 项`}</span></header>}
+            {browsingFavorites && visibleAlbums.length > 0 && <section className="favorite-albums" aria-label="收藏的相册"><h2>相册</h2><AlbumGrid albums={visibleAlbums} onOpen={chooseAlbum} onStorage={openLocal} onCover={id => void viewAlbumCover(id)} selection={albumSelection.selection} /></section>}
             {loading ? (
               <GallerySkeleton />
             ) : images.length ? (
-              <JustifiedGallery
+              <SelectableGallery
+                key={`${section}:${path}:${debouncedSearch}:${exploreSeed}`}
                 ref={galleryLayoutRef}
+                toolbarTarget={selectionToolbar}
+                onSelectionChange={setSelectedIds}
+                onSelectionStart={albumSelection.clear}
                 images={images}
                 preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
                 onOpen={openViewer}
               />
-            ) : (
+            ) : browsingFavorites && visibleAlbums.length > 0 ? null : (
               <div className="empty-state">
                 <ImageIcon size={30} strokeWidth={1.6} />
-                <strong>{selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
+                <strong>{browsingFavorites ? debouncedSearch ? "没有匹配的收藏" : "暂无收藏" : selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
                 <span>
-                  {summary?.total === 0 || selectedAlbum?.count === 0
+                  {browsingFavorites ? "选中图片、视频或相册，点击收藏即可添加" : summary?.total === 0 || selectedAlbum?.count === 0
                     ? "添加图片或视频后将自动显示"
                     : textSearchReady && debouncedSearch
                       ? "换一种自然语言描述，或减少限定词"
@@ -1397,6 +1535,8 @@ function App() {
           </>
         )}
       </main>
+      <div className="bottom-selection" ref={setSelectionToolbar} />
+      {albumSelection.controls(selectionToolbar)}
       {settingsSection && !authentication.guest && (
         <SettingsDialog
           initialSection={settingsSection}
@@ -1407,15 +1547,20 @@ function App() {
           }}
         />
       )}
-      {!browsingAlbums && !browsingStorage && viewerIndex >= 0 && (
+      {!browsingStorage && !browsingTrash && viewerIndex >= 0 && (
         <ImageViewer
           images={viewerImages}
           activeIndex={viewerIndex}
           hasMore={viewerCanLoadMore}
-          loadingMore={pageLoadingMore || similarLoadingMore}
+          loadingMore={pageLoadingMore || viewerLoadingMore}
           onNavigate={navigateViewer}
-          onLoadMoreImages={galleryViewerIndex >= 0 ? loadMore : loadMoreSimilar}
+          onLoadMoreImages={loadMoreViewer}
           onClose={closeViewer}
+          onSelectImage={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImage}
+          selectedIds={selectedIds}
+          onSelectImages={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImages}
+          onClearSelection={clearSelection}
+          selectionDisabled={manager.busy}
           similarActive={similarActive}
           similarImages={similarActive ? similarPage.images : []}
           similarTotal={similarActive ? similarPage.total : 0}
@@ -1428,6 +1573,7 @@ function App() {
           similarFrameTime={similarActive ? similarPage.frame?.time : undefined}
           onLoadMoreSimilar={loadMoreSimilar}
           onOpenImage={openViewerImage}
+          onOpenSimilarImage={openRelatedViewerImage}
         />
       )}
       {infoImage && <PhotoInformationDialog image={infoImage} onClose={() => setInfoImage(null)} />}

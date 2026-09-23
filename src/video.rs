@@ -218,7 +218,9 @@ pub(crate) fn run_cancellable(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("cannot start {program}; install FFmpeg (ffmpeg and ffprobe)"))?;
+        .with_context(|| {
+            format!("cannot start {program}; make sure it is installed and available on PATH")
+        })?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let read = |source: Box<dyn Read + Send>, cap: usize| {

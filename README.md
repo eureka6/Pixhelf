@@ -16,7 +16,7 @@ services:
     ports:
       - "3002:3002"
     volumes:
-      - "./pic:/data/pic:ro"
+      - "./pic:/data/pic"
       - pixhelf-data:/data/.pixhelf-data
 
 volumes:
@@ -36,7 +36,7 @@ docker compose up -d
 
 - **图片与相册**：按文件夹浏览，点击查看大图；右键或长按可查看信息、查找相似图片或下载原图。
 - **视频**：支持常见视频格式、悬停预览、选集、倍速与全屏播放。首次播放需等待后台准备，原文件保持不变。
-- **实况照片**：支持 JPEG、PNG、WebP 与同名 MOV／MP4／M4V 配对，以及 Google／Samsung 二合一 JPG。桌面悬停播放，手机轻点预览、再次轻点打开。HEIC／HEIF 照片需先转为 JPEG。
+- **实况照片**：支持 JPEG、PNG、WebP、HEIC／HEIF 与同目录同名 MOV／MP4／M4V 配对，以及 Google／Samsung 二合一 JPG。配对视频不再单独显示；动态片段直接播放原文件，无需后台转码。HEIC／HEIF 自动生成兼容预览，下载仍保留原图。桌面悬停播放，手机轻点预览、再次轻点打开。
 - **搜索**：支持文件名、中文描述和以图搜图；侧栏“相似图片”可上传不超过 20 MB 的 JPG、PNG、WebP。
 - **账号与访客**：设置中可修改账号密码，或开启默认关闭的“免登录浏览”，允许访客浏览、搜索和下载。
 - **外部存储**：在设置中连接 OpenList，即可浏览、预览和下载远程文件。
@@ -78,7 +78,7 @@ volumes:
 
 ## 源码运行
 
-需要 Rust stable、Node.js 22+、npm 和 FFmpeg（`ffmpeg`、`ffprobe`，含 H.264 / AAC 编码支持）。首次构建需联网下载播放器资源。
+需要 Rust stable、Node.js 22+、npm 和 FFmpeg（`ffmpeg`、`ffprobe`，含 H.264 / AAC 编码支持）。HEIC／HEIF 还需要 libheif 工具（`heif-info`、`heif-dec` 或旧版 `heif-convert`；Debian／Ubuntu 安装 `libheif-examples`，Alpine 安装 `libheif-tools`），Docker 镜像已包含。首次构建需联网下载播放器资源。
 
 ```bash
 npm --prefix frontend ci

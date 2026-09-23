@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { ImageIcon, LoaderCircle } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
+import { SelectionMenu, type MenuPoint, type SelectionActions } from "./SelectionMenu";
 import { MediaPreview } from "./MediaPreview";
 import { VideoBadge } from "./VideoBadge";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
@@ -16,10 +17,16 @@ const SimilarImageCard = memo(function SimilarImageCard({
   image,
   layoutStyle,
   onOpen,
+  onSelect,
+  selectedIds,
+  selectionActions,
 }: {
   image: GalleryImage;
   layoutStyle: CSSProperties;
-  onOpen: (image: GalleryImage, action?: ImageCardAction) => void;
+  onOpen: (image: GalleryImage, action?: ImageCardAction, pointerY?: number) => void;
+  onSelect?: (image: GalleryImage) => void;
+  selectedIds?: ReadonlySet<string>;
+  selectionActions?: SelectionActions;
 }) {
   const imageRef = useRef<HTMLImageElement>(null);
   const [loaded, setLoaded] = useState(false);
@@ -43,7 +50,7 @@ const SimilarImageCard = memo(function SimilarImageCard({
       role="group"
       tabIndex={-1}
       aria-label={image.name}
-      onClick={() => onOpen(image)}
+      onClick={event => onOpen(image, "view", event.detail > 0 ? event.clientY : undefined)}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -73,7 +80,7 @@ const SimilarImageCard = memo(function SimilarImageCard({
       {loaded && (image.motion || image.video) && <MediaPreview image={image} />}
       {image.video && <VideoBadge video={image.video} />}
       <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放相似视频" : "查看相似图片"} ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
-      <ImageCardActions image={image} onAction={handleAction} />
+      <ImageCardActions image={image} selected={selectedIds?.has(image.id)} onAction={handleAction} onSelect={onSelect ? () => onSelect(image) : undefined} selectionDisabled={selectionActions?.disabled} selectionActions={selectionActions} />
     </figure>
   );
 });
@@ -87,6 +94,11 @@ export function SimilarImageGallery({
   error,
   onLoadMore,
   onOpen,
+  onSelect,
+  selectedIds,
+  onSelectAll,
+  onClearSelection,
+  selectionDisabled = false,
 }: {
   images: GalleryImage[];
   total: number;
@@ -95,8 +107,18 @@ export function SimilarImageGallery({
   loadingMore: boolean;
   error: string | null;
   onLoadMore: () => void;
-  onOpen: (image: GalleryImage, action?: ImageCardAction) => void;
+  onOpen: (image: GalleryImage, action?: ImageCardAction, pointerY?: number) => void;
+  onSelect?: (image: GalleryImage) => void;
+  selectedIds?: ReadonlySet<string>;
+  onSelectAll?: (images: GalleryImage[]) => void;
+  onClearSelection?: () => void;
+  selectionDisabled?: boolean;
 }) {
+  const [menu, setMenu] = useState<MenuPoint | null>(null);
+  const selectionActions: SelectionActions | undefined = onSelectAll && onClearSelection ? {
+    active: Boolean(selectedIds?.size), disabled: selectionDisabled,
+    selectAll: () => onSelectAll(images), clear: onClearSelection,
+  } : undefined;
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<HTMLDivElement>(null);
   useCardInteraction(galleryRef);
@@ -127,6 +149,11 @@ export function SimilarImageGallery({
         data-layout="justified"
         data-layout-width={metrics.width}
         data-rows={layout.rowCount}
+        onContextMenu={event => {
+          if (!selectionActions || event.defaultPrevented || (event.target instanceof Element && event.target.closest(".viewer-similar-card, .selection-menu"))) return;
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
         style={{ height: layout.height } as CSSProperties}
       >
         {layout.items.map(({ image, style }) => (
@@ -135,8 +162,12 @@ export function SimilarImageGallery({
             image={image}
             layoutStyle={style}
             onOpen={onOpen}
+            onSelect={onSelect}
+            selectedIds={selectedIds}
+            selectionActions={selectionActions}
           />
         ))}
+        {selectionActions && menu && <SelectionMenu actions={selectionActions} point={menu} onClose={() => setMenu(null)} />}
       </div>
       {error && (
         <div className="viewer-similar-inline-error" role="alert">

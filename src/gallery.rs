@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,10 +35,6 @@ pub struct ImageRecord {
 impl ImageRecord {
     pub(crate) fn belongs_to_album(&self, album: &str) -> bool {
         self.album == album
-            || self
-                .album
-                .strip_prefix(album)
-                .is_some_and(|rest| rest.starts_with('/'))
     }
 
     pub(crate) fn matches_metadata(&self, metadata: &fs::Metadata) -> bool {
@@ -91,6 +87,7 @@ pub struct Album {
 
 #[derive(Default)]
 pub struct GalleryIndex {
+    pub root: PathBuf,
     pub images: Vec<Arc<ImageRecord>>,
     pub albums: Vec<Album>,
     pub revision: String,
@@ -98,11 +95,54 @@ pub struct GalleryIndex {
 }
 
 impl GalleryIndex {
+    pub(crate) fn shared_view(&self, private: &BTreeSet<String>) -> Self {
+        let images: Vec<_> = self
+            .images
+            .iter()
+            .filter(|image| !private.contains(&image.album))
+            .cloned()
+            .collect();
+        let albums: Vec<_> = self
+            .albums
+            .iter()
+            .filter(|album| !private.contains(&album.path))
+            .cloned()
+            .collect();
+        let mut images_by_id = images.clone();
+        images_by_id.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        let mut revision = blake3::Hasher::new();
+        revision.update(b"shared-gallery-v1\0");
+        revision.update(self.revision.as_bytes());
+        for path in private {
+            revision.update(path.as_bytes());
+            revision.update(b"\0");
+        }
+        Self {
+            root: self.root.clone(),
+            images,
+            albums,
+            images_by_id,
+            revision: revision.finalize().to_hex().to_string(),
+        }
+    }
+
     pub fn image(&self, id: &str) -> Option<&Arc<ImageRecord>> {
         self.images_by_id
             .binary_search_by(|image| image.id.as_str().cmp(id))
             .ok()
             .map(|index| &self.images_by_id[index])
+    }
+
+    pub(crate) fn image_by_path(&self, path: &str) -> Option<&Arc<ImageRecord>> {
+        let start = self.images.partition_point(|image| {
+            natord::compare_ignore_case(&image.relative_path, path).is_lt()
+        });
+        // Natural ordering can tie for distinct filenames. Keep the exact path
+        // check so case-sensitive filesystems never open a neighboring file.
+        self.images[start..]
+            .iter()
+            .take_while(|image| natord::compare_ignore_case(&image.relative_path, path).is_eq())
+            .find(|image| image.relative_path == path)
     }
 }
 
@@ -117,10 +157,12 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     let mut albums = BTreeMap::<String, Album>::new();
     let mut videos = HashMap::<(PathBuf, String), Vec<PathBuf>>::new();
     let mut video_paths = Vec::new();
+    let mut photo_keys = HashSet::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter()
+        .filter_entry(|entry| entry.depth() != 1 || entry.file_name() != ".pixhelf-trash")
     {
         let entry = match entry {
             Ok(entry) => entry,
@@ -160,6 +202,9 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         }
         if !is_supported_image(entry.path()) {
             continue;
+        }
+        if let Some(key) = motion::pairing_key(entry.path()) {
+            photo_keys.insert(key);
         }
 
         let path = entry.into_path();
@@ -261,13 +306,12 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         }
     }
 
-    let paired_paths: HashSet<_> = images
-        .iter()
-        .filter_map(|image| image.motion.as_ref().filter(|source| source.offset == 0))
-        .map(|source| source.path.clone())
-        .collect();
     for path in video_paths {
-        if paired_paths.contains(&path) {
+        // A same-directory, same-name motion companion belongs to its photo,
+        // including while the photo is incomplete or another clip is preferred.
+        if motion::is_video_path(&path)
+            && motion::pairing_key(&path).is_some_and(|key| photo_keys.contains(&key))
+        {
             continue;
         }
         let relative = path.strip_prefix(root)?;
@@ -326,21 +370,22 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         natord::compare_ignore_case(&left.relative_path, &right.relative_path)
     });
     for image in &images {
-        let mut path = image.album.as_str();
-        while !path.is_empty() {
-            if let Some(album) = albums.get_mut(path) {
-                album.count += 1;
-                album.cover.get_or_insert_with(|| image.id.clone());
-            }
-            path = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        if let Some(album) = albums.get_mut(&image.album) {
+            album.count += 1;
+            album.cover.get_or_insert_with(|| image.id.clone());
         }
     }
-    let mut albums = albums.into_values().collect::<Vec<_>>();
+    // Directories without media belong in local storage, not the flat album catalog.
+    let mut albums = albums
+        .into_values()
+        .filter(|album| album.count > 0)
+        .collect::<Vec<_>>();
     albums.sort_by(|left, right| natord::compare_ignore_case(&left.path, &right.path));
     let revision = index_revision(&images, &albums);
     let mut images_by_id = images.clone();
     images_by_id.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     Ok(GalleryIndex {
+        root: root.to_path_buf(),
         images,
         albums,
         revision,
@@ -350,7 +395,8 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
 
 fn index_revision(images: &[Arc<ImageRecord>], albums: &[Album]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pixhelf-index-v7\0");
+    // The flat album catalog excludes empty and container-only directories.
+    hasher.update(b"pixhelf-index-v9\0");
     for image in images {
         hasher.update(image.id.as_bytes());
         hasher.update(b"\0");
@@ -367,6 +413,9 @@ fn index_revision(images: &[Arc<ImageRecord>], albums: &[Album]) -> String {
 }
 
 fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
+    if crate::heif::is_image(path) {
+        return crate::heif::dimensions(path);
+    }
     let reader = ImageReader::open(path)?.with_guessed_format()?;
     let mut decoder = reader.into_decoder()?;
     let (width, height) = decoder.dimensions();
@@ -390,7 +439,7 @@ fn is_supported_image(path: &Path) -> bool {
         .map(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "jpg" | "jpeg" | "png" | "webp"
+                "jpg" | "jpeg" | "png" | "webp" | "heic" | "heif"
             )
         })
         .unwrap_or(false)
@@ -415,6 +464,91 @@ fn path_to_url(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_lookup_preserves_exact_names_and_shared_visibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let names = [
+            "Photo-2.png",
+            "photo-2.png",
+            "photo-02.png",
+            "photo-10.png",
+            "照片.png",
+            "private/inside.png",
+        ];
+        fs::create_dir(directory.path().join("private")).unwrap();
+        for name in names {
+            image::RgbImage::new(4, 3)
+                .save(directory.path().join(name))
+                .unwrap();
+        }
+        let index = scan_gallery(directory.path(), None).unwrap();
+        for name in names {
+            assert_eq!(index.image_by_path(name).unwrap().relative_path, name);
+        }
+        for missing in [
+            "",
+            "PHOTO-2.png",
+            "photo-0002.png",
+            "photo-3.png",
+            "zzzz.png",
+        ] {
+            assert!(index.image_by_path(missing).is_none(), "{missing}");
+        }
+        let shared = index.shared_view(&BTreeSet::from(["private".into()]));
+        assert!(shared.image_by_path("private/inside.png").is_none());
+        assert!(shared.image_by_path("photo-2.png").is_some());
+    }
+
+    #[test]
+    fn heif_live_photos_keep_all_same_name_companions_out_of_video_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let photo = temp.path().join("IMG_0011.HEIC");
+        fs::write(
+            &photo,
+            include_bytes!("../frontend/scripts/fixtures/live-photo.heic"),
+        )
+        .unwrap();
+        for name in ["img_0011.mov", "IMG_0011.mp4"] {
+            fs::write(
+                temp.path().join(name),
+                include_bytes!("../frontend/scripts/fixtures/live-photo.mp4"),
+            )
+            .unwrap();
+        }
+        let index = scan_gallery(temp.path(), None).unwrap();
+        assert_eq!(index.images.len(), 1);
+        let record = &index.images[0];
+        assert_eq!(record.name, "IMG_0011.HEIC");
+        assert_eq!((record.width, record.height), (120, 90));
+        assert!(record.motion.is_some());
+        assert!(record.video.is_none());
+        let stable = scan_gallery(temp.path(), Some(&index)).unwrap();
+        assert!(Arc::ptr_eq(record, &stable.images[0]));
+
+        fs::create_dir(temp.path().join("other")).unwrap();
+        fs::copy(
+            temp.path().join("img_0011.mov"),
+            temp.path().join("other/IMG_0011.mov"),
+        )
+        .unwrap();
+        let other = scan_gallery(temp.path(), Some(&stable)).unwrap();
+        assert_eq!(other.images.len(), 2);
+        assert_eq!(
+            other
+                .images
+                .iter()
+                .filter(|image| image.video.is_some())
+                .count(),
+            1
+        );
+
+        // A partially copied still must not briefly publish its MOV as a movie.
+        fs::write(photo, b"incomplete HEIF").unwrap();
+        let incomplete = scan_gallery(temp.path(), None).unwrap();
+        assert_eq!(incomplete.images.len(), 1);
+        assert_eq!(incomplete.images[0].album, "other");
+    }
 
     #[test]
     fn standalone_videos_join_the_gallery_and_reuse_unchanged_metadata() {
@@ -499,9 +633,16 @@ mod tests {
     }
 
     #[test]
-    fn albums_include_empty_directories_and_count_descendants_without_sibling_prefixes() {
+    fn albums_are_flat_and_include_only_direct_media_contents() {
         let temp = tempfile::tempdir().unwrap();
-        for path in ["旅行/海边", "旅行集", "empty", "album10", "album2"] {
+        for path in [
+            "旅行/海边",
+            "旅行集",
+            "parent/child",
+            "empty",
+            "album10",
+            "album2",
+        ] {
             fs::create_dir_all(temp.path().join(path)).unwrap();
         }
         for path in [
@@ -509,18 +650,30 @@ mod tests {
             "旅行/direct.png",
             "旅行/海边/child.png",
             "旅行集/other.png",
+            "parent/child/photo.png",
+            "album2/photo.png",
+            "album10/photo.png",
         ] {
             image::RgbImage::new(20, 10)
                 .save(temp.path().join(path))
                 .unwrap();
         }
         let index = scan_gallery(temp.path(), None).unwrap();
-        assert_eq!(index.images.len(), 4);
+        fs::write(temp.path().join("empty/notes.txt"), b"not media").unwrap();
+        let index = scan_gallery(temp.path(), Some(&index)).unwrap();
+        assert_eq!(index.images.len(), 7);
         assert_eq!(index.albums.len(), 6);
         assert_eq!(index.albums[0].path, "album2");
         assert_eq!(index.albums[1].path, "album10");
         assert!(index.albums.iter().all(|album| !album.path.is_empty()));
-        for (path, count) in [("旅行", 2), ("旅行/海边", 1), ("旅行集", 1), ("empty", 0)] {
+        for (path, count) in [
+            ("旅行", 1),
+            ("旅行/海边", 1),
+            ("旅行集", 1),
+            ("parent/child", 1),
+            ("album2", 1),
+            ("album10", 1),
+        ] {
             let album = index
                 .albums
                 .iter()
@@ -546,10 +699,16 @@ mod tests {
                 );
             }
         }
+        assert!(
+            !index
+                .albums
+                .iter()
+                .any(|album| ["parent", "empty"].contains(&album.path.as_str()))
+        );
     }
 
     #[test]
-    fn empty_directory_changes_update_the_gallery_revision() {
+    fn empty_directories_do_not_change_the_album_catalog_or_revision() {
         let temp = tempfile::tempdir().unwrap();
         image::RgbImage::new(20, 10)
             .save(temp.path().join("root.png"))
@@ -557,7 +716,8 @@ mod tests {
         let first = scan_gallery(temp.path(), None).unwrap();
         fs::create_dir(temp.path().join("new-album")).unwrap();
         let added = scan_gallery(temp.path(), Some(&first)).unwrap();
-        assert_ne!(added.revision, first.revision);
+        assert_eq!(added.revision, first.revision);
+        assert!(added.albums.is_empty());
         assert_eq!(added.images[0].id, first.images[0].id);
         fs::remove_dir(temp.path().join("new-album")).unwrap();
         let removed = scan_gallery(temp.path(), Some(&added)).unwrap();

@@ -2,7 +2,9 @@ mod assets;
 mod auth;
 mod config;
 mod gallery;
+mod heif;
 mod logging;
+mod management;
 mod motion;
 mod photo_details;
 mod similarity;
@@ -213,9 +215,15 @@ async fn rescan_gallery(state: AppState, config: Config) {
         }
 
         let new_count = updated.images.len();
+        let mut current = state.index.write().await;
+        // A management operation may have replaced the index during this scan.
+        if !Arc::ptr_eq(&previous, &current) {
+            continue;
+        }
         state.thumbnails.reconcile(&updated.images);
         state.thumbnails.start_similarity_warmup();
-        *state.index.write().await = Arc::new(updated);
+        *current = Arc::new(updated);
+        drop(current);
         state.thumbnails.cleanup_stale().await;
         info!(previous = old_count, images = new_count, "图库已更新");
     }

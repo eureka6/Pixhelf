@@ -2,19 +2,14 @@ import type { CSSProperties, JSX } from "preact";
 import { createPortal } from "preact/compat";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
-  ChevronLeft,
-  ChevronRight,
   ChevronUp,
-  Download,
-  LoaderCircle,
-  Maximize2,
-  Minimize2,
   RefreshCw,
   ScanSearch,
   X,
 } from "./icons";
 import { PhotoInformation } from "./PhotoInformation";
 import { VideoViewer } from "./VideoViewer";
+import { ViewerNavigationButton } from "./ViewerNavigationButton";
 import type { VideoFrame } from "./videoFrame";
 import { ImageCardActions } from "./ImageCardActions";
 import { MEDIA_PREVIEW_PLAY_EVENT, MediaPreview } from "./MediaPreview";
@@ -81,6 +76,7 @@ type GestureStart = {
   scrollTop: number;
   startedAt: number;
   pointerType: string;
+  navigation?: HTMLButtonElement;
 };
 
 type GestureMode = "pan" | "navigate" | "page" | "dismiss" | "pinch";
@@ -129,7 +125,7 @@ type GestureGeometry = {
 };
 
 type GestureHandlers = {
-  begin: (id: number, point: PointerPoint, pointerType: string) => void;
+  begin: (id: number, point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => void;
   move: (id: number, point: PointerPoint) => void;
   finish: (id: number, point: PointerPoint, pointerType: string) => void;
   cancel: () => void;
@@ -148,6 +144,12 @@ export type ImageViewerProps = {
   onNavigate: (direction: -1 | 1) => void;
   onLoadMoreImages: () => Promise<GalleryImage[]>;
   onClose: () => void;
+  onSelectImage?: (image: GalleryImage) => void;
+  onSelectImages?: (images: GalleryImage[]) => void;
+  onClearSelection?: () => void;
+  selectedIds?: ReadonlySet<string>;
+  selectionDisabled?: boolean;
+  onOpenSimilarImage?: (image: GalleryImage, action?: ImageCardAction, pointerY?: number) => void;
   similarActive: boolean;
   similarImages: GalleryImage[];
   similarTotal: number;
@@ -173,6 +175,12 @@ function PhotoViewer({
   loadingMore,
   onNavigate,
   onClose,
+  onSelectImage,
+  onSelectImages,
+  onClearSelection,
+  selectedIds,
+  selectionDisabled,
+  onOpenSimilarImage,
   similarActive,
   similarImages,
   similarTotal,
@@ -219,7 +227,7 @@ function PhotoViewer({
   const gestureAxisRef = useRef<"x" | "y" | null>(null);
   const gestureModeRef = useRef<GestureMode | null>(null);
   const pinchedRef = useRef(false);
-  const lastTapRef = useRef<{ at: number; point: PointerPoint } | null>(null);
+  const lastTapRef = useRef<{ at: number; point: PointerPoint; pointerType: string } | null>(null);
   const lastTouchAtRef = useRef(0);
   const gestureHandlersRef = useRef<GestureHandlers | null>(null);
   const retryTimerRef = useRef(0);
@@ -241,6 +249,7 @@ function PhotoViewer({
   const swipeCleanupTimerRef = useRef(0);
   const swipeOutgoingRef = useRef<HTMLElement | null>(null);
   const preparedSwipeSnapshotRef = useRef<PreparedSwipeSnapshot | null>(null);
+  const [contactActive, setContactActive] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [scrollPage, setScrollPage] = useState<ViewerPage>("image");
   const [detailsToolbarInRange, setDetailsToolbarInRange] = useState(false);
@@ -577,13 +586,37 @@ function PhotoViewer({
   const parkViewerControlFocus = () => {
     const viewer = dialogRef.current;
     const active = document.activeElement;
-    if (
-      viewer
-      && active instanceof HTMLElement
-      && active !== viewer
-      && viewer.contains(active)
-    ) {
+    if (viewer && (active === document.body || (active instanceof HTMLElement && viewer.contains(active)))) {
       viewer.focus({ preventScroll: true });
+    }
+  };
+
+  const clearControlPresses = () => {
+    dialogRef.current?.querySelectorAll<HTMLElement>(".viewer-close[data-pressed], .viewer-nav[data-pressed]")
+      .forEach(control => { delete control.dataset.pressed; });
+  };
+
+  const resetGesture = () => {
+    const capturedPointers = Array.from(pointersRef.current.keys());
+    pointersRef.current.clear();
+    gestureStartRef.current = null;
+    pinchStartRef.current = null;
+    gestureGeometryRef.current = null;
+    gestureAxisRef.current = null;
+    gestureModeRef.current = null;
+    pinchedRef.current = false;
+    lastTapRef.current = null;
+    setContactActive(false);
+    setDragging(false);
+    clearControlPresses();
+    // Clear tracked contacts first: releasing capture also emits lostpointercapture.
+    const surface = gestureSurfaceRef.current;
+    for (const id of capturedPointers) {
+      try {
+        if (surface?.hasPointerCapture(id)) surface.releasePointerCapture(id);
+      } catch {
+        // The browser may have already cancelled this contact.
+      }
     }
   };
 
@@ -699,15 +732,7 @@ function PhotoViewer({
     window.clearTimeout(retryTimerRef.current);
     window.clearTimeout(sourceUpgradeTimerRef.current);
     sourceUpgradeTimerRef.current = 0;
-    pointersRef.current.clear();
-    gestureStartRef.current = null;
-    pinchStartRef.current = null;
-    gestureGeometryRef.current = null;
-    gestureAxisRef.current = null;
-    gestureModeRef.current = null;
-    pinchedRef.current = false;
-    lastTapRef.current = null;
-    setDragging(false);
+    resetGesture();
     commitTransform(DEFAULT_TRANSFORM);
     wheelZoomBlockedUntilRef.current = 0;
     setThumbnailState({
@@ -803,7 +828,7 @@ function PhotoViewer({
       window.removeEventListener("resize", schedule);
       visualViewport?.removeEventListener("resize", schedule);
     };
-  }, [dragging, viewport.width, viewport.height]);
+  }, [contactActive, viewport.width, viewport.height]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -857,7 +882,7 @@ function PhotoViewer({
       }
       setDetailsToolbarVisible(true);
       idleTimer = window.setTimeout(() => {
-        if (!hovered && !toolbar.querySelector(":focus-visible")) {
+        if (!hovered && !toolbar.matches(":focus-visible")) {
           setDetailsToolbarVisible(false);
         }
       }, DETAILS_TOOLBAR_IDLE_MS);
@@ -1352,10 +1377,12 @@ function PhotoViewer({
     viewportRender.width,
   ]);
 
-  const beginContact = (id: number, point: PointerPoint, pointerType: string) => {
+  const beginContact = (id: number, point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => {
+    if (pointersRef.current.has(id)) return;
     if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
     if (pointerType !== "mouse" && pointersRef.current.size === 0) clearSwipeMotion();
     if (pointersRef.current.size === 0) {
+      setContactActive(true);
       const viewer = dialogRef.current;
       if (viewer && pointerType !== "touch") forceViewerScroll(viewer.scrollTop);
       const surface = surfaceRef.current;
@@ -1374,7 +1401,6 @@ function PhotoViewer({
       }
     }
     pointersRef.current.set(id, point);
-    setDragging(true);
 
     if (pointersRef.current.size === 1) {
       gestureStartRef.current = {
@@ -1383,6 +1409,7 @@ function PhotoViewer({
         scrollTop: dialogRef.current?.scrollTop ?? 0,
         startedAt: performance.now(),
         pointerType,
+        navigation,
       };
       gestureAxisRef.current = null;
       gestureModeRef.current = null;
@@ -1408,6 +1435,7 @@ function PhotoViewer({
     pointersRef.current.set(id, point);
 
     if (pointersRef.current.size >= 2 && pinchStartRef.current) {
+      setDragging(true);
       const [first, second] = Array.from(pointersRef.current.values());
       const start = pinchStartRef.current;
       const midpoint = pointMidpoint(first, second);
@@ -1441,6 +1469,9 @@ function PhotoViewer({
     const deltaX = point.x - start.point.x;
     const deltaY = point.y - start.point.y;
     if (!gestureAxisRef.current && Math.hypot(deltaX, deltaY) > 7) {
+      setDragging(true);
+      lastTapRef.current = null;
+      clearControlPresses();
       gestureAxisRef.current = Math.abs(deltaX) >= Math.abs(deltaY) ? "x" : "y";
       gestureModeRef.current = start.transform.scale > MIN_SCALE
         ? "pan"
@@ -1502,12 +1533,19 @@ function PhotoViewer({
     }
   };
 
-  const handleImageTap = (point: PointerPoint, pointerType: string) => {
+  const handleImageTap = (point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => {
+    if (navigation) {
+      // Pointer capture and touchend suppress the native click; only a completed tap navigates.
+      lastTapRef.current = null;
+      if (navigation.isConnected && !navigation.disabled) navigation.click();
+      return;
+    }
     if (pointerType !== "mouse") {
       const now = performance.now();
       const lastTap = lastTapRef.current;
       if (
         lastTap &&
+        lastTap.pointerType === pointerType &&
         now - lastTap.at <= DOUBLE_TAP_DELAY_MS &&
         pointDistance(lastTap.point, point) < 32
       ) {
@@ -1518,7 +1556,7 @@ function PhotoViewer({
         );
         return;
       }
-      lastTapRef.current = { at: now, point };
+      lastTapRef.current = { at: now, point, pointerType };
     }
     const media = mediaRef.current;
     const target = document.elementFromPoint(point.x, point.y);
@@ -1533,6 +1571,7 @@ function PhotoViewer({
     point: PointerPoint,
     pointerType: string,
   ) => {
+    if (!pointersRef.current.has(id)) return;
     flushStagedTransform();
     const pointerCount = pointersRef.current.size;
     pointersRef.current.delete(id);
@@ -1552,7 +1591,9 @@ function PhotoViewer({
       return;
     }
 
+    setContactActive(false);
     setDragging(false);
+    clearControlPresses();
     const start = gestureStartRef.current;
     const gestureMode = gestureModeRef.current;
     gestureStartRef.current = null;
@@ -1575,10 +1616,11 @@ function PhotoViewer({
     const deltaY = point.y - start.point.y;
     const elapsed = Math.max(1, performance.now() - start.startedAt);
     const isTap = !gestureMode && Math.hypot(deltaX, deltaY) < 10 && elapsed < 320;
+    if (!isTap) lastTapRef.current = null;
 
     if (start.transform.scale > MIN_SCALE) {
       if (isTap) {
-        handleImageTap(point, start.pointerType);
+        handleImageTap(point, start.pointerType, start.navigation);
         gestureGeometryRef.current = null;
         return;
       }
@@ -1643,30 +1685,28 @@ function PhotoViewer({
 
     commitTransform(DEFAULT_TRANSFORM);
     if (isTap) {
-      handleImageTap(point, start.pointerType);
+      handleImageTap(point, start.pointerType, start.navigation);
     }
     gestureGeometryRef.current = null;
   };
 
   const cancelContacts = () => {
     flushStagedTransform();
-    pointersRef.current.clear();
-    gestureStartRef.current = null;
-    pinchStartRef.current = null;
-    gestureAxisRef.current = null;
-    gestureModeRef.current = null;
-    pinchedRef.current = false;
-    setDragging(false);
-    commitTransform(constrainTransform(transformRef.current));
-    gestureGeometryRef.current = null;
+    const settled = constrainTransform(transformRef.current);
+    resetGesture();
+    commitTransform(settled);
   };
+
+  const navigationButtonAt = (target: EventTarget | null) => target instanceof Element
+    ? target.closest<HTMLButtonElement>(".viewer-nav") ?? undefined
+    : undefined;
 
   const beginPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
     // Touch input is handled by non-passive native TouchEvent listeners below. Keeping
     // it out of this path prevents browsers that emit both event families from applying
     // every movement twice.
     if (event.pointerType === "touch") return;
-    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (event.button !== 0) return;
     event.preventDefault();
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -1677,18 +1717,23 @@ function PhotoViewer({
       event.pointerId,
       { x: event.clientX, y: event.clientY },
       event.pointerType,
+      navigationButtonAt(event.target),
     );
   };
 
   const movePointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "touch") return;
     if (!pointersRef.current.has(event.pointerId)) return;
+    if (event.buttons === 0) {
+      cancelContacts();
+      return;
+    }
     event.preventDefault();
     moveContact(event.pointerId, { x: event.clientX, y: event.clientY });
   };
 
   const finishPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "touch") return;
+    if (event.pointerType === "touch" || event.button !== 0) return;
     finishContact(
       event.pointerId,
       { x: event.clientX, y: event.clientY },
@@ -1702,7 +1747,7 @@ function PhotoViewer({
   };
 
   const cancelPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType !== "touch") cancelContacts();
+    if (event.pointerType !== "touch" && pointersRef.current.has(event.pointerId)) cancelContacts();
   };
 
   gestureHandlersRef.current = {
@@ -1720,8 +1765,9 @@ function PhotoViewer({
       && Boolean(event.target.closest(".photo-card-controls"));
     const openImageMenu = () => {
       gestureHandlersRef.current?.cancel();
-      lastTapRef.current = null;
     };
+    const interruptGesture = () => gestureHandlersRef.current?.cancel();
+    const handleVisibility = () => { if (document.hidden) interruptGesture(); };
     const touchPoint = (touch: Touch): PointerPoint => ({
       x: touch.clientX,
       y: touch.clientY,
@@ -1729,7 +1775,7 @@ function PhotoViewer({
     const handleTouchStart = (event: TouchEvent) => {
       if (menuContact(event)) return;
       for (const touch of Array.from(event.changedTouches)) {
-        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch");
+        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch", navigationButtonAt(touch.target));
       }
       if (event.cancelable && (pointersRef.current.size > 1 || transformRef.current.scale > MIN_SCALE)) {
         event.preventDefault();
@@ -1761,12 +1807,16 @@ function PhotoViewer({
     surface.addEventListener("touchmove", handleTouchMove, { passive: false });
     surface.addEventListener("touchend", handleTouchEnd, { passive: false });
     surface.addEventListener("touchcancel", handleTouchCancel, { passive: false });
+    window.addEventListener("blur", interruptGesture);
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       surface.removeEventListener(CARD_MENU_EVENT, openImageMenu, true);
       surface.removeEventListener("touchstart", handleTouchStart);
       surface.removeEventListener("touchmove", handleTouchMove);
       surface.removeEventListener("touchend", handleTouchEnd);
       surface.removeEventListener("touchcancel", handleTouchCancel);
+      window.removeEventListener("blur", interruptGesture);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
 
@@ -1850,68 +1900,6 @@ function PhotoViewer({
     aspectRatio: `${image.width} / ${image.height}`,
     transform: `translate3d(${liveTransform.x}px, ${liveTransform.y}px, 0) scale(${liveTransform.scale})`,
   } as CSSProperties;
-  const renderActionSuite = (details = false) => (
-    <div
-      className={`viewer-header-actions${details ? " viewer-details-toolbar" : ""}`}
-      role="group"
-      aria-label={details ? "图片详情操作" : "图片查看操作"}
-    >
-      {details && (
-        <button
-          type="button"
-          className="viewer-control viewer-details-return"
-          onClick={() => scrollToImage(true)}
-          aria-label="返回图片"
-          title="返回图片"
-        >
-          <ChevronUp size={19} strokeWidth={1.8} />
-        </button>
-      )}
-      <button
-        type="button"
-        className="viewer-control viewer-similar-trigger"
-        onClick={() => {
-          onSearchSimilar(image);
-          scrollToSimilar();
-        }}
-        aria-label="相似图片"
-        aria-busy={similarLoading}
-        title="相似图片"
-      >
-        {similarLoading ? <LoaderCircle className="spin" size={19} /> : <ScanSearch size={19} />}
-      </button>
-      <a
-        className="viewer-control"
-        href={viewerOriginalUrl(image)}
-        download={image.name}
-        aria-label="下载原图"
-        title="下载原图"
-      >
-        <Download size={19} />
-      </a>
-      {fullscreenAvailable && (
-        <button
-          type="button"
-          className={`viewer-control ${details ? "viewer-details-fullscreen" : "viewer-fullscreen"}${fullscreen ? " is-active" : ""}`}
-          onClick={() => void toggleFullscreen()}
-          aria-label={fullscreen ? "退出全屏" : "进入全屏"}
-          aria-pressed={fullscreen}
-          title={fullscreen ? "退出全屏" : "全屏查看"}
-        >
-          {fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
-        </button>
-      )}
-      <button
-        type="button"
-        className={`viewer-control ${details ? "viewer-details-close" : "viewer-close"}`}
-        onClick={onClose}
-        aria-label="关闭查看器"
-        title="关闭 (Esc)"
-      >
-        <X size={21} />
-      </button>
-    </div>
-  );
   const viewer = (
     <div
       ref={dialogRef}
@@ -1950,7 +1938,17 @@ function PhotoViewer({
         <div className="viewer-backdrop" aria-hidden="true" />
 
       <header className="viewer-header">
-        {renderActionSuite()}
+        <button type="button" className="viewer-control viewer-close" onClick={onClose}
+          onPointerDown={event => {
+            if (event.button === 0 && event.isPrimary) event.currentTarget.dataset.pressed = "true";
+          }}
+          onPointerUp={event => { delete event.currentTarget.dataset.pressed; }}
+          onPointerCancel={event => { delete event.currentTarget.dataset.pressed; }}
+          onPointerLeave={event => { delete event.currentTarget.dataset.pressed; }}
+          onLostPointerCapture={event => { delete event.currentTarget.dataset.pressed; }}
+          aria-label="关闭查看器" title="关闭查看器 (Esc)">
+          <X size={26} strokeWidth={2.1} />
+        </button>
       </header>
 
       <div
@@ -1960,10 +1958,14 @@ function PhotoViewer({
         onPointerMove={movePointer}
         onPointerUp={finishPointer}
         onPointerCancel={cancelPointer}
+        onLostPointerCapture={event => {
+          if (event.target === event.currentTarget) cancelPointer(event);
+        }}
         onWheel={handleWheel}
         onDblClick={(event: JSX.TargetedMouseEvent<HTMLDivElement>) => {
           event.preventDefault();
-          if (performance.now() - lastTouchAtRef.current < 500) return;
+          if (navigationButtonAt(document.elementFromPoint(event.clientX, event.clientY))) return;
+          if (lastTouchAtRef.current > 0 && performance.now() - lastTouchAtRef.current < 500) return;
           zoomAt(
             transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
             { x: event.clientX, y: event.clientY },
@@ -2063,39 +2065,22 @@ function PhotoViewer({
                 />
               )}
               {image.motion && <MediaPreview image={image} autoPlay />}
-              <ImageCardActions image={image} onAction={action => {
+              <ImageCardActions image={image} selected={selectedIds?.has(image.id)} selectionDisabled={selectionDisabled} onSelect={onSelectImage ? () => onSelectImage(image) : undefined}
+                fullscreen={fullscreen} onToggleFullscreen={fullscreenAvailable ? () => void toggleFullscreen() : undefined} onAction={action => {
                 if (action === "view") {
                   commitTransform(DEFAULT_TRANSFORM);
                   scrollToImage(true);
+                } else if (action === "similar") {
+                  onSearchSimilar(image);
+                  scrollToSimilar();
                 } else onOpenImage(image, action);
               }} />
             </div>
           </div>
         </div>
+        <ViewerNavigationButton direction={-1} disabled={!canPrevious} onNavigate={onNavigate} />
+        <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} onNavigate={onNavigate} />
       </div>
-
-      <button
-        type="button"
-        className="viewer-nav viewer-previous"
-        onClick={() => onNavigate(-1)}
-        disabled={!canPrevious}
-        aria-label="上一张图片"
-        title="上一张 (←)"
-      >
-        <ChevronLeft size={23} strokeWidth={1.8} />
-      </button>
-      <button
-        type="button"
-        className="viewer-nav viewer-next"
-        onClick={() => onNavigate(1)}
-        disabled={!canNext || waitingForNext}
-        aria-label={waitingForNext ? "正在加载下一张" : "下一张图片"}
-        title="下一张 (→)"
-      >
-        {waitingForNext
-          ? <LoaderCircle className="spin" size={20} />
-          : <ChevronRight size={23} strokeWidth={1.8} />}
-      </button>
 
       {currentLoadState.failed && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>
@@ -2118,7 +2103,10 @@ function PhotoViewer({
             data-visible={detailsToolbarVisible}
             inert={!detailsToolbarInRange}
           >
-            {renderActionSuite(true)}
+            <button type="button" className="viewer-control viewer-details-toolbar viewer-details-return"
+              onClick={() => scrollToImage(true)} aria-label="返回图片" title="返回图片">
+              <ChevronUp size={19} strokeWidth={1.8} />
+            </button>
           </header>
 
           <div className="viewer-details-content">
@@ -2159,7 +2147,12 @@ function PhotoViewer({
                         loadingMore={similarLoadingMore}
                         error={similarError}
                         onLoadMore={onLoadMoreSimilar}
-                        onOpen={onOpenImage}
+                        onOpen={onOpenSimilarImage ?? onOpenImage}
+                        selectedIds={selectedIds}
+                        onSelect={onSelectImage}
+                        onSelectAll={onSelectImages}
+                        onClearSelection={onClearSelection}
+                        selectionDisabled={selectionDisabled}
                       />
                     ) : (
                       <div className="viewer-similar-empty">

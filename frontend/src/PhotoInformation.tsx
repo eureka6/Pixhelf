@@ -296,7 +296,7 @@ export const PhotoInformation = memo(function PhotoInformation({
   const { details, loading, errorMessage, retry } = usePhotoDetails(image.id);
 
   return (
-    <section className="viewer-photo-information" aria-label={image.video ? "视频信息" : "图片信息"}>
+    <section className="viewer-photo-information" aria-label={image.video ? "视频信息" : "图片信息"} aria-busy={loading}>
       {showHeading && <header className="viewer-photo-heading">
         <h3>{image.video ? "视频详情" : "图片详情"}</h3>
       </header>}

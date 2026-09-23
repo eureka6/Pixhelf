@@ -3,6 +3,21 @@ and an H.264 animation. `live-photo-hevc.mov` is an HEVC fixture with silent AAC
 audio, also used by the Rust response tests. Rust video preparation tests and the
 backend playback checks require FFmpeg (`ffmpeg`, `ffprobe`, libx264 and AAC).
 
+`live-photo.heic` is a generated 120×90 image with four solid-color 64×64 HEVC
+tiles, cropped at the right and bottom edges. It contains no personal metadata.
+It verifies that HEIF previews assemble the primary image instead of showing a
+single tile, a thumbnail, or an auxiliary image. HEIF Rust tests require
+`heif-info` and `heif-dec` (or the older `heif-convert`) from libheif
+(`libheif-examples` on Debian/Ubuntu).
+The fixture was encoded with libheif 1.19.8 using `heif-enc -q 90 -T tile-0-0.png
+--tiled-image-width 120 --tiled-image-height 90 -o live-photo.heic` from a 2×2
+grid of red, green, blue and yellow PNG tiles.
+
+After building the frontend and backend, `npm run heif-live-photo-check` starts
+an isolated backend and checks HEIF/MOV pairing, full-size previews, original
+downloads and live playback on desktop and phone. Set `PIXHELF_HEIF_SAMPLE` to
+an extensionless HEIC/MOV path to check real source files using temporary copies.
+
 `portrait-video.mp4` is a stream copy of `live-photo.mp4` with a 90° display
 rotation, so rotation tests do not depend on version-specific FFmpeg options.
 Regenerate with FFmpeg 7.1 from this directory:

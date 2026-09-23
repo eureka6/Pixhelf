@@ -15,12 +15,14 @@ import {
   visualViewportBounds,
 } from "./galleryViewport";
 import type { GalleryViewportAnchor } from "./galleryViewport";
-import { ImageIcon } from "./icons";
+import { Check, Heart, ImageIcon } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
+import { SelectionMenu, type MenuPoint, type SelectionActions, type SelectionBatchActions } from "./SelectionMenu";
 import { MediaPreview } from "./MediaPreview";
 import { VideoBadge } from "./VideoBadge";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { useCardInteraction } from "./cardInteraction";
+import { useSelectionGestures } from "./selectionGestures";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
 import type { GalleryImage, ImageCardAction } from "./types";
 import { preloadOriginalImage, viewerThumbnailUrl } from "./viewerAssets";
@@ -80,18 +82,34 @@ function observeCardLoad(element: Element, load: () => void): () => void {
   };
 }
 
-type JustifiedGalleryProps = {
+export type GallerySelection = {
+  active: boolean;
+  ids: ReadonlySet<string>;
+  favoriteIds: ReadonlySet<string>;
+  disabled: boolean;
+  toggle: (id: string, range?: boolean) => void;
+  change: (ids: ReadonlySet<string>) => void;
+  selectAll: () => void;
+  clear: () => void;
+  batch?: SelectionBatchActions;
+};
+
+export type JustifiedGalleryProps = {
   images: GalleryImage[];
   preserveViewport: boolean;
   onOpen: (id: string, card: HTMLElement, pointerY?: number, action?: ImageCardAction) => void;
+  selection?: GallerySelection;
 };
 
 export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, JustifiedGalleryProps>(function JustifiedGallery({
   images,
   preserveViewport,
   onOpen,
+  selection,
 }, handleRef) {
+  const [selectionMenu, setSelectionMenu] = useState<MenuPoint | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const marqueeRef = useRef<HTMLDivElement>(null);
   useCardInteraction(ref, preserveViewport);
   const resizeAnchorRef = useRef<GalleryViewportAnchor | null>(null);
   const stableViewportAnchorRef = useRef<GalleryViewportAnchor | null>(null);
@@ -244,6 +262,12 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
     () => layoutJustifiedImages(images, { width, gap }),
     [gap, images, width],
   );
+  const selectionItems = useMemo(() => layout.items.map(({ image, style }) => ({
+    id: image.id, left: Number(style.left), top: Number(style.top),
+    width: Number(style.width), height: Number(style.height),
+  })), [layout]);
+  const dragging = useSelectionGestures(ref, marqueeRef, selectionItems, selection, preserveViewport);
+  const selecting = Boolean(selection?.active || dragging);
 
   return (
     <div
@@ -252,6 +276,13 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
       data-layout="justified"
       data-layout-width={width}
       data-rows={layout.rowCount}
+      data-selecting={selecting}
+      data-selection-enabled={Boolean(selection)}
+      onContextMenu={event => {
+        if (!selection || event.defaultPrevented || (event.target instanceof Element && event.target.closest(".image-card, .selection-menu"))) return;
+        event.preventDefault();
+        setSelectionMenu({ x: event.clientX, y: event.clientY });
+      }}
       style={{ height: layout.height } as CSSProperties}
     >
       {layout.items.map(({ image, index, row, style }) => (
@@ -262,8 +293,16 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
           eager={row === 0}
           highPriority={index === 0}
           onOpen={onOpen}
+          selected={selection?.ids.has(image.id) ?? false}
+          favorite={selection?.favoriteIds.has(image.id) ?? false}
+          selecting={selecting}
+          selectionDisabled={selection?.disabled ?? false}
+          onSelect={selection?.toggle}
+          selectionActions={selection}
         />
       ))}
+      {selection && <div ref={marqueeRef} className="gallery-selection-marquee" hidden aria-hidden="true" />}
+      {selection && selectionMenu && <SelectionMenu actions={selection} point={selectionMenu} onClose={() => setSelectionMenu(null)} />}
     </div>
   );
 }));
@@ -274,12 +313,16 @@ const ImageCard = memo(function ImageCard({
   eager,
   highPriority,
   onOpen,
+  selected, favorite, selecting, selectionDisabled, onSelect, selectionActions,
 }: {
   image: GalleryImage;
   layoutStyle: CSSProperties;
   eager: boolean;
   highPriority: boolean;
   onOpen: JustifiedGalleryProps["onOpen"];
+  selected: boolean; favorite: boolean; selecting: boolean; selectionDisabled: boolean;
+  onSelect?: GallerySelection["toggle"];
+  selectionActions?: SelectionActions;
 }) {
   const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
   const [loadState, setLoadState] = useState<ThumbnailState>(alreadyReady ? "loaded" : "loading");
@@ -348,6 +391,7 @@ const ImageCard = memo(function ImageCard({
       data-retrying={loadState === "retrying"}
       data-eager={eager}
       data-high-priority={highPriority}
+      data-selected={selected}
       style={{
         ...layoutStyle,
         aspectRatio: `${image.width} / ${image.height}`,
@@ -355,11 +399,9 @@ const ImageCard = memo(function ImageCard({
       onPointerEnter={() => preloadOriginalImage(image)}
       onPointerDown={() => preloadOriginalImage(image)}
       onFocus={() => preloadOriginalImage(image)}
-      onClick={(event) => onOpen(
-        image.id,
-        event.currentTarget,
-        event.detail > 0 ? event.clientY : undefined,
-      )}
+      onClick={(event) => {
+        onOpen(image.id, event.currentTarget, event.detail > 0 ? event.clientY : undefined);
+      }}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -390,10 +432,18 @@ const ImageCard = memo(function ImageCard({
           <ImageIcon size={24} />
         </span>
       ) : null}
-      {loaded && (image.motion || image.video) && <MediaPreview image={image} />}
+      {loaded && !selecting && (image.motion || image.video) && <MediaPreview image={image} />}
       {image.video && <VideoBadge video={image.video} />}
       <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放" : "查看"} ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
-      <ImageCardActions image={image} onAction={handleAction} />
+      {favorite && <span className="photo-card-favorite" aria-label="已收藏"><Heart size={13} fill="currentColor" /></span>}
+      {onSelect && <button type="button" className="photo-card-select" role="checkbox" aria-checked={selected}
+        aria-label={`选择 ${image.name}`} title={`${selected ? "取消选择" : "选择"}（按住选择球滑动可多选）`} disabled={selectionDisabled}
+        onClick={event => { event.stopPropagation(); onSelect(image.id, event.shiftKey); }}
+        onPointerDown={event => event.stopPropagation()}
+        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
+        <span><Check size={16} strokeWidth={2.8} /></span>
+      </button>}
+      <ImageCardActions image={image} onAction={handleAction} onSelect={onSelect ? () => onSelect(image.id) : undefined} selected={selected} selectionDisabled={selectionDisabled} selectionActions={selectionActions} />
     </figure>
   );
 });

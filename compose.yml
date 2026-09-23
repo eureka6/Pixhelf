@@ -5,7 +5,7 @@ services:
     ports:
       - "3002:3002"
     volumes:
-      - "./pic:/data/pic:ro"
+      - "./pic:/data/pic"
       - pixhelf-data:/data/.pixhelf-data
 
 volumes:

@@ -17,7 +17,7 @@ export function imageCardById(
   gallery: HTMLElement | null = document.querySelector(".justified-gallery"),
 ): HTMLElement | null {
   return gallery?.querySelector<HTMLElement>(
-    `.image-card[data-image-id="${CSS.escape(imageId)}"]`,
+    `[data-image-id="${CSS.escape(imageId)}"].image-card, [data-image-id="${CSS.escape(imageId)}"].viewer-similar-card`,
   ) ?? null;
 }
 
@@ -28,10 +28,15 @@ export function visualViewportBounds() {
   return { top, height, bottom: top + height };
 }
 
-function galleryViewportBounds() {
-  const viewport = visualViewportBounds();
-  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-    ?? viewport.top;
+function galleryViewportBounds(scrollRoot?: HTMLElement) {
+  const visual = visualViewportBounds();
+  const bounds = scrollRoot?.getBoundingClientRect();
+  const top = bounds ? Math.max(visual.top, bounds.top) : visual.top;
+  const bottom = bounds ? Math.min(visual.bottom, bounds.bottom) : visual.bottom;
+  const viewport = { top, bottom, height: Math.max(1, bottom - top) };
+  const toolbar = scrollRoot ? scrollRoot.querySelector(".viewer-details-toolbar, .video-details-header") : document.querySelector(".topbar");
+  const toolbarBounds = toolbar?.getBoundingClientRect();
+  const topbarBottom = toolbarBounds && (!scrollRoot || toolbarBounds.top < viewport.bottom) ? toolbarBounds.bottom : viewport.top;
   const safeTop = Math.min(viewport.bottom, Math.max(viewport.top, topbarBottom + 8));
   return { ...viewport, safeTop, safeBottom: Math.max(safeTop, viewport.bottom - 8) };
 }
@@ -40,19 +45,19 @@ function anchorAtPoint(
   rect: DOMRect,
   viewport: ReturnType<typeof visualViewportBounds>,
   anchorY: number,
+  scrollRoot?: HTMLElement,
 ): ViewerAnchor {
   return {
     cardRatio: rect.height > 0 ? clamp((anchorY - rect.top) / rect.height, 0, 1) : .5,
     viewportRatio: clamp((anchorY - viewport.top) / viewport.height, 0, 1),
-    fallbackScrollY: window.scrollY,
+    fallbackScrollY: scrollRoot?.scrollTop ?? window.scrollY,
   };
 }
 
-export function captureViewerAnchor(card: HTMLElement, pointerY?: number): ViewerAnchor {
+export function captureViewerAnchor(card: HTMLElement, pointerY?: number, scrollRoot?: HTMLElement): ViewerAnchor {
   const rect = card.getBoundingClientRect();
-  const viewport = visualViewportBounds();
-  const topbarBottom = document.querySelector(".topbar")?.getBoundingClientRect().bottom
-    ?? viewport.top;
+  const viewport = galleryViewportBounds(scrollRoot);
+  const topbarBottom = viewport.safeTop - 8;
   const visibleTop = Math.max(rect.top, viewport.top, topbarBottom);
   const visibleBottom = Math.min(rect.bottom, viewport.bottom);
   const visibleCenter = visibleBottom > visibleTop
@@ -66,7 +71,7 @@ export function captureViewerAnchor(card: HTMLElement, pointerY?: number): Viewe
     Math.min(visibleTop, visibleBottom),
     Math.max(visibleTop, visibleBottom),
   );
-  return anchorAtPoint(rect, viewport, anchorY);
+  return anchorAtPoint(rect, viewport, anchorY, scrollRoot);
 }
 
 export function captureGalleryViewportAnchor(gallery: HTMLElement): GalleryViewportAnchor | null {
@@ -116,19 +121,20 @@ export function captureGalleryViewportAnchor(gallery: HTMLElement): GalleryViewp
   };
 }
 
-export function scrollTopForAnchor(card: HTMLElement | null, anchor: ViewerAnchor): number {
+export function scrollTopForAnchor(card: HTMLElement | null, anchor: ViewerAnchor, scrollRoot?: HTMLElement): number {
   let top = anchor.fallbackScrollY;
   if (card) {
     const rect = card.getBoundingClientRect();
-    const viewport = galleryViewportBounds();
+    const viewport = galleryViewportBounds(scrollRoot);
     const desiredY = clamp(
       viewport.top + anchor.viewportRatio * viewport.height,
       viewport.safeTop,
       viewport.safeBottom,
     );
     const actualY = rect.top + rect.height * anchor.cardRatio;
-    top = window.scrollY + actualY - desiredY;
+    top = (scrollRoot?.scrollTop ?? window.scrollY) + actualY - desiredY;
   }
+  if (scrollRoot) return clamp(top, 0, Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight));
   const documentHeight = Math.max(
     document.documentElement.scrollHeight,
     document.body.scrollHeight,

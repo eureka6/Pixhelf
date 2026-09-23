@@ -1,18 +1,18 @@
 import type { RefObject } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { GallerySkeleton, JustifiedGallery } from "./JustifiedGallery";
-import type { JustifiedGalleryHandle } from "./JustifiedGallery";
+import { GallerySkeleton } from "./JustifiedGallery";
+import { SelectableGallery, type SelectableGalleryHandle, type SelectionToolbarProps } from "./SelectableGallery";
 import { ImageIcon, LoaderCircle, RefreshCw, ScanSearch, X } from "./icons";
 import { formatCount } from "./format";
 import type { ImageCardAction } from "./types";
 import type { ImageSearchSource, useImageSimilarity } from "./useImageSimilarity";
 
-export function SimilarSearchView({ source, results, filter, onUpload, onClear, onOpen, layoutRef, preserveViewport }: {
+export function SimilarSearchView({ source, results, filter, onUpload, onClear, onOpen, layoutRef, preserveViewport, toolbarTarget, onSelectionChange }: {
   source: ImageSearchSource | null; results: ReturnType<typeof useImageSimilarity>; filter: string;
   onUpload: (file: File) => void; onClear: () => void;
   onOpen: (id: string, card: HTMLElement, pointerY?: number, action?: ImageCardAction) => void;
-  layoutRef: RefObject<JustifiedGalleryHandle>; preserveViewport: boolean;
-}) {
+  layoutRef: RefObject<SelectableGalleryHandle>; preserveViewport: boolean;
+} & SelectionToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -62,7 +62,7 @@ export function SimilarSearchView({ source, results, filter, onUpload, onClear, 
       {fileError && <p className="similar-search-error" role="alert">{fileError}</p>}
       {results.error && <div className="similar-search-error" role="alert"><span>{results.error}</span><button type="button" onClick={results.retry}><RefreshCw size={15} />重试</button></div>}
       {source && (results.loading ? <GallerySkeleton /> : images.length ?
-        <JustifiedGallery ref={layoutRef} images={images} preserveViewport={preserveViewport} onOpen={onOpen} />
+        <SelectableGallery key={filter} ref={layoutRef} toolbarTarget={toolbarTarget} onSelectionChange={onSelectionChange} images={images} preserveViewport={preserveViewport} onOpen={onOpen} />
         : !results.error && <div className="similar-search-empty"><ScanSearch size={28} /><strong>{filter ? "没有匹配的结果" : "没有找到相似图片"}</strong><span>{filter ? "试试其他文件名" : "换一张图片试试"}</span></div>)}
       {source && <div ref={sentinelRef} className="load-sentinel similar-results-footer" aria-live="polite">
         {results.loadingMore ? <><LoaderCircle className="spin" size={18} />正在加载更多</> : results.nextOffset !== null ?

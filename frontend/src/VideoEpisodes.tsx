@@ -17,7 +17,7 @@ type VideoEpisodesProps = {
 
 export function VideoEpisodes({ images, activeId, hasMore, loadingMore, open, onOpenChange, onSelect }: VideoEpisodesProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const episodes = images.filter(image => image.video);
+  const episodes = [...new Map(images.filter(image => image.video).map(image => [image.id, image])).values()];
   useLayoutEffect(() => {
     if (!open) return;
     const selected = ref.current?.querySelector<HTMLElement>('[aria-checked="true"]');

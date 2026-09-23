@@ -132,7 +132,8 @@ async function checkTouchMenu(page, selector) {
 async function expectMenu(page) {
   const menu = page.locator(".photo-card-menu:popover-open");
   await menu.waitFor();
-  assert.equal(await menu.getByRole("menuitem").count(), 6);
+  const waterfall = await menu.evaluate(element => Boolean(element.closest(".image-card, .viewer-similar-card")));
+  assert.equal(await menu.getByRole("menuitem").count(), waterfall ? 8 : 6);
   const bounds = await menu.boundingBox();
   const viewport = page.viewportSize();
   assert(bounds && bounds.x >= 10 && bounds.y >= 10);
@@ -251,7 +252,7 @@ try {
     const imageId = await card.getAttribute("data-image-id");
     const filename = await card.getAttribute("data-image-name");
     const originalPath = `/api/images/${encodeURIComponent(imageId)}/original`;
-    assert.equal(await page.locator(".image-card[title], .image-card [title], .image-name").count(), 0);
+    assert.equal(await page.locator(".image-card[title], .image-card [title]:not(.photo-card-select), .image-name").count(), 0);
     assert.equal(await page.locator(".photo-card-download").count(), 0);
     const more = card.locator(".photo-card-more");
     if (width > 720) {
@@ -272,7 +273,7 @@ try {
     await openMenu(card);
     menu = await expectMenu(page);
     await page.keyboard.press("ArrowDown");
-    assert.equal(await page.evaluate(() => document.activeElement.textContent), "图片信息");
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), "全选已加载");
     await page.keyboard.press("End");
     assert.equal(await page.evaluate(() => document.activeElement.textContent), "复制文件名");
     await page.keyboard.press("Escape");
@@ -341,12 +342,12 @@ try {
     await page.screenshot({ path: `/tmp/pixhelf-photo-info-${width}.png`, animations: "disabled" });
     await page.keyboard.press("Escape");
     await page.locator(".photo-info-dialog").waitFor({ state: "detached" });
-    // The viewer keeps its own similarity toolbar; its cards use the same actions.
+    // Scrolling to viewer details exposes its own similar-image waterfall.
     await centerCard(card);
     await clickVisible(card.locator(".photo-card-open"));
     await page.locator(".image-viewer").waitFor();
     await checkViewerMenu(page);
-    await page.locator(".viewer-similar-trigger").first().click();
+    await page.keyboard.press("PageDown");
     await page.locator(".viewer-similar-card").first().waitFor();
     assert.equal(await page.locator(".viewer-similar-card[title], .viewer-similar-card [title], .image-name").count(), 0);
     let similar = page.locator(".viewer-similar-card").first();
@@ -396,7 +397,9 @@ try {
     await openMenu(page.locator(".viewer-media:not(.viewer-swipe-outgoing)"));
     menu = await expectMenu(page);
     await clickVisible(menu.getByRole("menuitem", { name: "查找相似图片", exact: true }));
-    await expectSimilar(page, resultId);
+    await page.locator(".viewer-similar-card").first().waitFor();
+    assert.equal(await page.locator(".image-viewer").getAttribute("data-image-id"), resultId, "viewer similarity opens its own waterfall");
+    assert.equal(new URL(page.url()).searchParams.get("source"), nestedId);
     await page.goBack();
     await expectSimilar(page, nestedId);
     assert.deepEqual(errors, []);

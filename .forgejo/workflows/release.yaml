@@ -26,6 +26,7 @@ jobs:
             curl \
             file \
             ffmpeg \
+            libheif-examples \
             pkg-config \
             python3-venv
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \

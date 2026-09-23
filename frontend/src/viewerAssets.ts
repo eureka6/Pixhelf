@@ -55,8 +55,12 @@ export function viewerThumbnailUrl(image: GalleryImage): string {
   return `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
 }
 
+export function originalImageUrl(image: GalleryImage): string {
+  return `/api/images/${encodeURIComponent(image.id)}/original`;
+}
+
 export function viewerOriginalUrl(image: GalleryImage, attempt = 0): string {
-  const url = `/api/images/${encodeURIComponent(image.id)}/original`;
+  const url = image.display ?? originalImageUrl(image);
   return attempt ? `${url}?retry=${attempt}` : url;
 }
 

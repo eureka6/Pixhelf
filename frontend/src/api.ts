@@ -39,7 +39,7 @@ function isAlbum(value: unknown): value is Album {
     && (value.cover === null || typeof value.cover === "string");
 }
 
-function isGalleryImage(value: unknown): value is GalleryImage {
+export function isGalleryImage(value: unknown): value is GalleryImage {
   return isObject(value)
     && typeof value.id === "string"
     && typeof value.name === "string"
@@ -47,6 +47,7 @@ function isGalleryImage(value: unknown): value is GalleryImage {
     && (value.video === undefined || isVideoMetadata(value.video))
     && (value.playback === undefined || typeof value.playback === "string")
     && (value.preview === undefined || typeof value.preview === "string")
+    && (value.display === undefined || typeof value.display === "string")
     && isPositiveInteger(value.width)
     && isPositiveInteger(value.height);
 }
@@ -220,6 +221,7 @@ export function getStatus(signal?: AbortSignal): Promise<ThumbnailStatus> {
 export function getImages(
   options: {
     album: string;
+    favorites?: boolean;
     search: string;
     sort: SortMode;
     seed: string;
@@ -237,7 +239,7 @@ export function getImages(
   if (options.search) params.set("search", options.search);
   if (options.seed) params.set("seed", options.seed);
   return requestJson(
-    `/api/images?${params}`,
+    `${options.favorites ? "/api/management/favorites" : "/api/images"}?${params}`,
     isImagesPage,
     signal,
     options.search ? IMAGE_SEARCH_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,

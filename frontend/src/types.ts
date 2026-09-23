@@ -5,7 +5,7 @@ export interface Album {
   cover: string | null;
 }
 
-export type GallerySection = "library" | "albums" | "similar" | "storage";
+export type GallerySection = "library" | "albums" | "similar" | "storage" | "local" | "favorites" | "trash";
 
 export interface GallerySummary {
   total: number;
@@ -22,6 +22,7 @@ export interface GalleryImage {
   video?: VideoMetadata;
   playback?: string;
   preview?: string;
+  display?: string;
 }
 
 export interface VideoMetadata {

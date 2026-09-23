@@ -6,9 +6,12 @@ import { formatCount } from "./format";
 import {
   BookImage,
   Cloud,
+  HardDrive,
   Dices,
   House,
   Images,
+  Heart,
+  Trash2,
   Menu,
   Search,
   ScanSearch,
@@ -17,6 +20,7 @@ import {
 import { ToolbarPopover } from "./ToolbarPopover";
 import { AuthControls } from "./AuthControls";
 import { authentication } from "./auth";
+import { useManagement } from "./management";
 import type { GallerySection, GallerySummary } from "./types";
 
 export function Header({
@@ -26,11 +30,13 @@ export function Header({
   searchMode,
   albumSearch,
   storageSearch,
+  localSearch = false,
   similarSearch,
   onSearchChange,
   onExplore,
   exploreActive,
   exploreLoading,
+  exploreScope,
   onHome,
   onToggleNavigation,
   navigationOpen,
@@ -42,11 +48,13 @@ export function Header({
   searchMode: "filename" | "indexing" | "semantic";
   albumSearch: boolean;
   storageSearch: boolean;
+  localSearch?: boolean;
   similarSearch: boolean;
   onSearchChange: (value: string) => void;
   onExplore: () => void;
   exploreActive: boolean;
   exploreLoading: boolean;
+  exploreScope?: string;
   onHome: () => void;
   onToggleNavigation: () => void;
   navigationOpen: boolean;
@@ -55,9 +63,9 @@ export function Header({
   const [exploreMotionKey, setExploreMotionKey] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mobileNavigationOpen = compactLayout && navigationOpen;
-  const semanticSearch = !albumSearch && !storageSearch && !similarSearch && searchMode === "semantic";
-  const searchIndexing = !albumSearch && !storageSearch && !similarSearch && searchMode === "indexing";
-  const searchPlaceholder = similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
+  const semanticSearch = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "semantic";
+  const searchIndexing = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "indexing";
+  const searchPlaceholder = localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
     ? "描述想找的图片"
     : searchIndexing
       ? "文字索引中 · 暂搜文件名"
@@ -118,7 +126,7 @@ export function Header({
           aria-label="探索列队"
           aria-pressed={exploreActive}
           aria-busy={exploreLoading}
-          title={exploreActive ? "探索列队 · 换一组图片" : "探索列队"}
+          title={`${exploreScope ? `探索 ${exploreScope}` : "探索列队"}${exploreActive ? " · 换一组图片" : ""}`}
         >
           <Dices
             key={exploreMotionKey}
@@ -133,7 +141,7 @@ export function Header({
           onOpenChange={handleSearchOpenChange}
           openLabel="打开搜索"
           closeLabel="收起搜索"
-          panelLabel={similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索图片"}
+          panelLabel={localSearch ? "搜索本地目录" : similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索图片"}
           icon={
             <>
               <Search className="search-toggle-icon" size={18} />
@@ -151,12 +159,12 @@ export function Header({
             value={search}
             onInput={(event) => onSearchChange(event.currentTarget.value)}
             placeholder={searchPlaceholder}
-            aria-label={similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
+            aria-label={localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
             enterKeyHint="search"
             autoComplete="off"
             tabIndex={searchOpen ? 0 : -1}
           />
-          {!albumSearch && !storageSearch && !similarSearch && searchMode !== "filename" && (
+          {!albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode !== "filename" && (
             <span
               className="search-mode-badge"
               data-state={searchMode}
@@ -267,6 +275,7 @@ export function Sidebar({
   desktopCollapsed: boolean;
   onSettings: () => void;
 }) {
+  const management = useManagement();
   const navigation = (
     <>
       <nav className="album-nav" aria-label="主导航">
@@ -284,18 +293,21 @@ export function Sidebar({
           onClick={() => onChoose("albums")}
           section="albums"
         />
+        {!authentication.guest && <NavigationButton label="收藏" count={management.ready ? management.favoriteIds.size + management.favoriteAlbums.size : undefined} active={activeSection === "favorites"} onClick={() => onChoose("favorites")} section="favorites" />}
         <NavigationButton
           label="相似图片"
           active={activeSection === "similar"}
           onClick={() => onChoose("similar")}
           section="similar"
         />
+        {!authentication.guest && <NavigationButton label="本地存储" active={activeSection === "local"} onClick={() => onChoose("local")} section="local" />}
         {!authentication.guest && <NavigationButton
           label="外部存储"
           active={activeSection === "storage"}
           onClick={() => onChoose("storage")}
           section="storage"
         />}
+        {!authentication.guest && <NavigationButton label="回收站" count={management.trashCount} active={activeSection === "trash"} onClick={() => onChoose("trash")} section="trash" />}
       </nav>
       <AuthControls onSettings={() => { onClose(); onSettings(); }} />
     </>
@@ -370,7 +382,7 @@ function NavigationButton({
       aria-current={active ? "page" : undefined}
       title={label}
     >
-      {section === "library" ? <Images size={17} /> : section === "similar" ? <ScanSearch size={17} /> : section === "storage" ? <Cloud size={17} /> : <BookImage size={17} />}
+      {section === "library" ? <Images size={17} /> : section === "favorites" ? <Heart size={17} /> : section === "trash" ? <Trash2 size={17} /> : section === "similar" ? <ScanSearch size={17} /> : section === "local" ? <HardDrive size={17} /> : section === "storage" ? <Cloud size={17} /> : <BookImage size={17} />}
       <span className="album-copy">
         <strong>{label}</strong>
       </span>

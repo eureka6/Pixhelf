@@ -1,8 +1,9 @@
 import { memo } from "preact/compat";
 import { useLayoutEffect, useRef } from "preact/hooks";
 import { CARD_MENU_EVENT, CARD_TOUCH_EVENT, clearCardFeedback, markCardPreviewPlayed } from "./cardInteraction";
-import { MediaPlayer, type VideoPlayer } from "./mediaPlayer";
+import { MediaPlayer, type PlayerCallbacks, type VideoPlayer } from "./mediaPlayer";
 import { NativeMediaPlayer } from "./nativeMediaPlayer";
+import { LivePhotoPlayer } from "./livePhotoPlayer";
 import type { GalleryImage } from "./types";
 import { viewerOriginalUrl } from "./viewerAssets";
 
@@ -18,7 +19,9 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
   image: GalleryImage; autoPlay?: boolean;
 }) {
   const isVideo = Boolean(image.video);
-  const source = image.preview ?? (isVideo ? viewerOriginalUrl(image) : image.motion);
+  // Live Photos own their original playback; only ordinary videos use prepared previews.
+  const preview = isVideo ? image.preview : undefined;
+  const source = preview ?? (isVideo ? viewerOriginalUrl(image) : image.motion);
   const layerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
@@ -28,7 +31,7 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     const card = layer?.parentElement;
     if (!source || !layer || !viewport || !card) return;
     const blocked = () => document.hidden || card.closest("[inert]") || card.querySelector(".photo-card-menu");
-    let player: VideoPlayer | null = null;
+    let player: Pick<VideoPlayer, "play" | "destroy"> | null = null;
     let input: PlaybackInput = "mouse";
     let completed = false;
     let failed = false;
@@ -53,15 +56,14 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     const start = (nextInput: PlaybackInput) => {
       if (failed || blocked()) return;
       input = autoPlay ? "viewer" : nextInput;
-      if (player) return;
+      if (player) { player.play(); return; }
       stopActivePlayback?.();
       stopActivePlayback = stop;
       completed = false;
       const attempt = ++generation;
       const current = () => generation === attempt;
       layer.dataset.loading = "true";
-      const Player = image.preview ? NativeMediaPlayer : MediaPlayer;
-      player = new Player(viewport, source, isVideo ? image.name : "motion.mov", true, {
+      const callbacks: PlayerCallbacks = {
         state(state) {
           if (!current()) return;
           layer.dataset.loading = String(state === "loading" || state === "preparing");
@@ -80,7 +82,10 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
           layer.title = isVideo ? "暂时无法预览此视频，可打开播放器或下载原视频" : "暂时无法播放此 live，仍可查看照片";
           stop();
         },
-      }, true);
+      };
+      player = !isVideo ? new LivePhotoPlayer(viewport, source, callbacks, autoPlay)
+        : preview ? new NativeMediaPlayer(viewport, source, image.name, true, callbacks, true)
+        : new MediaPlayer(viewport, source, image.name, true, callbacks, true);
       player.play();
       playbackListeners = new AbortController();
       const options = { capture: true, passive: true, signal: playbackListeners.signal };
@@ -119,7 +124,7 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     }
     card.addEventListener(CARD_MENU_EVENT, stop, options);
     return () => { listeners.abort(); viewerVisibility?.disconnect(); stop(); };
-  }, [image.id, image.preview, source, image.name, autoPlay, isVideo]);
+  }, [image.id, preview, source, image.name, autoPlay, isVideo]);
 
   if (!source) return null;
   return (

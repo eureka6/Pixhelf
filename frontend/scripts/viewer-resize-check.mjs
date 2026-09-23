@@ -41,7 +41,6 @@ try {
   await page.addStyleTag({ content: `
     @media (hover: none) and (pointer: coarse) {
       .viewer-image-frame { height: calc(100svh - 64px); }
-      .viewer-nav { top: calc((100svh - 64px) / 2 + var(--viewer-frame-offset)); }
     }
   ` });
   const coveredOnOpen = [];

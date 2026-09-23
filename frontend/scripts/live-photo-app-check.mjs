@@ -127,6 +127,7 @@ try {
       if (path === "/api/gallery") return route.fulfill({ json: summary });
       if (path === "/api/status") return route.fulfill({ json: status });
       if (path === "/api/images") return route.fulfill({ json: pageData });
+      if (path === "/api/management") return route.fulfill({ json: { favoriteIds: [], favoriteAlbums: [], privateAlbums: [], trashCount: 0 } });
       const image = images.find(image => path.startsWith(`/api/images/${image.id}/`) || path === `/api/images/${image.id}`);
       if (image && path.endsWith(`/${image.id}`)) return route.fulfill({ json: image });
       if (image && ["thumbnail", "original"].some(kind => path === `/api/images/${image.id}/${kind}`)) return route.fulfill({ contentType: "image/jpeg", body: image.motion ? poster : filler });
@@ -135,7 +136,7 @@ try {
         histogram: Object.fromEntries(["red", "green", "blue", "luminance"].map(key => [key, Array(256).fill(0)])),
       } });
       if (image && path.endsWith("/motion/original/fixture")) {
-        const request = { path, range: route.request().headers().range, fulfilled: false };
+        const request = { path, method: route.request().method(), range: route.request().headers().range, fulfilled: false };
         motionRequests.push(request);
         if (holdMotion) await holdMotion;
         await serveMotion(route, sample);
@@ -195,6 +196,7 @@ try {
           const galleryDimensions = await galleryPlayer.evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]);
           await finished(card);
           if (width > 720) {
+            const requestsBeforeReplay = motionRequests.length;
             await page.mouse.move(0, 0);
             await card.hover();
             await playing(card);
@@ -202,24 +204,18 @@ try {
             await card.screenshot({ path: `/tmp/pixhelf-live-replay-card-${sampleName}-${engine.name()}-${width}.png` });
             assert.deepEqual(await card.locator(".media-player-surface").evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]), galleryDimensions, "replay must retain the original orientation");
             assert.equal(await page.locator(".image-viewer").count(), 0, "hovering again should replay a completed gallery clip");
+            assert.equal(motionRequests.length, requestsBeforeReplay, "gallery replay must reuse the downloaded original bytes, including length metadata");
           }
         }
-        if (index === 0) holdMotion = new Promise(resolve => { releaseMotion = resolve; });
+        const requestsBeforeViewer = motionRequests.length;
         if (width > 720) await card.locator(".photo-card-open").click();
         else await card.locator(".photo-card-open").tap();
         const viewer = page.locator(".viewer-media:not(.viewer-swipe-outgoing)");
         await viewer.waitFor();
         assert.equal(await viewer.getAttribute("data-image-id"), `photo-${index}`, "the most recently played photo must open on the next tap, including after playback ends");
         await page.waitForFunction(() => getComputedStyle(document.querySelector(".image-viewer")).opacity === "1");
-        if (holdMotion) {
-          assert.equal(await viewer.locator(".media-preview").getAttribute("data-playing"), "false");
-          await viewer.locator(".media-preview-loading").waitFor({ state: "visible" });
-          await visiblePicture(viewer);
-          await page.screenshot({ path: `/tmp/pixhelf-live-loading-viewer-${sampleName}-${engine.name()}-${width}.png` });
-          releaseMotion();
-          holdMotion = null;
-        }
         await playing(viewer);
+        if (index === 0) assert.equal(motionRequests.length, requestsBeforeViewer, "opening the same original in the viewer must reuse the card's bytes");
         assert.equal(await viewer.locator(".media-preview").getAttribute("data-loading"), "false");
         await visiblePicture(viewer, true);
         await page.screenshot({ path: `/tmp/pixhelf-live-app-${sampleName}-${engine.name()}-${width}-${index}.png` });
@@ -227,6 +223,7 @@ try {
           const viewerPlayer = await viewer.locator(".media-player-surface").elementHandle();
           const viewerDimensions = await viewerPlayer.evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]);
           await finished(viewer);
+          const requestsBeforeReplay = motionRequests.length;
           await page.mouse.move(0, 0);
           await viewer.hover();
           await viewer.dispatchEvent("pixhelf:card-touch");
@@ -254,7 +251,7 @@ try {
           assert.deepEqual(await viewer.locator(".media-player-surface").evaluate(player => [player.querySelector("canvas").width, player.querySelector("canvas").height]), viewerDimensions);
           await page.screenshot({ path: `/tmp/pixhelf-live-replay-viewer-${sampleName}-${engine.name()}-${width}.png` });
           await finished(viewer);
-
+          assert.equal(motionRequests.length, requestsBeforeReplay, "a complete viewer replay must not request the motion data again");
         }
         if (index === 26) {
           for (const direction of ["next", "previous"]) {
@@ -288,11 +285,12 @@ try {
         await page.locator(".viewer-close").click();
         await page.locator(".image-viewer").waitFor({ state: "detached" });
       }
-      await page.goto("https://pixhelf.test/?view=albums&album=Live", { waitUntil: "networkidle" });
-      await page.locator(".album-folder").first().waitFor();
-      await page.screenshot({ path: `/tmp/pixhelf-album-folders-${engine.name()}-${width}.png` });
+      await page.goto("https://pixhelf.test/?view=albums", { waitUntil: "networkidle" });
+      await page.locator(".album-card").first().waitFor();
+      assert.equal(await page.locator(".album-folder, .album-children").count(), 0);
+      await page.screenshot({ path: `/tmp/pixhelf-flat-albums-${engine.name()}-${width}.png` });
       assert.deepEqual(errors, []);
-      console.log(`${engine.name()}: ${sampleName}, ${width}px libmedia app checks passed`);
+      console.log(`${engine.name()}: ${sampleName}, ${width}px Live Photo app checks passed`);
     } catch (error) {
       console.error(JSON.stringify({ motionRequests }, null, 2));
       console.error(JSON.stringify(await state(page), null, 2));

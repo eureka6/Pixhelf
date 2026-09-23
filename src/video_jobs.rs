@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -42,22 +42,16 @@ impl VideoKind {
 }
 
 pub fn version(record: &ImageRecord) -> Option<String> {
-    if record.video.is_none() && record.motion.is_none() {
-        return None;
-    }
+    // A Live Photo keeps its original motion clip; background encodes belong
+    // exclusively to standalone videos.
+    record.video.as_ref()?;
     let mut hash = blake3::Hasher::new();
     hash.update(CACHE_VERSION.as_bytes());
     hash.update(record.id.as_bytes());
-    if let Some(motion) = &record.motion {
-        hash.update(motion.id.as_bytes());
-    }
     Some(hash.finalize().to_hex().to_string())
 }
 
 pub fn url(record: &ImageRecord, kind: VideoKind) -> Option<String> {
-    if kind == VideoKind::Playback && record.video.is_none() {
-        return None;
-    }
     Some(format!(
         "/api/images/{}/video/{}/{}.mp4",
         record.id,
@@ -134,9 +128,6 @@ impl VideoManager {
         // Explicit playback requests can promote their own job at any time.
         for kind in [VideoKind::Preview, VideoKind::Playback] {
             for record in records {
-                if kind == VideoKind::Playback && record.video.is_none() {
-                    continue;
-                }
                 if let Some(version) = version(record) {
                     jobs.push((format!("{version}-{}", kind.name()), record, kind));
                 }
@@ -351,28 +342,13 @@ fn temporary(directory: &Path) -> Result<tempfile::NamedTempFile> {
 fn generate(entry: &VideoEntry) -> Result<tempfile::NamedTempFile> {
     ensure_current(&entry.record)?;
     let directory = entry.path.parent().context("video cache has no parent")?;
-    // Embedded clips need a seekable input. Copy only their bounded byte range,
-    // never the JPEG or Samsung trailer, and remove it on every exit path.
-    let mut extracted = None;
-    let source = if let Some(motion) = &entry.record.motion {
-        if motion.offset > 0 {
-            let mut file = File::open(&motion.path)?;
-            file.seek(SeekFrom::Start(motion.offset))?;
-            let mut temp = temporary(directory)?;
-            let copied = std::io::copy(&mut file.take(motion.length), &mut temp)?;
-            ensure!(copied == motion.length, "incomplete embedded video");
-            extracted = Some(temp);
-            extracted.as_ref().unwrap().path()
-        } else {
-            &motion.path
-        }
-    } else {
-        &entry.record.path
-    };
-    let (width, height, metadata) = match &entry.record.video {
-        Some(metadata) => (entry.record.width, entry.record.height, metadata.clone()),
-        None => video::probe(source)?,
-    };
+    let source = &entry.record.path;
+    let metadata = entry
+        .record
+        .video
+        .as_ref()
+        .context("not a standalone video")?;
+    let (width, height) = (entry.record.width, entry.record.height);
     let preview = entry.kind == VideoKind::Preview;
     let scale = if preview {
         480.0 / f64::from(width.max(height))
@@ -394,15 +370,7 @@ fn generate(entry: &VideoEntry) -> Result<tempfile::NamedTempFile> {
         "-dn",
     ]);
     if preview {
-        command.args([
-            "-an",
-            "-t",
-            if entry.record.motion.is_some() {
-                "30"
-            } else {
-                "6"
-            },
-        ]);
+        command.args(["-an", "-t", "6"]);
     } else {
         command.args([
             "-map", "0:a:0?", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
@@ -473,7 +441,6 @@ fn generate(entry: &VideoEntry) -> Result<tempfile::NamedTempFile> {
         "encoder produced no playable video"
     );
     output.as_file().sync_all()?;
-    drop(extracted);
     Ok(output)
 }
 

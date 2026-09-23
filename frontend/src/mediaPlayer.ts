@@ -1,6 +1,7 @@
 import type AVPlayer from "@libmedia/avplayer/AVPlayer";
 import { createMediaSource } from "./mediaSource";
-import type { VideoFrame } from "./videoFrame";
+import { mediaOrientation, type MediaOrientation } from "./mediaOrientation";
+import { encodeVideoFrame, videoFrameFromBytes, type VideoFrame } from "./videoFrame";
 
 type PlayerModule = typeof import("@libmedia/avplayer/AVPlayer");
 export type PlayerState = "preparing" | "loading" | "ready" | "playing" | "paused" | "ended" | "failed";
@@ -16,6 +17,7 @@ export type PlayerCallbacks = {
 };
 
 export type VideoPlayer = Pick<MediaPlayer, "play" | "pause" | "seek" | "volume" | "rate" | "captureFrame" | "destroy">;
+type MediaPlayerOptions = { sourceResolution?: boolean; retainBytes?: boolean };
 
 const assetBase = import.meta.env.DEV
   ? new URL("/assets/libmedia/", location.origin).href
@@ -46,9 +48,13 @@ export class MediaPlayer {
   private duration = 0;
   private volumeValue = 1;
   private rateValue = 1;
+  private sourcePixels = 0;
+  private renderPixelRatio = 1;
+  private renderSize = { width: 0, height: 0 };
+  private orientation: MediaOrientation | undefined;
 
-  constructor(host: HTMLDivElement, source: string, filename: string,
-    private muted: boolean, private callbacks: PlayerCallbacks = {}, cover = false) {
+  constructor(private host: HTMLDivElement, source: string, filename: string,
+    private muted: boolean, private callbacks: PlayerCallbacks = {}, cover = false, private options: MediaPlayerOptions = {}) {
     const container = this.container = document.createElement("div");
     container.className = "media-player-surface";
     host.appendChild(container);
@@ -57,17 +63,40 @@ export class MediaPlayer {
     this.volumeValue = muted ? 0 : 1;
     container.dataset.currentTime = "0";
     this.setState("loading");
-    this.resize = new ResizeObserver(() => {
-      if (!this.disposed) this.engine?.resize(container.clientWidth, container.clientHeight);
-    });
-    this.resize.observe(container);
+    this.resize = new ResizeObserver(() => this.resizeSurface());
+    this.resize.observe(host);
     this.pending = this.initialize(source, filename, cover).catch(error => this.fail(error));
+  }
+
+  private resizeSurface(force = false) {
+    if (this.disposed || !this.engine) return;
+    const { clientWidth: hostWidth, clientHeight: hostHeight } = this.host;
+    const swapped = this.orientation && this.orientation.rotation % 180 !== 0;
+    const clientWidth = swapped ? hostHeight : hostWidth, clientHeight = swapped ? hostWidth : hostHeight;
+    if (!clientWidth || !clientHeight) return;
+    if (this.orientation) {
+      Object.assign(this.container.style, {
+        width: `${clientWidth}px`, height: `${clientHeight}px`,
+        left: `${(hostWidth - clientWidth) / 2}px`, top: `${(hostHeight - clientHeight) / 2}px`,
+        transform: `rotate(${this.orientation.rotation}deg) scaleX(${this.orientation.mirrored ? -1 : 1})`,
+      });
+    }
+    // Preserve the decoded detail through CSS zoom. Pixel area is independent
+    // of MOV rotation; retaining the container aspect also preserves cover crop.
+    // Bound the single Live Photo surface to a 4K pixel budget on large sources.
+    const scale = this.options.sourceResolution && this.sourcePixels > 0
+      ? Math.sqrt(Math.min(this.sourcePixels, 3840 * 2160) / (clientWidth * clientHeight)) / this.renderPixelRatio : 1;
+    const width = Math.max(1, Math.round(clientWidth * scale)), height = Math.max(1, Math.round(clientHeight * scale));
+    if (!force && width === this.renderSize.width && height === this.renderSize.height) return;
+    this.renderSize = { width, height };
+    this.engine.resize(width, height);
   }
 
   private async initialize(source: string, filename: string, cover: boolean) {
     const { default: Player, AVPlayerSupportedCodecs } = await loadLibrary();
     if (this.disposed) return;
     Player.setLogLevel(3);
+    this.renderPixelRatio = window.devicePixelRatio || 1;
     const engine = this.engine = new Player({
       container: this.container,
       wasmBaseUrl: `${assetBase}wasm`,
@@ -80,7 +109,11 @@ export class MediaPlayer {
     });
     engine.setVolume(this.volumeValue, true);
     engine.setRenderMode(cover ? 1 : 0);
-    engine.on("firstVideoRendered", () => { if (!this.disposed && !this.failed) this.callbacks.frame?.(); });
+    engine.on("firstVideoRendered", () => {
+      if (this.disposed || this.failed) return;
+      this.resizeSurface(true);
+      this.callbacks.frame?.();
+    });
     engine.on("played", () => {
       if (this.disposed) return;
       this.playing = true;
@@ -101,9 +134,20 @@ export class MediaPlayer {
     engine.on("time", timestamp => this.updateTime(timestamp));
     engine.on("error", error => this.fail(error));
     engine.on("timeout", () => this.fail(new Error("视频加载超时，请重试。")));
-    await engine.load(createMediaSource(Player, source, filename, this.sourceAbort.signal));
+    await engine.load(createMediaSource(Player, source, filename, this.sourceAbort.signal, this.options.retainBytes));
     if (this.disposed || this.failed) return;
     const streams = engine.getStreams();
+    const videoStream = streams.find(stream => stream.codecparProxy.codecType === 0);
+    const video = videoStream?.codecparProxy;
+    if (video && video.width > 0 && video.height > 0) this.sourcePixels = video.width * video.height;
+    this.orientation = mediaOrientation(videoStream?.metadata.matrix);
+    if (this.orientation && videoStream) {
+      // libmedia 1.3.1 loses Canvas2D rotation on resize and lays out negative
+      // quarter turns incorrectly. Apply the display matrix once in the surface,
+      // before playback, so both browser and Wasm decoders share the same result.
+      delete videoStream.metadata.matrix;
+      this.resizeSurface();
+    }
     // libmedia 1.3.1's AVI table recognizes "XVID" but omits the lowercase
     // "xvid" tag used by these MPEG-4 Part 2 files. Correct the parsed codec
     // descriptor; the source bytes and decoding still belong to libmedia.
@@ -159,10 +203,28 @@ export class MediaPlayer {
     await this.pending;
     if (this.disposed || this.failed || !this.loaded || !this.engine) throw new Error("当前画面尚未就绪，请稍后重试。");
     const time = Number(this.engine.currentTime) / 1000;
-    const snapshot = this.engine.snapshot("jpeg", .9);
-    if (!snapshot.startsWith("data:image/jpeg;base64,")) throw new Error("无法截取当前画面，请重试。");
+    const snapshot = this.engine.snapshot(this.orientation ? "png" : "jpeg", .9);
+    if (!snapshot.startsWith(this.orientation ? "data:image/png;base64," : "data:image/jpeg;base64,")) {
+      throw new Error("无法截取当前画面，请重试。");
+    }
+    if (this.orientation) {
+      const image = new Image();
+      image.src = snapshot;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      const swapped = this.orientation.rotation % 180 !== 0;
+      canvas.width = swapped ? image.naturalHeight : image.naturalWidth;
+      canvas.height = swapped ? image.naturalWidth : image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("无法截取当前画面，请重试。");
+      context.translate(canvas.width / 2, canvas.height / 2);
+      context.rotate(this.orientation.rotation * Math.PI / 180);
+      context.scale(this.orientation.mirrored ? -1 : 1, 1);
+      context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+      return encodeVideoFrame(canvas, time);
+    }
     const bytes = Uint8Array.from(atob(snapshot.split(",")[1]!), character => character.charCodeAt(0));
-    return { file: new File([bytes], `frame-${time.toFixed(3)}.jpg`, { type: "image/jpeg" }), time };
+    return videoFrameFromBytes(bytes, time);
   }
 
   play() {
@@ -207,6 +269,12 @@ export class MediaPlayer {
     this.container.hidden = true;
     this.container.remove();
     this.sourceAbort.abort();
-    void this.pending.then(() => this.engine?.destroy()).catch(() => {});
+    void this.pending.then(async () => {
+      const engine = this.engine;
+      if (!engine) return;
+      // Stop frame requests before closing the decoder's message ports.
+      try { if (this.playing) await engine.pause(); }
+      finally { await engine.destroy(); }
+    }).catch(() => {});
   }
 }

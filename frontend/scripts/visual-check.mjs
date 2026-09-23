@@ -418,36 +418,44 @@ try {
       fullscreenButtons: document.querySelectorAll(".viewer-fullscreen").length,
       detailsPages: document.querySelectorAll(".viewer-details-page").length,
       detailsToolbars: document.querySelectorAll(".viewer-details-toolbar").length,
-      detailsToolbarControls: document.querySelectorAll(
-        ".viewer-details-toolbar > .viewer-control",
-      ).length,
-      detailsToolbarUnified: document.querySelector(".viewer-details-toolbar")
-        ?.classList.contains("viewer-header-actions") ?? false,
+      detailsReturnButtons: document.querySelectorAll(".viewer-details-return").length,
+      rightToolbarControls: document.querySelectorAll(".viewer-header-actions").length,
       detailsInlineActions: document.querySelectorAll(".viewer-details-quick-actions").length,
       scrollCues: document.querySelectorAll(".viewer-scroll-cue").length,
       zoomControls: document.querySelectorAll(
         ".viewer-zoom-controls, .viewer-zoom-value",
       ).length,
-      navigationGlass: [...document.querySelectorAll(".viewer-nav")].every((control) => {
-        const style = getComputedStyle(control);
-        return Number.parseFloat(style.borderTopWidth) === 0
-          && !style.boxShadow.includes("inset")
-          && (style.backgroundImage !== "none" || style.backgroundColor !== "rgba(0, 0, 0, 0)")
-          && (style.backdropFilter !== "none" || style.webkitBackdropFilter !== "none");
-      }),
-      floatingToolbar: (() => {
+      sideNavigation: (() => {
+        const stage = document.querySelector(".viewer-stage");
+        const previous = document.querySelector(".viewer-previous");
+        const next = document.querySelector(".viewer-next");
+        if (!stage || !previous || !next || document.querySelector(".viewer-navigation")) return false;
+        const stageRect = stage.getBoundingClientRect();
+        const previousRect = previous.getBoundingClientRect();
+        const nextRect = next.getBoundingClientRect();
+        const compact = matchMedia("(max-width: 720px), (hover: none) and (pointer: coarse)").matches;
+        return previousRect.width >= (compact ? 44 : 56) && nextRect.width >= (compact ? 44 : 56)
+          && Math.abs(previousRect.left - stageRect.left) <= 1
+          && Math.abs(nextRect.right - stageRect.right) <= 1
+          && [previousRect, nextRect].every(rect => rect.top > stageRect.top && rect.bottom < stageRect.bottom
+            && Math.abs(rect.top + rect.height / 2 - stageRect.top - stageRect.height / 2) <= 1)
+          && [previous, next].every(button => button.dataset.loading === "true"
+            || (getComputedStyle(button.querySelector(".viewer-nav-glyph")).display === "none") === compact)
+          && previousRect.right < nextRect.left
+          && previousRect.width < stageRect.width / 4
+          && nextRect.width < stageRect.width / 4;
+      })(),
+      minimalHeader: (() => {
         const viewer = document.querySelector(".image-viewer");
         const header = document.querySelector(".viewer-header");
-        const actions = document.querySelector(".viewer-header-actions");
-        if (!viewer || !header || !actions) return null;
+        const close = header?.querySelector(".viewer-close");
+        if (!viewer || !header || !close) return null;
         const headerStyle = getComputedStyle(header);
-        const actionsStyle = getComputedStyle(actions);
         return {
           mode: viewer.getAttribute("data-ui-layout"),
           headerTransparent: headerStyle.backgroundImage === "none"
             && headerStyle.backgroundColor === "rgba(0, 0, 0, 0)",
-          actionsSurfaced: actionsStyle.backgroundColor !== "rgba(0, 0, 0, 0)"
-            && Number.parseFloat(actionsStyle.borderTopWidth) > 0,
+          closeOnRight: close.getBoundingClientRect().right > innerWidth / 2,
         };
       })(),
       headingModules: document.querySelectorAll(".viewer-heading").length,
@@ -624,11 +632,7 @@ try {
       throw new Error(`viewer side-button navigation failed: ${JSON.stringify(sideButtonNavigation)}`);
     }
     Object.assign(viewer, { sideButtonNavigation });
-    if (target.name === "desktop") {
-      await page.locator(".viewer-next").click();
-    } else {
-      await page.keyboard.press("ArrowRight");
-    }
+    await page.locator(".viewer-next").click();
     await page.waitForFunction((imageId) =>
       document.querySelector(".image-viewer")?.getAttribute("data-image-id") === imageId
     , sideButtonStart.nextId);
@@ -739,16 +743,15 @@ try {
     ) {
       throw new Error(`viewer rapid-switch pipeline failed: ${JSON.stringify(rapidSwitch)}`);
     }
-    await page.locator(".viewer-fullscreen").click();
+    await page.locator(".viewer-media").click({ button: "right" });
+    await page.getByRole("menuitem", { name: "全屏查看", exact: true }).click();
     await page.waitForFunction(() =>
       document.fullscreenElement?.classList.contains("image-viewer")
     );
-    await page.waitForFunction(() =>
-      document.querySelector(".viewer-fullscreen")?.getAttribute("aria-label") === "退出全屏"
-    );
     viewer.fullscreenEntered = true;
-    viewer.fullscreenLabel = await page.locator(".viewer-fullscreen").getAttribute("aria-label");
-    await page.locator(".viewer-fullscreen").click();
+    await page.locator(".viewer-media").click({ button: "right" });
+    viewer.fullscreenLabel = await page.getByRole("menuitem", { name: "退出全屏", exact: true }).textContent();
+    await page.getByRole("menuitem", { name: "退出全屏", exact: true }).click();
     await page.waitForFunction(() => document.fullscreenElement === null);
     viewer.fullscreenExited = true;
     await page.keyboard.press("=");
@@ -921,9 +924,11 @@ try {
       });
 
       const titleBeforeSwipe = await page.locator(".image-viewer").getAttribute("data-image-name");
-      await dispatchTouch("touchStart", [{ id: 31, x: 320, y: 420 }]);
+      viewer.swipeStartedOnNavigation = await page.evaluate(() =>
+        Boolean(document.elementFromPoint(370, 420)?.closest(".viewer-next")));
+      await dispatchTouch("touchStart", [{ id: 31, x: 370, y: 420 }]);
       await page.waitForTimeout(32);
-      await dispatchTouch("touchMove", [{ id: 31, x: 90, y: 420 }]);
+      await dispatchTouch("touchMove", [{ id: 31, x: 140, y: 420 }]);
       await page.waitForTimeout(32);
       viewer.swipeDragTracking = await page.locator(".viewer-media").evaluate((media) =>
         new DOMMatrix(getComputedStyle(media).transform).e
@@ -1726,11 +1731,11 @@ try {
       (target.name === "mobile" && viewer.renderer !== "viewport-bitmap") ||
       viewer.prefetchedOriginals < 2 ||
       viewer.previewRequests !== 0 ||
-      viewer.fullscreenButtons !== 1 ||
+      viewer.fullscreenButtons !== 0 ||
       viewer.detailsPages !== 1 ||
       viewer.detailsToolbars !== 1 ||
-      viewer.detailsToolbarControls !== 5 ||
-      !viewer.detailsToolbarUnified ||
+      viewer.detailsReturnButtons !== 1 ||
+      viewer.rightToolbarControls !== 0 ||
       viewer.detailsInlineActions !== 0 ||
       viewer.scrollCues !== 0 ||
       viewer.headingModules !== 0 ||
@@ -1765,10 +1770,10 @@ try {
       viewer.switchPerformance.mediaAnimations !== 0 ||
       viewer.switchPerformance.dispatchDuration > 80 ||
       viewer.switchPerformance.firstFrameDuration > 100 ||
-      !viewerChrome.navigationGlass ||
-      viewerChrome.floatingToolbar?.mode !== "floating" ||
-      !viewerChrome.floatingToolbar?.headerTransparent ||
-      !viewerChrome.floatingToolbar?.actionsSurfaced ||
+      !viewerChrome.sideNavigation ||
+      viewerChrome.minimalHeader?.mode !== "floating" ||
+      !viewerChrome.minimalHeader?.headerTransparent ||
+      !viewerChrome.minimalHeader?.closeOnRight ||
       (target.name === "desktop" && (
         !viewer.detailsReachedByWheel ||
         viewer.detailsName !== viewer.keyboardNavigation ||
@@ -1805,6 +1810,7 @@ try {
         viewer.nativeOriginalAfterReset.displaySource !== "viewport-bitmap" ||
         viewer.nativeOriginalAfterReset.visible > .01 ||
         viewer.nativeOriginalAfterReset.settledWillChange !== "auto" ||
+        !viewer.swipeStartedOnNavigation ||
         !viewer.swipeNavigation ||
         viewer.swipeNavigation === viewer.keyboardNavigation ||
         !viewer.shortSwipeNavigation?.changed ||

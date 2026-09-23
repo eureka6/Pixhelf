@@ -1685,7 +1685,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixhelf"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1696,6 +1696,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "futures-core",
  "http-range-header",
  "image",
  "ipnet",
@@ -1704,6 +1705,7 @@ dependencies = [
  "quick-xml",
  "reqwest",
  "rpassword",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -1712,6 +1714,7 @@ dependencies = [
  "time",
  "tokenizers",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-sessions",
@@ -1720,6 +1723,7 @@ dependencies = [
  "walkdir",
  "webp",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

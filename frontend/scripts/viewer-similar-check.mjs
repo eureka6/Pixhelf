@@ -138,14 +138,16 @@ try {
     try {
       await page.goto(process.env.PIXHELF_URL ?? "http://127.0.0.1:3002", { waitUntil: "domcontentloaded" });
       await activate(page.locator(".image-card").first());
-      const trigger = page.locator(".viewer-header").getByRole("button", { name: "相似图片", exact: true });
-      assert.equal(await trigger.getAttribute("title"), "相似图片");
-      if (target.name === "compact") {
-        await trigger.focus();
-        await page.keyboard.press("Enter");
-      } else {
-        await activate(trigger);
-      }
+      const showSimilar = async () => {
+        if (await page.locator(".image-viewer").evaluate(viewer => viewer.scrollTop > 1)) await page.keyboard.press("PageUp");
+        await page.waitForFunction(() => document.querySelector(".image-viewer").scrollTop < 1
+          && document.querySelector(".image-viewer").dataset.page === "image");
+        await page.locator(".viewer-media").click({ button: "right" });
+        const action = page.getByRole("menuitem", { name: "查找相似图片", exact: true });
+        if (target.name === "compact") { await action.focus(); await page.keyboard.press("Enter"); }
+        else await activate(action);
+      };
+      await showSimilar();
       await page.waitForSelector(".viewer-similar-skeleton");
       const loading = await expectAligned(page);
       const skeleton = await expectJustified(page, true);
@@ -160,7 +162,7 @@ try {
       const ready = await expectAligned(page);
       if (target.mode === "error") {
         round.mode = "one";
-        await activate(page.locator(".viewer-details-toolbar").getByRole("button", { name: "相似图片", exact: true }));
+        await showSimilar();
         await page.waitForSelector(".viewer-similar-card");
         await expectAligned(page);
       }
@@ -169,18 +171,18 @@ try {
       const requests = round.requests;
       await activate(page.locator(".viewer-details-return"));
       await page.waitForFunction(() => document.querySelector(".image-viewer").scrollTop < 1);
-      await activate(trigger);
+      await showSimilar();
       await expectAligned(page);
       assert.equal(round.requests, requests, "cached results triggered another search");
-      await activate(page.locator(".viewer-details-toolbar").getByRole("button", { name: "相似图片", exact: true }));
+      await showSimilar();
       await expectAligned(page);
       assert.equal(round.requests, requests);
       await page.screenshot({ path: `/tmp/pixhelf-similar-${target.name}.png` });
-      await activate(page.locator(".viewer-details-close"));
+      await page.keyboard.press("Escape");
 
       round = createRound("results");
       await activate(page.locator(".image-card").nth(1));
-      await activate(trigger);
+      await showSimilar();
       if (target.name === "desktop") {
         await page.waitForFunction(() => {
           const viewer = document.querySelector(".image-viewer");

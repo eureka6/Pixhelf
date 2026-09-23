@@ -54,8 +54,8 @@
 .video-viewer-stage .video-control:disabled { opacity: .3; cursor: default; }
 .video-viewer-stage :is(button, a, input):focus-visible { outline: 2px solid var(--video-accent); outline-offset: 2px; }
 .video-viewer-stage .video-control[aria-expanded="true"] { color: #fff; background: #ffffff18; box-shadow: none; }
-.video-viewer-header .video-control { width: 36px; }
-.video-viewer-header .video-return { margin-left: -8px; }
+.video-viewer-stage .video-viewer-header .video-return { width: 60px; height: 60px; color: #f7faf8; background: transparent; border-radius: 0; }
+.video-viewer-stage .video-viewer-header .video-return:focus-visible { color: #b9f4e9; background: transparent; outline: none; }
 
 .video-rate-menu .video-rate-panel, .video-episodes-menu .video-episodes-panel, .video-time-menu .video-time-panel {
   --popover-width: 188px;
@@ -211,6 +211,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .video-viewer-stage .video-control:hover:not(:disabled), .video-details-toolbar > button:hover { color: #fff; background: #ffffff12; }
+  .video-viewer-stage .video-viewer-header .video-return:hover:not(:disabled) { background: transparent; }
   .video-rate-panel [role="menuitemradio"]:hover, .video-episodes-list > button:hover { background: #ffffff12; }
   .video-viewer-stage .video-time-toggle:hover:not(:disabled) { background: #ffffff12; }
   .video-viewer-resume-button:hover { background: #222c; }

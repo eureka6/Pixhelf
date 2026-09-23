@@ -1,48 +1,33 @@
+import { copyText } from "./clipboard";
 import type { JSX } from "preact";
 import { memo } from "preact/compat";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Check, Copy, Download, ExternalLink, ImageIcon, Info, Play, ScanSearch } from "./icons";
+import { Check, Copy, Download, ExternalLink, ImageIcon, Info, Maximize2, Minimize2, Play, ScanSearch } from "./icons";
 import { CARD_MENU_EVENT, CARD_SELECTOR } from "./cardInteraction";
 import type { CardMenuRequest } from "./cardInteraction";
 import type { GalleryImage, ImageCardAction } from "./types";
-import { viewerOriginalUrl } from "./viewerAssets";
+import { originalImageUrl } from "./viewerAssets";
+import { SelectionMenuItems, type SelectionActions } from "./SelectionMenu";
 
-async function copyFilename(name: string, container: HTMLElement): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(name);
-      return;
-    }
-  } catch { /* Keep copying available on HTTP and when clipboard access is denied. */ }
-  const active = document.activeElement;
-  const input = document.createElement("textarea");
-  input.value = name;
-  input.readOnly = true;
-  input.tabIndex = -1;
-  Object.assign(input.style, { position: "fixed", top: "0", left: "0", width: "1px", height: "1px", opacity: "0" });
-  container.append(input);
-  input.focus({ preventScroll: true });
-  input.select();
-  try {
-    if (!document.execCommand("copy")) throw new Error("Copy failed");
-  } finally {
-    input.remove();
-    if (active instanceof HTMLElement && active.isConnected) active.focus({ preventScroll: true });
-  }
-}
 
-export const ImageCardActions = memo(function ImageCardActions({ image, onAction, onMenuChange, similarDisabled = false }: {
+export const ImageCardActions = memo(function ImageCardActions({ image, onAction, onMenuChange, similarDisabled = false, onSelect, selected = false, selectionDisabled = false, selectionActions, fullscreen = false, onToggleFullscreen }: {
   image: GalleryImage;
   onAction: (action: ImageCardAction) => void;
   onMenuChange?: (open: boolean) => void;
   similarDisabled?: boolean;
+  onSelect?: () => void;
+  selected?: boolean;
+  selectionDisabled?: boolean;
+  selectionActions?: SelectionActions;
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }) {
   const controlsRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [request, setRequest] = useState<CardMenuRequest | null>(null);
   const open = request !== null;
   const [copyState, setCopyState] = useState<"idle" | "pending" | "done" | "failed">("idle");
-  const originalUrl = viewerOriginalUrl(image);
+  const originalUrl = originalImageUrl(image);
 
   useLayoutEffect(() => { onMenuChange?.(open); }, [open, onMenuChange]);
 
@@ -111,7 +96,10 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
     let dismissTimer = 0;
     const dismiss = () => closeMenu();
     const down = (event: PointerEvent) => {
-      if (event.target instanceof Node && !menu.contains(event.target)) dismiss();
+      const bounds = menu.getBoundingClientRect();
+      // Touch hit testing may expand a menu item's target beyond the popup.
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom
+        || (event.target instanceof Node && !menu.contains(event.target))) dismiss();
     };
     const move = (event: PointerEvent) => {
       if (!request.touch && event.pointerType === "mouse") {
@@ -213,9 +201,14 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
             <strong>{image.name}</strong>
             <span>{image.width.toLocaleString()} × {image.height.toLocaleString()}</span>
           </div>
-          <button type="button" role="menuitem" onClick={() => choose("view")}>{image.video ? <Play size={17} /> : <ImageIcon size={17} />}<span>{image.video ? "播放视频" : "查看大图"}</span></button>
+          {onSelect ? <button type="button" role="menuitem" disabled={selectionDisabled} aria-disabled={selectionDisabled} onClick={() => { closeMenu(true); onSelect(); }}><Check size={17} /><span>{selected ? "取消选择" : "选择"}{image.video ? "视频" : "图片"}</span></button>
+            : <button type="button" role="menuitem" onClick={() => choose("view")}>{image.video ? <Play size={17} /> : <ImageIcon size={17} />}<span>{image.video ? "播放视频" : "查看大图"}</span></button>}
+          {selectionActions && <><SelectionMenuItems actions={selectionActions} showBatch={selected} onChoose={action => { closeMenu(true); action(); }} /><div className="photo-card-menu-divider" role="separator" /></>}
           <button type="button" role="menuitem" onClick={() => choose("details")}><Info size={17} /><span>{image.video ? "视频信息" : "图片信息"}</span></button>
           <button type="button" role="menuitem" aria-disabled={similarDisabled} disabled={similarDisabled} onClick={() => choose("similar")}><ScanSearch size={17} /><span>{image.video ? "查找相似画面" : "查找相似图片"}</span></button>
+          {onToggleFullscreen && <button type="button" role="menuitem" onClick={() => { closeMenu(); onToggleFullscreen(); }}>
+            {fullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}<span>{fullscreen ? "退出全屏" : "全屏查看"}</span>
+          </button>}
           <div className="photo-card-menu-divider" role="separator" />
           <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>{image.video ? "下载原视频" : "下载原图"}</span></a>
           <a role="menuitem" href={originalUrl} target="_blank" rel="noopener noreferrer" onClick={() => closeMenu()}><ExternalLink size={17} /><span>{image.video ? "在新标签页打开原视频" : "在新标签页打开原图"}</span></a>
@@ -224,7 +217,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
             if (!menu || copyState === "pending") return;
             setCopyState("pending");
             try {
-              await copyFilename(image.name, menu);
+              await copyText(image.name, menu);
               if (menu.isConnected) setCopyState("done");
             } catch {
               if (menu.isConnected) setCopyState("failed");

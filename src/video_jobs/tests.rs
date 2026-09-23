@@ -139,8 +139,8 @@ async fn background_video_outputs_are_seekable_persistent_and_rebuildable() {
     restarted.shutdown();
 }
 
-#[tokio::test]
-async fn live_preview_extracts_hevc_and_invalidates_when_paired_video_changes() {
+#[test]
+fn live_photos_keep_originals_outside_video_jobs() {
     let temp = tempfile::tempdir().unwrap();
     let gallery = temp.path().join("gallery");
     fs::create_dir(&gallery).unwrap();
@@ -155,19 +155,16 @@ async fn live_preview_extracts_hevc_and_invalidates_when_paired_video_changes() 
     assert_eq!(index.images.len(), 2);
     let manager = VideoManager::new(&temp.path().join("cache")).unwrap();
     manager.reconcile(&index.images);
-    manager.start_worker();
-    finish(&manager).await;
-    assert_eq!(manager.status().preview.ready, 2);
+    assert_eq!(manager.status().preview.total, 0);
     assert_eq!(manager.status().playback.total, 0);
     for record in &index.images {
-        let path = ready(&manager, record, VideoKind::Preview);
-        let (width, height, metadata) = video::probe(&path).unwrap();
-        assert_eq!(metadata.codec, "h264");
-        assert_eq!(metadata.audio_codec, None);
-        assert!(
-            width > height,
-            "video dimensions must come from the clip, not the still image"
-        );
+        assert!(record.motion.is_some());
+        assert!(record.video.is_none());
+        assert!(version(record).is_none());
+        for kind in [VideoKind::Preview, VideoKind::Playback] {
+            assert!(url(record, kind).is_none());
+            assert!(manager.request(record, kind, false).is_none());
+        }
         assert!(
             !record
                 .motion
@@ -182,7 +179,6 @@ async fn live_preview_extracts_hevc_and_invalidates_when_paired_video_changes() 
         .iter()
         .find(|record| record.name == "paired.jpg")
         .unwrap();
-    let old_preview = ready(&manager, record, VideoKind::Preview);
     fs::write(
         &paired,
         include_bytes!("../../frontend/scripts/fixtures/live-photo.mp4"),
@@ -190,13 +186,21 @@ async fn live_preview_extracts_hevc_and_invalidates_when_paired_video_changes() 
     .unwrap();
     let updated = crate::gallery::scan_gallery(&gallery, Some(&index)).unwrap();
     let changed = updated.image(&record.id).unwrap();
-    assert_ne!(version(record), version(changed));
+    assert_ne!(
+        record.motion.as_ref().unwrap().id,
+        changed.motion.as_ref().unwrap().id
+    );
     manager.reconcile(&updated.images);
-    manager.cleanup_stale().await;
-    assert!(!old_preview.exists());
-    finish(&manager).await;
-    assert_eq!(manager.status().preview.ready, 2);
-    manager.shutdown();
+    assert_eq!(manager.status().preview.total, 0);
+    assert_eq!(manager.status().playback.total, 0);
+    assert!(fs::read_dir(&manager.cache_root).unwrap().next().is_none());
+
+    // The same MOV is an ordinary video when its paired photo is removed.
+    fs::remove_file(gallery.join("paired.jpg")).unwrap();
+    let unpaired = crate::gallery::scan_gallery(&gallery, Some(&updated)).unwrap();
+    manager.reconcile(&unpaired.images);
+    assert_eq!(manager.status().preview.queued, 1);
+    assert_eq!(manager.status().playback.queued, 1);
 }
 
 #[tokio::test]

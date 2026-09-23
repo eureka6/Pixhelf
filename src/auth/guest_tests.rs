@@ -1,5 +1,76 @@
 use super::*;
 
+#[tokio::test]
+async fn gallery_management_requires_admin_origin_and_csrf() {
+    let (_cache, _gallery, app, id, cookie, csrf) = guest_fixture().await;
+    assert_eq!(
+        set_guest(&app, &cookie, &csrf, true).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    for path in [
+        "/api/management",
+        "/api/management/favorites",
+        "/api/management/trash",
+        "/api/management/directories",
+        "/api/management/downloads/missing",
+    ] {
+        assert_eq!(
+            call(&app, request(Method::GET, path, None), Body::empty())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let body = json!({"ids":[id], "action":"favorite", "favorite":true}).to_string();
+    for path in [
+        "/api/management/batch",
+        "/api/management/downloads",
+        "/api/management/directories",
+        "/api/management/sharing",
+    ] {
+        assert_eq!(
+            call(&app, write_request(path, None, None), body.clone())
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, write_request(path, Some(&cookie), None), body.clone())
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                request(Method::POST, path, Some(&cookie))
+                    .header("x-csrf-token", &csrf)
+                    .header(header::CONTENT_TYPE, "application/json"),
+                body.clone()
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let response = call(
+        &app,
+        write_request("/api/management/batch", Some(&cookie), Some(&csrf)),
+        body,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["results"][0]["ok"], true);
+    let response = call(
+        &app,
+        request(Method::GET, "/api/management", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(json_body(response).await["favoriteIds"], json!([id]));
+}
+
 async fn guest_fixture() -> (TempDir, TempDir, Router, String, String, String) {
     let cache = tempfile::tempdir().unwrap();
     let config = AuthConfig::from_sources(cache.path(), cache.path(), &|_| None).unwrap();
@@ -404,4 +475,177 @@ async fn failed_guest_saves_keep_access_closed_and_uninitialized_sites_stay_priv
         std::fs::write(&path, invalid).unwrap();
         assert!(AuthConfig::from_sources(cache.path(), cache.path(), &|_| None).is_err());
     }
+}
+
+#[tokio::test]
+async fn album_sharing_filters_guest_bootstrap_search_and_every_media_route() {
+    let (_cache, gallery, app, id, cookie, csrf) = guest_fixture().await;
+    set_guest(&app, &cookie, &csrf, true).await;
+    for (parent, name) in [("", "Trips"), ("Trips", "Night")] {
+        let response = call(
+            &app,
+            write_request("/api/management/directories", Some(&cookie), Some(&csrf)),
+            json!({"action":"create", "path":parent, "name":name}).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            json_body(response).await
+        );
+    }
+    let response = call(
+        &app,
+        write_request("/api/management/batch", Some(&cookie), Some(&csrf)),
+        json!({"action":"move", "ids":[id], "destination":"Trips/Night"}).to_string(),
+    )
+    .await;
+    assert_eq!(json_body(response).await["results"][0]["ok"], true);
+    let response = call(
+        &app,
+        request(Method::GET, "/api/images", None),
+        Body::empty(),
+    )
+    .await;
+    let public = json_body(response).await;
+    assert_eq!(public["total"], 1, "new albums are shared by default");
+    let id = public["items"][0]["id"].as_str().unwrap();
+    let response = call(
+        &app,
+        request(Method::GET, &format!("/api/images/{id}/original"), None),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response.headers()[header::ETAG].clone();
+    let response = call(
+        &app,
+        request(Method::GET, "/api/gallery", None),
+        Body::empty(),
+    )
+    .await;
+    let gallery_etag = response.headers()[header::ETAG].clone();
+    let response = call(
+        &app,
+        write_request("/api/management/sharing", Some(&cookie), Some(&csrf)),
+        json!({"path":"Trips/Night", "shared":false}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = call(
+        &app,
+        request(Method::GET, "/api/gallery", None).header(header::IF_NONE_MATCH, gallery_etag),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "sharing changes invalidate conditional summaries"
+    );
+    let summary = json_body(response).await;
+    assert_eq!(summary["total"], 0);
+    assert!(
+        !summary["albums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|album| album["path"] == "Trips/Night")
+    );
+    for path in [
+        "/api/images",
+        "/api/images?album=Trips%2FNight",
+        "/api/images?search=private",
+    ] {
+        let response = call(&app, request(Method::GET, path, None), Body::empty()).await;
+        assert_eq!(json_body(response).await["total"], 0);
+    }
+    for suffix in [
+        "",
+        "/original",
+        "/thumbnail",
+        "/display",
+        "/details",
+        "/similar",
+        "/video/version/playback.mp4",
+        "/motion/original/version",
+    ] {
+        for method in [Method::GET, Method::HEAD] {
+            let response = call(
+                &app,
+                request(method, &format!("/api/images/{id}{suffix}"), None)
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .header(header::RANGE, "bytes=0-9"),
+                Body::empty(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "hidden media: {suffix}"
+            );
+        }
+    }
+    let response = call(&app, request(Method::GET, "/", None), Body::empty()).await;
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains(id));
+    assert!(!html.contains("Trips/Night"));
+    let response = call(
+        &app,
+        request(Method::GET, "/api/images", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(
+        json_body(response).await["total"],
+        1,
+        "administrator retains access"
+    );
+    let response = call(
+        &app,
+        request(
+            Method::GET,
+            &format!("/api/images/{id}/original"),
+            Some(&cookie),
+        ),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = call(
+        &app,
+        write_request("/api/management/sharing", Some(&cookie), Some(&csrf)),
+        json!({"path":"Trips/Night", "shared":true}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = call(
+        &app,
+        request(Method::GET, "/api/images", None),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(json_body(response).await["total"], 1);
+    // Corrupt settings must never silently publish previously private content.
+    std::fs::write(
+        gallery
+            .path()
+            .join("cache/settings/management/sharing.json"),
+        b"",
+    )
+    .unwrap();
+    let response = call(
+        &app,
+        request(Method::GET, &format!("/api/images/{id}/thumbnail"), None),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

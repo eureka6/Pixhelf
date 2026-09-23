@@ -204,7 +204,7 @@ impl ThumbnailManager {
                     continue;
                 }
                 let cache_path = self.cache_path(&record.id);
-                let state = if valid_cache_file(&cache_path) {
+                let state = if valid_image_cache(record, &cache_path) {
                     ThumbState::Ready
                 } else {
                     missing.push(record.id.clone());
@@ -452,7 +452,7 @@ impl ThumbnailManager {
             let should_queue = {
                 let mut state = mutex_lock(&entry.state);
                 match &*state {
-                    ThumbState::Ready if valid_cache_file(&entry.cache_path) => {
+                    ThumbState::Ready if valid_image_cache(&entry.record, &entry.cache_path) => {
                         return Ok(entry.cache_path.clone());
                     }
                     ThumbState::Ready => {
@@ -581,6 +581,12 @@ fn valid_cache_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn valid_image_cache(record: &ImageRecord, thumbnail: &Path) -> bool {
+    valid_cache_file(thumbnail)
+        && (!crate::heif::is_image(&record.path)
+            || valid_cache_file(&thumbnail.with_extension("jpg")))
+}
+
 fn shard_path(root: &Path, id: &str) -> PathBuf {
     let shard = id.get(..2).unwrap_or("00");
     root.join(shard).join(format!("{id}.webp"))
@@ -590,6 +596,10 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
     record.ensure_source_is_current()?;
     let image = if record.video.is_some() {
         crate::video::thumbnail(record, THUMBNAIL_EDGE)?
+    } else if crate::heif::is_image(&record.path) {
+        let display = output.with_extension("jpg");
+        crate::heif::prepare_display(record, &display)?;
+        image::open(&display)?
     } else {
         let reader = ImageReader::open(&record.path)
             .with_context(|| format!("cannot open {}", record.path.display()))?
@@ -619,6 +629,11 @@ fn generate_thumbnail(record: &ImageRecord, output: &Path) -> Result<()> {
 }
 
 fn remove_cached_artifacts(thumbnail: &Path) {
+    if let Err(error) = fs::remove_file(thumbnail.with_extension("jpg"))
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(%error, "无法清理过期 HEIF 预览");
+    }
     if let Err(error) = fs::remove_file(thumbnail)
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -687,8 +702,10 @@ fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
             }
             return;
         }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("webp")
-            && !is_signature_sidecar(path)
+        if !matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("webp" | "jpg")
+        ) && !is_signature_sidecar(path)
             && !is_text_search_sidecar(path)
         {
             return;
@@ -706,6 +723,18 @@ fn cleanup_cache(root: &Path, valid_ids: &HashSet<String>) {
 }
 
 fn purge_temporary_files(root: &Path) {
+    for entry in WalkDir::new(root)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_dir()
+            && entry.file_name().to_string_lossy().starts_with(".heif-")
+            && let Err(error) = fs::remove_dir_all(entry.path())
+        {
+            warn!(%error, "无法清理临时 HEIF 预览");
+        }
+    }
     visit_cache_files(root, |path| {
         if path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
             && let Err(error) = fs::remove_file(path)
@@ -716,7 +745,14 @@ fn purge_temporary_files(root: &Path) {
 }
 
 fn visit_cache_files(root: &Path, mut visit: impl FnMut(&Path)) {
-    for entry in WalkDir::new(root).min_depth(1) {
+    for entry in WalkDir::new(root)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || !entry.file_name().to_string_lossy().starts_with(".heif-")
+        })
+    {
         match entry {
             Ok(entry) if entry.file_type().is_file() => visit(entry.path()),
             Ok(_) => {}
@@ -781,22 +817,29 @@ mod tests {
         let signature = thumbnail.with_extension("sim2");
         let obsolete_dino = thumbnail.with_extension("dino2");
         let text_search = thumbnail.with_extension("cnclip");
+        let display = thumbnail.with_extension("jpg");
         let old_compact = thumbnail.with_file_name(format!("{id}-360.webp"));
         let stale = shard_path(root, "stale");
         let stale_signature = stale.with_extension("sim2");
         let stale_dino = stale.with_extension("dino2");
         let stale_text_search = stale.with_extension("cnclip");
+        let stale_display = stale.with_extension("jpg");
         fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
         fs::create_dir_all(stale.parent().unwrap()).unwrap();
         fs::write(&thumbnail, [1; 32]).unwrap();
         fs::write(&signature, [1; 32]).unwrap();
         fs::write(&obsolete_dino, [1; 32]).unwrap();
         fs::write(&text_search, [1; 32]).unwrap();
+        fs::write(&display, [1; 32]).unwrap();
         fs::write(&old_compact, [1; 32]).unwrap();
         fs::write(&stale, [1; 32]).unwrap();
         fs::write(&stale_signature, [1; 32]).unwrap();
         fs::write(&stale_dino, [1; 32]).unwrap();
         fs::write(&stale_text_search, [1; 32]).unwrap();
+        fs::write(&stale_display, [1; 32]).unwrap();
+        let pending = root.join(".heif-pending");
+        fs::create_dir(&pending).unwrap();
+        fs::write(pending.join("display.jpg"), [1; 32]).unwrap();
 
         cleanup_cache(root, &HashSet::from([id.to_owned()]));
 
@@ -804,11 +847,22 @@ mod tests {
         assert!(signature.exists());
         assert!(!obsolete_dino.exists());
         assert!(text_search.exists());
+        assert!(display.exists());
+        assert!(
+            pending.join("display.jpg").exists(),
+            "cleanup must not remove an in-progress decode"
+        );
         assert!(!old_compact.exists());
         assert!(!stale.exists());
         assert!(!stale_signature.exists());
         assert!(!stale_dino.exists());
         assert!(!stale_text_search.exists());
+        assert!(!stale_display.exists());
+        purge_temporary_files(root);
+        assert!(
+            !pending.exists(),
+            "startup removes abandoned decoder output"
+        );
     }
 
     #[tokio::test]

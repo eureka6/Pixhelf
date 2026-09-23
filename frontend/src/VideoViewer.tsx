@@ -4,7 +4,7 @@ import { formatDuration } from "./format";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { imageCardById } from "./galleryViewport";
 import type { ImageViewerProps } from "./ImageViewer";
-import { ChevronLeft, ChevronUp, LoaderCircle, RefreshCw, ScanSearch, SkipBack, SkipForward, X } from "./icons";
+import { ChevronUp, LoaderCircle, RefreshCw, ScanSearch, SkipBack, SkipForward, X } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
 import { stopMediaPreview } from "./MediaPreview";
 import type { VideoPlayer } from "./mediaPlayer";
@@ -15,7 +15,7 @@ import { VideoEpisodes } from "./VideoEpisodes";
 import { VideoPlayback, type PlaybackState } from "./VideoPlayback";
 import { prepareViewerImages, viewerOriginalUrl, viewerThumbnailUrl } from "./viewerAssets";
 
-export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadMoreImages, onClose, onOpenImage,
+export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadMoreImages, onClose, onOpenImage, onSelectImage, onSelectImages, onClearSelection, selectedIds, selectionDisabled, onOpenSimilarImage,
   similarActive, similarImages, similarTotal, similarHasMore, similarLoading, similarLoadingMore, similarError,
   onSearchSimilar, onSearchVideoFrame, similarFrameTime, onLoadMoreSimilar,
 }: ImageViewerProps) {
@@ -33,7 +33,7 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
   const captureJob = useRef<object | null>(null);
   const [state, setState] = useState<PlaybackState>("loading");
   const episodes = images.filter(image => image.video);
-  const episodeIndex = episodes.findIndex(episode => episode.id === image.id);
+  const episodeIndex = images.slice(0, activeIndex).filter(episode => episode.video).length;
   const previousEpisode = episodes[episodeIndex - 1];
   const nextEpisode = episodes[episodeIndex + 1];
   const canNext = Boolean(nextEpisode) || hasMore;
@@ -184,10 +184,10 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
         downloadSource={viewerOriginalUrl(image)} name={image.name} poster={viewerThumbnailUrl(image)}
         durationHint={image.video?.duration ?? 0} playerRef={videoRef} onState={setState} keepControlsVisible={menu || episodesOpen}
         header={<header className="video-viewer-header video-controls-region">
-          <button type="button" className="video-control video-return viewer-close" aria-label="关闭查看器" title="返回图库 (Esc)" onClick={onClose}>
-            <ChevronLeft size={22} strokeWidth={1.7} />
-          </button>
           <h1 className="video-viewer-title" title={image.name}>{image.name.replace(/\.[^.]+$/, "") || image.name}</h1>
+          <button type="button" className="video-control video-return viewer-close" aria-label="关闭查看器" title="关闭查看器 (Esc)" onClick={onClose}>
+            <X size={26} strokeWidth={2.1} />
+          </button>
         </header>}
         previousControl={previousEpisode && <button type="button" className="video-control video-previous" aria-label="上一集"
           data-tooltip="上一集 · Alt + ←" onClick={() => { void navigateEpisode(-1); }}><SkipBack size={20} strokeWidth={1.6} /></button>}
@@ -197,7 +197,8 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
         </button>}
         options={<VideoEpisodes images={images} activeId={image.id} hasMore={hasMore} loadingMore={loadingMore}
           open={episodesOpen} onOpenChange={setEpisodesOpen} onSelect={onOpenImage} />}
-        contextMenu={<ImageCardActions key={image.id} image={image} onMenuChange={menuChanged} similarDisabled={state !== "ready"}
+        contextMenu={<ImageCardActions key={image.id} image={image} selected={selectedIds?.has(image.id)} selectionDisabled={selectionDisabled} onMenuChange={menuChanged} similarDisabled={state !== "ready"}
+          onSelect={onSelectImage ? () => onSelectImage(image) : undefined}
           onAction={action => {
             if (action === "view") { returnToPlayback(); videoRef.current?.play(); }
             else void showDetails(action === "similar" ? "similar" : "details");
@@ -206,7 +207,6 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
         <div className="viewer-details-inner">
           <header className="video-details-toolbar">
             <button type="button" onClick={returnToPlayback}><ChevronUp size={17} />返回播放</button>
-            <button type="button" className="video-details-close" aria-label="关闭视频查看器" onClick={onClose}><X size={18} /></button>
           </header>
           <div className="viewer-details-content">
             <PhotoInformation image={image} />
@@ -220,7 +220,8 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
                   : similarError && !similarImages.length ? <div className="viewer-similar-error" role="alert">
                     <span>{similarError}</span><button type="button" onClick={() => onSearchSimilar(image)}><RefreshCw size={15} />重试</button>
                   </div> : similarImages.length ? <SimilarImageGallery images={similarImages} total={similarTotal} metrics={similarMetrics}
-                    hasMore={similarHasMore} loadingMore={similarLoadingMore} error={similarError} onLoadMore={onLoadMoreSimilar} onOpen={onOpenImage} />
+                    hasMore={similarHasMore} loadingMore={similarLoadingMore} error={similarError} onLoadMore={onLoadMoreSimilar} onOpen={onOpenSimilarImage ?? onOpenImage} selectedIds={selectedIds} onSelect={onSelectImage}
+                    onSelectAll={onSelectImages} onClearSelection={onClearSelection} selectionDisabled={selectionDisabled} />
                     : <div className="viewer-similar-empty"><ScanSearch size={22} /><span>暂时没有找到相似内容</span></div>}
               </>}
             </section>

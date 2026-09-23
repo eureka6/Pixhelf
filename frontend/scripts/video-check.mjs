@@ -355,7 +355,10 @@ try {
         "fullscreen must retain the header, navigation and playback controls");
       await openMenu();
       assert.equal(await menu.evaluate(element => element.matches(":popover-open")), true, "context menus must remain visible in fullscreen");
-      await menu.getByRole("menuitem", { name: "播放视频", exact: true }).click();
+      assert.equal(await menu.getByRole("menuitem", { name: "选择视频", exact: true }).count(), 1);
+      // The title lets pointer events through to the picture underneath.
+      await viewer.locator(".video-viewer-picture").click({ position: { x: width / 2, y: 80 } });
+      await menu.waitFor({ state: "detached" });
       assert.equal(await page.evaluate(() => document.fullscreenElement?.classList.contains("video-viewer-stage")), true);
     }
     const previous = await player.elementHandle();
@@ -471,7 +474,7 @@ try {
           - parseFloat(getComputedStyle(similar).scrollMarginTop)) < 2;
     });
     assert.ok(await player.evaluate(video => video.paused), "opening similar content must pause the playing video");
-    await viewer.getByRole("button", { name: "关闭视频查看器", exact: true }).click();
+    await viewer.getByRole("button", { name: "关闭查看器", exact: true }).click();
     await viewer.waitFor({ state: "detached" });
     await page.waitForFunction(() => !document.getElementById("root").inert);
 

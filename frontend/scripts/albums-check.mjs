@@ -54,7 +54,7 @@ async function navigate(page, title) {
     await page.locator(".gallery-sidebar-toggle").click();
   }
   const panel = page.viewportSize().width <= 720 ? ".mobile-sidebar" : ".desktop-sidebar";
-  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图片与视频", "相册", "相似图片", "外部存储"]);
+  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图片与视频", "相册", "收藏", "相似图片", "本地存储", "外部存储", "回收站"]);
   await page.locator(`${panel} .album-link`).getByText(title, { exact: true }).click();
   if (title === "相册") await page.locator(".albums-grid").waitFor();
   else await page.locator(".image-card").nth(24).waitFor();
@@ -68,20 +68,13 @@ async function waitCount(page, selector, count) {
   await page.waitForFunction(({ selector, count }) => document.querySelectorAll(selector).length === count, { selector, count });
 }
 async function openAlbum(page, path) {
-  if (!await card(page, path).count()) {
-    const parent = path.slice(0, path.lastIndexOf("/"));
-    assert.ok(parent && parent !== path, `album is not reachable: ${path}`);
-    await openAlbum(page, parent);
-  }
-  await card(page, path).click();
-  await page.locator(".album-heading").waitFor();
+  await card(page, path).locator(".album-card-open").click();
+  await page.waitForURL(url => url.searchParams.get("album") === path);
   await page.waitForFunction(() => document.querySelector(".content").getAttribute("aria-busy") === "false");
-  assert.equal(new URL(page.url()).searchParams.get("album"), path);
+  assert.equal(await page.locator(".album-children").count(), 0);
+  await page.getByRole("link", { name: "返回相册", exact: true }).waitFor();
 }
-async function catalog(page) {
-  await page.getByRole("navigation", { name: "相册路径" }).getByRole("link", { name: "相册", exact: true }).click();
-  await page.locator(".albums-grid").waitFor();
-}
+async function catalog(page) { await navigate(page, "相册"); }
 
 try {
   const fixtures = new Map([["", 4], ["旅行", 1], ["旅行/山野", 65], ["旅行/海边", 3], ["旅行集", 1], ["日常", 3], ["项目 & 2026/同名", 2], ["收藏/同名", 2], ["空相册", 0]]);
@@ -108,24 +101,27 @@ try {
   }, "backend startup");
   const summary = await (await fetch(`${origin}/api/gallery`)).json();
   assert.equal(summary.total, imageIndex);
-  assert.equal(summary.albums.length, 10);
-  assert.equal(summary.albums.find(album => album.path === "旅行").count, 69);
-  assert.equal(summary.albums.find(album => album.path === "空相册").cover, null);
+  assert.equal(summary.albums.length, 7);
+  assert.equal(summary.albums.find(album => album.path === "旅行").count, 1);
+  assert(!summary.albums.some(album => ["项目 & 2026", "收藏", "空相册"].includes(album.path)));
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ?? "/root/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 
   for (const width of [1440, 390, 320]) {
     const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: width <= 720 });
     const errors = [], imageRequests = [];
     page.on("pageerror", error => errors.push(error.message));
-    page.on("request", request => { if (new URL(request.url()).pathname === "/api/images") imageRequests.push(request.url()); });
+    page.on("request", request => {
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/images") imageRequests.push(request.url());
+    });
     await page.goto(origin);
     await page.locator(".image-card").nth(24).waitFor();
     assert.equal(await page.locator(".album-heading").count(), 0, "library no longer starts with the waterfall");
     await navigate(page, "相册");
     const requestsBeforeCatalog = imageRequests.length;
-    await waitCount(page, ".album-card", 6);
+    await waitCount(page, ".album-card", 7);
     assert.equal(await page.locator(".image-card").count(), 0);
-    assert.deepEqual(await page.locator(".album-card p").allTextContents(), summary.albums.filter(album => !album.path.includes("/")).map(album => album.path));
+    assert.deepEqual(await page.locator(".album-path > span").allTextContents(), summary.albums.map(album => album.path));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.waitForFunction(() => [...document.querySelectorAll(".album-cover img")].filter(img => img.getBoundingClientRect().top < innerHeight).every(img => img.complete && img.naturalWidth > 0));
     await page.screenshot({ path: join(tmpdir(), `pixhelf-albums-${width}.png`), fullPage: true });
@@ -133,30 +129,27 @@ try {
     await page.locator(".search-toggle").click();
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("同名");
     await waitCount(page, ".album-card", 2);
-    assert.deepEqual((await page.locator(".album-card p").allTextContents()).sort(), ["收藏/同名", "项目 & 2026/同名"].sort());
+    assert.deepEqual((await page.locator(".album-path > span").allTextContents()).sort(), ["收藏/同名", "项目 & 2026/同名"].sort());
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("不存在的相册");
     await page.getByText("没有找到相册", { exact: true }).waitFor();
     await page.locator(".clear-search").click();
     await page.locator(".search-toggle").click();
-    await waitCount(page, ".album-card", 6);
+    await waitCount(page, ".album-card", 7);
     assert.equal(imageRequests.length, requestsBeforeCatalog, "catalog search fetched images");
 
-    await openAlbum(page, "空相册");
-    await page.getByText("相册暂无内容", { exact: true }).waitFor();
-    assert.equal(await page.locator(".image-card").count(), 0);
-    await catalog(page);
+    assert.equal(await page.locator('.album-card[data-album-path="空相册"]').count(), 0);
     await openAlbum(page, "项目 & 2026/同名");
     await waitCount(page, ".image-card", 2);
     await page.reload();
-    await page.getByRole("heading", { name: "同名", exact: true }).waitFor();
     await waitCount(page, ".image-card", 2);
-    await page.getByRole("navigation", { name: "相册路径" }).getByRole("link", { name: "项目 & 2026", exact: true }).click();
-    await page.getByRole("heading", { name: "项目 & 2026", exact: true }).waitFor();
-    await waitCount(page, ".image-card", 2);
+    await catalog(page);
+    await openAlbum(page, "旅行");
+    await waitCount(page, ".image-card", 1);
+    assert.equal(await page.locator(".album-children").count(), 0);
     await page.goBack();
-    await page.getByRole("heading", { name: "同名", exact: true }).waitFor();
+    await waitCount(page, ".album-card", 7);
     await page.goForward();
-    await page.getByRole("heading", { name: "项目 & 2026", exact: true }).waitFor();
+    await waitCount(page, ".image-card", 1);
     await catalog(page);
 
     await openAlbum(page, "旅行/山野");
@@ -174,16 +167,28 @@ try {
     await page.locator(".image-viewer").waitFor({ state: "detached" });
     assert.equal(new URL(page.url()).searchParams.get("album"), "旅行/山野");
     await page.goBack();
-    await page.getByRole("heading", { name: "旅行", exact: true }).waitFor();
-    assert.equal(new URL(page.url()).searchParams.get("album"), "旅行");
-    assert.equal(await card(page, "旅行/山野").count(), 1);
+    await page.locator(".albums-grid").waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("album"), null);
+    await waitCount(page, ".album-card", 7);
     await page.goForward();
-    await page.getByRole("heading", { name: "山野", exact: true }).waitFor();
+    await page.locator(".image-card").first().waitFor();
     await page.goForward();
     await page.locator(".image-viewer").waitFor();
     await page.locator(".viewer-close").click();
     await page.locator(".image-viewer").waitFor({ state: "detached" });
     await page.locator(".viewer-return-layer").waitFor({ state: "detached" });
+    for (let round = 0; round < 2; round++) {
+      const request = page.waitForRequest(request => { const url = new URL(request.url()); return url.pathname === "/api/images" && url.searchParams.get("sort") === "explore"; });
+      await page.locator(".explore-toggle").click();
+      const query = new URL((await request).url()).searchParams;
+      assert.equal(query.get("album"), "旅行/山野", "exploration stays inside the open album");
+      assert.equal(new URL(page.url()).searchParams.get("album"), "旅行/山野");
+      await page.waitForFunction(() => document.querySelector(".explore-toggle").getAttribute("aria-busy") === "false");
+      const ids = await page.locator(".image-card").evaluateAll(cards => cards.map(card => card.dataset.imageId));
+      assert(ids.length > 0 && ids.every(id => expected.items.some(image => image.id === id)));
+    }
+    const seeds = imageRequests.map(url => new URL(url).searchParams).filter(query => query.get("sort") === "explore").map(query => query.get("seed"));
+    assert.notEqual(seeds.at(-1), seeds.at(-2), "exploring again creates a new queue");
     await navigate(page, "图片与视频");
     assert.equal(new URL(page.url()).search, "");
     assert.equal(await page.locator(".album-heading").count(), 0);
@@ -195,20 +200,21 @@ try {
       let release;
       const blocked = new Promise(resolve => { release = resolve; });
       await page.route("**/api/images?*", async route => { await blocked; await route.continue().catch(() => {}); }, { times: 1 });
-      await card(page, "日常").click();
-      await page.locator(".album-heading").waitFor();
+      await card(page, "日常").locator(".album-card-open").click();
+      await page.waitForURL(url => url.searchParams.get("album") === "日常");
       await navigate(page, "相册");
       release();
       await page.unrouteAll({ behavior: "wait" });
-      await waitCount(page, ".album-card", 6);
+      await waitCount(page, ".album-card", 7);
       assert.equal(await page.locator(".image-card").count(), 0);
       await mkdir(join(gallery, "新增空相册"));
+      await writeFile(join(gallery, "新增空相册/photo.png"), png(1234));
       await card(page, "新增空相册").waitFor({ timeout: 20_000 });
       await openAlbum(page, "新增空相册");
-      await page.getByText("相册暂无内容", { exact: true }).waitFor();
+      await waitCount(page, ".image-card", 1);
       await rm(join(gallery, "新增空相册"), { recursive: true });
       await page.locator(".albums-grid").waitFor({ timeout: 20_000 });
-      await waitCount(page, ".album-card", 6);
+      await waitCount(page, ".album-card", 7);
       assert.equal(new URL(page.url()).searchParams.get("album"), null);
     }
     await navigate(page, "相册");
@@ -217,7 +223,7 @@ try {
     assert.equal(new URL(page.url()).search, "");
     assert.equal(await page.locator(".topbar .explore-toggle").getAttribute("aria-pressed"), "true");
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ width, albums: 10, pathsAndCovers: true, emptyAndNestedAlbums: true, localSearch: true, pagination: true, viewerHistory: true, liveDirectories: width === 1440 }));
+    console.log(JSON.stringify({ width, albums: 7, pathsAndCovers: true, emptyAndNestedAlbums: true, localSearch: true, pagination: true, albumExploration: true, viewerHistory: true, liveDirectories: width === 1440 }));
     await page.close();
   }
   await browser.close();

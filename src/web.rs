@@ -1,12 +1,13 @@
-use std::{
-    cmp::Reverse,
-    sync::{Arc, Mutex, OnceLock},
-};
+pub(crate) mod pagination;
+
+use std::sync::{Arc, Mutex, OnceLock};
+
+use pagination::{finish_page, image_page};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
@@ -27,6 +28,7 @@ use crate::{
     assets,
     auth::{self, AuthConfig, AuthState, AuthView},
     gallery::{Album, GalleryIndex, ImageRecord},
+    management::sharing::ReadState,
     photo_details::PhotoDetails,
     similarity::{
         DiversityFingerprint, ImageSignature, MIN_SIMILARITY_SCORE, redundancy_score,
@@ -119,7 +121,7 @@ pub struct AppState {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ImagesQuery {
+pub(crate) struct ImagesQuery {
     album: Option<String>,
     search: Option<String>,
     #[serde(default)]
@@ -155,7 +157,7 @@ impl SimilarImagesQuery {
 }
 
 #[derive(Debug)]
-struct ImageRequest {
+pub(crate) struct ImageRequest {
     album: Option<String>,
     search: Option<String>,
     sort: ImageSort,
@@ -165,7 +167,7 @@ struct ImageRequest {
 }
 
 impl ImagesQuery {
-    fn normalize(self) -> Result<ImageRequest, StatusCode> {
+    pub(crate) fn normalize(self) -> Result<ImageRequest, StatusCode> {
         if [&self.album, &self.search, &self.seed]
             .into_iter()
             .flatten()
@@ -227,7 +229,7 @@ struct GallerySummary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImagesResponse {
+pub(crate) struct ImagesResponse {
     items: Vec<ImageView>,
     total: usize,
     offset: usize,
@@ -237,7 +239,7 @@ struct ImagesResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImageView {
+pub(crate) struct ImageView {
     id: String,
     name: String,
     width: u32,
@@ -250,6 +252,8 @@ struct ImageView {
     playback: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 impl From<&ImageRecord> for ImageView {
@@ -259,6 +263,8 @@ impl From<&ImageRecord> for ImageView {
             name: record.name.clone(),
             width: record.width,
             height: record.height,
+            display: crate::heif::is_image(&record.path)
+                .then(|| format!("/api/images/{}/display", record.id)),
             video: record.video.clone(),
             playback: crate::video_jobs::url(record, crate::video_jobs::VideoKind::Playback),
             preview: crate::video_jobs::url(record, crate::video_jobs::VideoKind::Preview),
@@ -279,6 +285,7 @@ struct BootstrapResponse {
 
 pub fn router(state: AppState, config: AuthConfig) -> Router {
     let storage = crate::storage::router(state.thumbnails.settings_directory());
+    let management = crate::management::router(state.clone());
     let authentication = AuthState::new(config);
     let session_layer = authentication.session_layer();
     let protected = Router::new()
@@ -294,6 +301,7 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
         .route("/api/status", get(thumbnail_status))
         .route("/api/images/{id}/thumbnail", get(thumbnail))
         .route("/api/images/{id}/original", get(original))
+        .route("/api/images/{id}/display", get(display_image))
         .route(
             "/api/images/{id}/video/{version}/{kind}",
             get(prepared_video),
@@ -309,6 +317,10 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
             auth::require_auth,
         ));
     let application = protected
+        .merge(management.layer(middleware::from_fn_with_state(
+            authentication.clone(),
+            auth::require_admin,
+        )))
         .merge(storage.layer(middleware::from_fn_with_state(
             authentication.clone(),
             auth::require_admin,
@@ -341,7 +353,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn gallery_summary(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn gallery_summary(ReadState(state): ReadState, headers: HeaderMap) -> Response {
     let index = state.index.read().await;
     let etag = revision_etag("gallery", &index.revision);
     if is_not_modified(&headers, &etag) {
@@ -364,7 +376,7 @@ fn summary_from_index(index: &GalleryIndex) -> GallerySummary {
 }
 
 async fn images(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Query(query): Query<ImagesQuery>,
     headers: HeaderMap,
 ) -> Response {
@@ -458,7 +470,7 @@ async fn images(
     )
 }
 
-async fn image_metadata(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn image_metadata(ReadState(state): ReadState, Path(id): Path<String>) -> Response {
     let index = state.index.read().await;
     match index.image(&id) {
         Some(image) => Json(ImageView::from(image.as_ref())).into_response(),
@@ -467,7 +479,7 @@ async fn image_metadata(State(state): State<AppState>, Path(id): Path<String>) -
 }
 
 async fn uploaded_similar_images(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Query(query): Query<SimilarImagesQuery>,
     bytes: Bytes,
 ) -> Response {
@@ -545,7 +557,7 @@ async fn uploaded_similar_images(
 }
 
 async fn similar_images(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path(id): Path<String>,
     Query(query): Query<SimilarImagesQuery>,
     headers: HeaderMap,
@@ -802,54 +814,6 @@ fn diversity_rank(relevance: f32, redundancy: f32) -> f32 {
     relevance - penalty
 }
 
-fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {
-    let album = query.album.as_deref();
-    let search = query.search.as_deref();
-    let requested_offset = query.offset;
-    let limit = query.limit;
-
-    match query.sort {
-        ImageSort::NameAsc if album.is_none() && search.is_none() => {
-            page_from_unfiltered_index(index, false, requested_offset, limit)
-        }
-        ImageSort::NameDesc if album.is_none() && search.is_none() => {
-            page_from_unfiltered_index(index, true, requested_offset, limit)
-        }
-        ImageSort::NameAsc => page_from_ordered_records(
-            index.images.iter().map(Arc::as_ref),
-            album,
-            search,
-            requested_offset,
-            limit,
-        ),
-        ImageSort::NameDesc => page_from_ordered_records(
-            index.images.iter().rev().map(Arc::as_ref),
-            album,
-            search,
-            requested_offset,
-            limit,
-        ),
-        ImageSort::Newest | ImageSort::Explore => {
-            let mut matches: Vec<&ImageRecord> = index
-                .images
-                .iter()
-                .map(Arc::as_ref)
-                .filter(|record| record_matches(record, album, search))
-                .collect();
-
-            match query.sort {
-                ImageSort::Newest => matches.sort_by_key(|record| Reverse(record.modified_ms)),
-                ImageSort::Explore => {
-                    let seed_key = *blake3::hash(query.seed.as_bytes()).as_bytes();
-                    matches.sort_by_cached_key(|record| exploration_rank(&seed_key, &record.id));
-                }
-                ImageSort::NameAsc | ImageSort::NameDesc => unreachable!(),
-            }
-            page_from_sorted_records(matches, requested_offset, limit)
-        }
-    }
-}
-
 struct RankedTextSearch {
     record: Arc<ImageRecord>,
     score: f32,
@@ -898,85 +862,7 @@ fn text_search_image_page(ranked: &[Arc<ImageRecord>], query: &ImageRequest) -> 
     finish_page(items, total, offset, query.limit)
 }
 
-fn page_from_unfiltered_index(
-    index: &GalleryIndex,
-    reverse: bool,
-    requested_offset: usize,
-    limit: usize,
-) -> ImagesResponse {
-    let total = index.images.len();
-    let offset = requested_offset.min(total);
-    let records: Box<dyn Iterator<Item = &Arc<ImageRecord>> + '_> = if reverse {
-        Box::new(index.images.iter().rev().skip(offset).take(limit))
-    } else {
-        Box::new(index.images.iter().skip(offset).take(limit))
-    };
-    let items = records
-        .map(|record| ImageView::from(record.as_ref()))
-        .collect();
-    finish_page(items, total, offset, limit)
-}
-
-fn record_matches(record: &ImageRecord, album: Option<&str>, search: Option<&str>) -> bool {
-    album.is_none_or(|album| record.belongs_to_album(album))
-        && search.is_none_or(|search| record.search_key.contains(search))
-}
-
-fn page_from_ordered_records<'a>(
-    records: impl Iterator<Item = &'a ImageRecord>,
-    album: Option<&str>,
-    search: Option<&str>,
-    requested_offset: usize,
-    limit: usize,
-) -> ImagesResponse {
-    let mut items = Vec::with_capacity(limit);
-    let mut total = 0usize;
-    for record in records.filter(|record| record_matches(record, album, search)) {
-        if total >= requested_offset && items.len() < limit {
-            items.push(ImageView::from(record));
-        }
-        total += 1;
-    }
-    finish_page(items, total, requested_offset, limit)
-}
-
-fn page_from_sorted_records(
-    records: Vec<&ImageRecord>,
-    requested_offset: usize,
-    limit: usize,
-) -> ImagesResponse {
-    let total = records.len();
-    let offset = requested_offset.min(total);
-    let end = offset.saturating_add(limit).min(total);
-    let items = records[offset..end]
-        .iter()
-        .map(|record| ImageView::from(*record))
-        .collect();
-    finish_page(items, total, offset, limit)
-}
-
-fn finish_page(
-    items: Vec<ImageView>,
-    total: usize,
-    requested_offset: usize,
-    limit: usize,
-) -> ImagesResponse {
-    let offset = requested_offset.min(total);
-    let end = offset.saturating_add(items.len()).min(total);
-    ImagesResponse {
-        items,
-        total,
-        offset,
-        limit,
-        next_offset: (end < total).then_some(end),
-    }
-}
-
-fn exploration_rank(seed_key: &[u8; 32], image_id: &str) -> [u8; 32] {
-    *blake3::keyed_hash(seed_key, image_id.as_bytes()).as_bytes()
-}
-
-async fn thumbnail_status(State(state): State<AppState>) -> Response {
+async fn thumbnail_status(ReadState(state): ReadState) -> Response {
     let mut response = Json(state.thumbnails.status()).into_response();
     response
         .headers_mut()
@@ -985,7 +871,7 @@ async fn thumbnail_status(State(state): State<AppState>) -> Response {
 }
 
 async fn image_details(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -1065,10 +951,13 @@ async fn image_details(
 }
 
 async fn thumbnail(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path(id): Path<String>,
     request: Request,
 ) -> Result<Response, StatusCode> {
+    if state.index.read().await.image(&id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let path = match state.thumbnails.ensure_ready(&id).await {
         Ok(path) => path,
         Err(ThumbnailError::NotFound) => return Err(StatusCode::NOT_FOUND),
@@ -1086,8 +975,45 @@ async fn thumbnail(
     .await
 }
 
+async fn display_image(
+    ReadState(state): ReadState,
+    Path(id): Path<String>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    let image = state
+        .index
+        .read()
+        .await
+        .image(&id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !crate::heif::is_image(&image.path) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let metadata = tokio::fs::metadata(&image.path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if !image.matches_metadata(&metadata) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let thumbnail = state.thumbnails.ensure_ready(&id).await.map_err(|error| {
+        error!(%id, %error, "无法提供 HEIF 预览");
+        match error {
+            ThumbnailError::NotFound => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    })?;
+    serve_file(
+        thumbnail.with_extension("jpg"),
+        request,
+        &format!("\"heif-display-v1-{id}\""),
+        "public, max-age=31536000, immutable",
+    )
+    .await
+}
+
 async fn original(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path(id): Path<String>,
     request: Request,
 ) -> Result<Response, StatusCode> {
@@ -1136,7 +1062,7 @@ struct VideoQuery {
 }
 
 async fn prepared_video(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path((id, version, kind)): Path<(String, String, String)>,
     Query(query): Query<VideoQuery>,
     request: Request,
@@ -1191,7 +1117,7 @@ async fn prepared_video(
 }
 
 async fn motion_video(
-    State(state): State<AppState>,
+    ReadState(state): ReadState,
     Path((id, version)): Path<(String, String)>,
     mut request: Request,
 ) -> Result<Response, StatusCode> {
@@ -1475,7 +1401,7 @@ async fn frontend_asset(
     with_cache_headers(response, &etag, "public, max-age=31536000, immutable")
 }
 
-async fn frontend(State(state): State<AppState>, request: Request) -> Response {
+async fn frontend(ReadState(state): ReadState, request: Request) -> Response {
     if request.uri().path() != "/" {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1593,6 +1519,7 @@ fn escape_script_json(json: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::pagination::exploration_rank;
     use super::*;
 
     fn router(state: AppState) -> Router {
@@ -1659,6 +1586,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn heif_live_photos_serve_full_images_and_preserve_both_originals() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("gallery");
+        std::fs::create_dir(&root).unwrap();
+        let photo = include_bytes!("../frontend/scripts/fixtures/live-photo.heic");
+        let clip = include_bytes!("../frontend/scripts/fixtures/live-photo.mp4");
+        std::fs::write(root.join("IMG_0011.heic"), photo).unwrap();
+        std::fs::write(root.join("IMG_0011.mov"), clip).unwrap();
+        let index = crate::gallery::scan_gallery(&root, None).unwrap();
+        assert_eq!(index.images.len(), 1);
+        let record = Arc::clone(&index.images[0]);
+        let view = ImageView::from(record.as_ref());
+        assert!(view.video.is_none());
+        assert!(view.playback.is_none());
+        let display = view.display.unwrap();
+        let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+        thumbnails.reconcile(&index.images);
+        thumbnails.start_workers(1);
+        let app = router(AppState {
+            index: Arc::new(RwLock::new(Arc::new(index))),
+            thumbnails: Arc::clone(&thumbnails),
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&display)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+        let etag = response.headers()[header::ETAG].clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (120, 90));
+        assert!(decoded.get_pixel(10, 10)[0] > 180, "top-left tile is red");
+        assert!(
+            decoded.get_pixel(100, 10)[1] > 150,
+            "top-right tile is green"
+        );
+        assert!(
+            decoded.get_pixel(10, 80)[2] > 180,
+            "bottom-left tile is blue"
+        );
+        let cached = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&display)
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        for (url, expected) in [
+            (
+                format!("/api/images/{}/original", record.id),
+                photo.as_slice(),
+            ),
+            (view.motion.unwrap(), clip.as_slice()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(url).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+        }
+        let thumbnail = thumbnails.ensure_ready(&record.id).await.unwrap();
+        std::fs::remove_file(thumbnail.with_extension("jpg")).unwrap();
+        let rebuilt = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&display)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rebuilt.status(), StatusCode::OK);
+        assert!(thumbnail.with_extension("jpg").is_file());
+        std::fs::write(&record.path, b"replaced").unwrap();
+        let stale = app
+            .oneshot(
+                Request::builder()
+                    .uri(&display)
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn live_photo_video_streams_only_the_clip_and_supports_browser_ranges() {
         const CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
         for format in [
@@ -1696,7 +1734,9 @@ mod tests {
                 record.id,
                 record.motion.as_ref().unwrap().id
             );
-            assert_eq!(ImageView::from(record.as_ref()).motion.as_ref(), Some(&url));
+            let view = ImageView::from(record.as_ref());
+            assert_eq!(view.motion.as_ref(), Some(&url));
+            assert!(view.video.is_none() && view.preview.is_none() && view.playback.is_none());
             let app = router(AppState {
                 index: Arc::new(RwLock::new(Arc::new(index))),
                 thumbnails: ThumbnailManager::new(temp.path().join("cache")).unwrap(),
@@ -2166,7 +2206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn albums_share_recursive_scope_with_image_search_and_pagination() {
+    async fn albums_exclude_descendants_from_image_search_and_pagination() {
         let temp = tempfile::tempdir().unwrap();
         let gallery = temp.path().join("gallery");
         for folder in ["trip/child", "trip-other", "empty"] {
@@ -2175,6 +2215,7 @@ mod tests {
         for path in [
             "root.png",
             "trip/direct.png",
+            "trip/second.png",
             "trip/child/child.png",
             "trip-other/other.png",
         ] {
@@ -2190,9 +2231,12 @@ mod tests {
         for (query, expected_total, expected_items) in [
             ("album=trip&limit=1&offset=0", 2, 1),
             ("album=trip&limit=1&offset=1", 2, 1),
-            ("album=trip&search=child", 1, 1),
+            ("album=trip&limit=1&offset=2", 2, 0),
+            ("album=trip&search=child", 0, 0),
+            ("album=trip&search=direct", 1, 1),
             ("album=trip&sort=name-desc", 2, 2),
             ("album=trip&sort=explore&seed=test", 2, 2),
+            ("album=trip%2Fchild", 1, 1),
             ("album=trip-other", 1, 1),
             ("album=empty", 0, 0),
         ] {
@@ -2216,7 +2260,15 @@ mod tests {
             assert_eq!(items.len(), expected_items, "{query}");
             assert!(items.iter().all(|item| item["name"] != "root.png"));
             if query.starts_with("album=trip&") {
-                assert!(items.iter().all(|item| item["name"] != "other.png"));
+                assert!(
+                    items.iter().all(|item| matches!(
+                        item["name"].as_str(),
+                        Some("direct.png" | "second.png")
+                    )),
+                    "{query}"
+                );
+            } else if query == "album=trip%2Fchild" {
+                assert!(items.iter().all(|item| item["name"] == "child.png"));
             }
         }
     }

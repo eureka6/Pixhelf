@@ -137,6 +137,22 @@ export function Check(props: IconProps) {
   return <Icon {...props}><path d="m20 6-11 11-5-5" /></Icon>;
 }
 
+export function Heart(props: IconProps) {
+  return <Icon {...props}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z" /></Icon>;
+}
+
+export function FolderInput(props: IconProps) {
+  return <Icon {...props}><path d="M20 8V5a2 2 0 0 0-2-2h-5l-2 3H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3M12 12h10m-4-4 4 4-4 4" /></Icon>;
+}
+
+export function Trash2(props: IconProps) {
+  return <Icon {...props}><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></Icon>;
+}
+
+export function RotateCcw(props: IconProps) {
+  return <Icon {...props}><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" /></Icon>;
+}
+
 export function House(props: IconProps) {
   return (
     <Icon {...props}>
@@ -270,4 +286,20 @@ export function ScanSearch(props: IconProps) {
 
 export function X(props: IconProps) {
   return <Icon {...props}><path d="M18 6 6 18" /><path d="m6 6 12 12" /></Icon>;
+}
+
+export function HardDrive(props: IconProps) {
+  return <Icon {...props}><rect x="3" y="12" width="18" height="8" rx="2" /><path d="m3 14 3-9h12l3 9M7 16h.01M11 16h.01" /></Icon>;
+}
+export function FolderPlus(props: IconProps) {
+  return <Icon {...props}><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7ZM12 10v7m-3-3.5h6" /></Icon>;
+}
+export function Pencil(props: IconProps) {
+  return <Icon {...props}><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z" /></Icon>;
+}
+export function Lock(props: IconProps) {
+  return <Icon {...props}><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" /></Icon>;
+}
+export function Share(props: IconProps) {
+  return <Icon {...props}><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4" /></Icon>;
 }
