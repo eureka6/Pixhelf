@@ -61,7 +61,11 @@ import type {
 import {
   getDecodedViewerOriginal,
   prepareViewerImages,
+  releaseViewerAssets,
+  releaseViewerMedia,
+  VIEWER_PAGE_PREFETCH_DISTANCE,
 } from "./viewerAssets";
+import { useViewerAssetLifecycle } from "./useViewerAssetLifecycle";
 import { stopMediaPreview } from "./MediaPreview";
 import type { VideoFrame } from "./videoFrame";
 import { galleryHistoryState, readViewerHistoryEntry, viewerHistoryState, type SimilarImagePageState, type ViewerBranch, type ViewerHistoryEntry } from "./viewerHistory";
@@ -113,6 +117,7 @@ const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
 function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
   if (!flight) return;
   for (const animation of flight.animations) animation.cancel();
+  releaseViewerMedia(flight.media);
   flight.layer.remove();
 }
 
@@ -314,7 +319,7 @@ function App() {
   const [status, setStatus] = useState<ThumbnailStatus | null>(
     INITIAL_BOOTSTRAP?.status ?? null,
   );
-  const [imagePage, setImagePage] = useState<ImagePageState>(() => (
+  const [imagePage, setImagePageState] = useState<ImagePageState>(() => (
     hasInitialImages && INITIAL_BOOTSTRAP
       ? {
           images: INITIAL_BOOTSTRAP.images.items,
@@ -323,6 +328,12 @@ function App() {
         }
       : EMPTY_IMAGE_PAGE
   ));
+  const imagePageRef = useRef(imagePage);
+  const setImagePage = useCallback((page: ImagePageState) => {
+    // Invalidate old pagination callbacks before the next render flushes effects.
+    imagePageRef.current = page;
+    setImagePageState(page);
+  }, []);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exploreSeed, setExploreSeed] = useState("");
@@ -461,6 +472,7 @@ function App() {
   }, [viewerImageId]);
 
   useEffect(() => () => {
+    releaseViewerAssets();
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     loadMoreControllerRef.current?.abort();
@@ -619,6 +631,7 @@ function App() {
   }, [location, requestImages, reloadToken, textSearchReady]);
 
   const loadMoreLibrary = useCallback((): Promise<GalleryImage[]> => {
+    if (imagePageRef.current !== imagePage) return Promise.resolve([]);
     const offset = imagePage.nextOffset;
     if (browsingAlbums || browsingLocal || browsingStorage || browsingTrash || browsingSimilar || loading || offset === null) return Promise.resolve([]);
     const pending = loadMorePromiseRef.current;
@@ -838,6 +851,7 @@ function App() {
     ? images.findIndex((image) => image.id === viewerImageId)
     : -1;
   const viewerImage = viewerIndex >= 0 ? viewerImages[viewerIndex] : null;
+  useViewerAssetLifecycle(viewerImages, viewerIndex);
   const similarActive = Boolean(
     viewerImage && similarPage.source?.id === viewerImage.id,
   );
@@ -940,7 +954,9 @@ function App() {
     viewerLoadJobRef.current?.controller.abort();
     const card = imageCardById(snapshot.id);
     if (!currentImageId) viewerAnchorRef.current = card ? captureViewerAnchor(card) : null;
-    prepareViewerImages([snapshot], 0);
+    const candidates = entry.branch?.images ?? appendUniqueImages(images, [snapshot]);
+    const index = candidates.findIndex(image => image.id === snapshot.id);
+    prepareViewerImages(candidates, index);
     resetSimilarSearch();
     if (entry.similarPage) setSimilarPage(entry.similarPage);
     setViewerDiscoveredImages(current => appendUniqueImages(current, [snapshot]));
@@ -949,7 +965,7 @@ function App() {
       sequence: viewerReturnSequenceRef.current } : null);
     viewerImageIdRef.current = snapshot.id;
     setViewerImageId(snapshot.id);
-  }, [resetSimilarSearch, updateViewerBranch]);
+  }, [images, resetSimilarSearch, updateViewerBranch]);
 
   const openViewer = useCallback((
     imageId: string,
@@ -1261,21 +1277,25 @@ function App() {
   }, [viewerImageId, viewerReturnRequest]);
 
   useEffect(() => {
-    if (!viewerImageId || viewerBranch || galleryViewerIndex < 0 || nextOffset === null) return;
-    if (galleryViewerIndex >= images.length - 5) void loadMore();
-  }, [galleryViewerIndex, images.length, loadMore, nextOffset, viewerImageId, viewerBranch]);
+    if (!viewerImageId || !viewerCanLoadMore) return;
+    const index = viewerBranch?.index ?? galleryViewerIndex;
+    const count = viewerBranch?.images.length ?? images.length;
+    if (index >= 0 && index >= count - VIEWER_PAGE_PREFETCH_DISTANCE) void loadMoreViewer();
+  }, [galleryViewerIndex, images.length, loadMoreViewer, viewerCanLoadMore, viewerImageId, viewerBranch]);
 
   const showViewerImage = useCallback((candidate: GalleryImage, branch: ViewerBranch | null) => {
     if (viewerHistoryClosingRef.current) return;
     recordViewerHistory(candidate, branch, true);
     updateViewerBranch(branch);
     setViewerDiscoveredImages(current => appendUniqueImages(current, [candidate]));
-    prepareViewerImages([candidate], 0);
+    const candidates = branch?.images ?? appendUniqueImages(viewerImages, [candidate]);
+    const index = candidates.findIndex(image => image.id === candidate.id);
+    prepareViewerImages(candidates, index);
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
     resetSimilarSearch();
     setViewerReturnRequest(null);
-  }, [recordViewerHistory, resetSimilarSearch, updateViewerBranch]);
+  }, [recordViewerHistory, resetSimilarSearch, updateViewerBranch, viewerImages]);
 
   const openViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view") => {
     if (action === "details") { setInfoImage(candidate); return; }
@@ -1309,9 +1329,9 @@ function App() {
     setViewerImageId(candidate.id);
   }, [openViewerImage, recordViewerHistory, resetSimilarSearch, similarPage, updateViewerBranch, viewerBranch, viewerImage]);
 
-  const navigateViewer = useCallback((direction: -1 | 1) => {
+  const navigateViewer = useCallback((direction: -1 | 1, signal?: AbortSignal) => {
     const currentImageId = viewerImageIdRef.current;
-    if (!currentImageId || viewerHistoryClosingRef.current) return;
+    if (!currentImageId || viewerHistoryClosingRef.current || signal?.aborted) return;
     const branch = viewerBranchRef.current;
     const candidates = branch?.images ?? viewerImages;
     const currentIndex = candidates.findIndex(image => image.id === currentImageId);
@@ -1325,7 +1345,7 @@ function App() {
     const startingBranch = branch;
     void loadMoreViewer().then(incoming => {
       const next = incoming[0];
-      if (!next || viewerImageIdRef.current !== currentImageId) return;
+      if (!next || signal?.aborted || viewerImageIdRef.current !== currentImageId) return;
       const branch = viewerBranchRef.current;
       if (startingBranch && (!branch || branch.source !== startingBranch.source || branch.index !== startingBranch.index)) return;
       showViewerImage(next, branch ? { ...branch, index: branch.images.indexOf(next) } : null);

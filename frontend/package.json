@@ -1,7 +1,7 @@
 {
   "name": "pixhelf-frontend",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "predev": "node scripts/prepare-libmedia.mjs",
@@ -25,6 +25,8 @@
     "sidebar-resize-check": "node scripts/sidebar-resize-check.mjs",
     "viewer-resize-check": "node scripts/viewer-resize-check.mjs",
     "viewer-interaction-check": "node scripts/viewer-interaction-check.mjs",
+    "viewer-keyboard-check": "node scripts/viewer-keyboard-check.mjs",
+    "viewer-preload-check": "node scripts/viewer-preload-check.mjs",
     "live-photo-check": "node scripts/live-photo-app-check.mjs",
     "live-photo-interaction-check": "node scripts/live-photo-interaction-check.mjs",
     "live-photo-app-check": "node scripts/live-photo-app-check.mjs",

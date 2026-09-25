@@ -396,9 +396,12 @@ const ImageCard = memo(function ImageCard({
         ...layoutStyle,
         aspectRatio: `${image.width} / ${image.height}`,
       } as CSSProperties}
-      onPointerEnter={() => preloadOriginalImage(image)}
+      // Removing the viewer also fires pointerenter on the card beneath a stationary
+      // cursor. Wait for actual movement so closing cannot restart cancelled work.
+      onPointerMove={event => {
+        if (event.pointerType === "mouse" && event.buttons === 0) preloadOriginalImage(image);
+      }}
       onPointerDown={() => preloadOriginalImage(image)}
-      onFocus={() => preloadOriginalImage(image)}
       onClick={(event) => {
         onOpen(image.id, event.currentTarget, event.detail > 0 ? event.clientY : undefined);
       }}

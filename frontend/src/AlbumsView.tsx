@@ -26,7 +26,7 @@ function AlbumCard({ album, onOpen, onStorage, selection }: AlbumNavigation & { 
     <a className="album-card-open" href={galleryHref("albums", album.path)} draggable={false} aria-label={`打开相册 ${album.name}`} onClick={event => follow(event, album.path, onOpen)}>
       <div className="album-cover">
         <BookImage size={42} strokeWidth={1.2} />
-        {album.cover && album.cover !== failedCover && <img src={`/api/images/${encodeURIComponent(album.cover)}/thumbnail`} alt="" loading="lazy" decoding="async" onError={() => setFailedCover(album.cover)} />}
+        {album.cover && album.cover !== failedCover && <img key={album.cover} src={`/api/images/${encodeURIComponent(album.cover)}/thumbnail`} alt="" loading="lazy" decoding="async" onError={() => setFailedCover(album.cover)} />}
       </div>
       <div className="album-caption">
         <h2 className="album-name" title={album.name}>{album.name}</h2>

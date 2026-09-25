@@ -143,6 +143,12 @@ try {
       if (touch) { await begin(); await page.waitForTimeout(70); await end(); }
       else await page.mouse.dblclick(center.x, center.y, { delay: 70 });
       await page.waitForTimeout(250);
+      // Chromium may start the CSS transition a frame later than the input.
+      // Keep the exact final-scale assertion, but wait for the animation to settle.
+      await page.waitForFunction(() => {
+        const media = document.querySelector(".viewer-media");
+        return media && new DOMMatrix(getComputedStyle(media).transform).a === 1;
+      });
       await stableControls();
       assert.equal((await state()).scale, 1);
     });

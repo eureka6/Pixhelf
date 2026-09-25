@@ -10,6 +10,8 @@ import {
 import { PhotoInformation } from "./PhotoInformation";
 import { VideoViewer } from "./VideoViewer";
 import { ViewerNavigationButton } from "./ViewerNavigationButton";
+import { useViewerKeyboardNavigation } from "./useViewerKeyboardNavigation";
+import { useViewerPreloads } from "./useViewerPreloads";
 import type { VideoFrame } from "./videoFrame";
 import { ImageCardActions } from "./ImageCardActions";
 import { MEDIA_PREVIEW_PLAY_EVENT, MediaPreview } from "./MediaPreview";
@@ -41,12 +43,11 @@ import type {
   ViewerTransform,
 } from "./viewerLogic";
 import {
-  canPreloadViewerNeighbors,
   getViewerOriginalAsset,
   getReadyViewerViewportRenderAsset,
   getViewerThumbnailStatus,
   getViewerViewportRenderAsset,
-  prepareViewerImages,
+  releaseViewerMedia,
   supportsViewerViewportBitmaps,
   viewerOriginalUrl,
   viewerThumbnailUrl,
@@ -63,12 +64,30 @@ const MAX_RENDER_EDGE = 4096;
 const MOBILE_SWIPE_MOTION_MS = 170;
 const MOBILE_SWIPE_CLEANUP_MS = MOBILE_SWIPE_MOTION_MS + 50;
 const MOBILE_RENDER_SETTLE_MS = MOBILE_SWIPE_CLEANUP_MS + 16;
-const MOBILE_NEIGHBOR_PRELOAD_DELAY_MS = 120;
 const TOUCH_SWIPE_MIN_DISTANCE_PX = 36;
 const TOUCH_SWIPE_MAX_DISTANCE_PX = 56;
 const TOUCH_SWIPE_DISTANCE_RATIO = 0.08;
 const TOUCH_SWIPE_FLICK_MIN_DISTANCE_PX = 20;
 const TOUCH_SWIPE_FLICK_VELOCITY = 0.32;
+
+function ViewerImage(props: JSX.ImgHTMLAttributes<HTMLImageElement>) {
+  const ref = useRef<HTMLImageElement>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    return () => {
+      element?.removeAttribute("srcset");
+      element?.removeAttribute("src");
+    };
+  }, []);
+  return <img {...props} ref={ref} />;
+}
+
+function disposeSwipeSnapshot(snapshot: HTMLElement | null): void {
+  if (!snapshot) return;
+  snapshot.getAnimations().forEach(animation => animation.cancel());
+  releaseViewerMedia(snapshot);
+  snapshot.remove();
+}
 
 type GestureStart = {
   point: PointerPoint;
@@ -141,7 +160,7 @@ export type ImageViewerProps = {
   activeIndex: number;
   hasMore: boolean;
   loadingMore: boolean;
-  onNavigate: (direction: -1 | 1) => void;
+  onNavigate: (direction: -1 | 1, signal?: AbortSignal) => void;
   onLoadMoreImages: () => Promise<GalleryImage[]>;
   onClose: () => void;
   onSelectImage?: (image: GalleryImage) => void;
@@ -174,6 +193,7 @@ function PhotoViewer({
   hasMore,
   loadingMore,
   onNavigate,
+  onLoadMoreImages,
   onClose,
   onSelectImage,
   onSelectImages,
@@ -243,7 +263,6 @@ function PhotoViewer({
     page: "image",
   });
   const wheelZoomBlockedUntilRef = useRef(0);
-  const displayedOriginalsRef = useRef(new Set<string>());
   const transformFrameRef = useRef(0);
   const pendingTransformRef = useRef<ViewerTransform | null>(null);
   const swipeCleanupTimerRef = useRef(0);
@@ -267,11 +286,7 @@ function PhotoViewer({
     loaded: getViewerThumbnailStatus(image) === "ready",
     failed: false,
   });
-  const directOriginalReady = isDirectOriginalReady(
-    image,
-    sourceStrategy,
-    displayedOriginalsRef.current,
-  );
+  const directOriginalReady = isDirectOriginalReady(image, sourceStrategy);
   const [loadState, setLoadState] = useState<ViewerSourceState>(
     initialViewerSourceState(image.id, directOriginalReady),
   );
@@ -626,28 +641,22 @@ function PhotoViewer({
     dialogRef.current?.removeAttribute("data-swipe-direction");
     const outgoing = swipeOutgoingRef.current;
     swipeOutgoingRef.current = null;
-    outgoing?.getAnimations().forEach((animation) => animation.cancel());
-    outgoing?.remove();
+    disposeSwipeSnapshot(outgoing);
   };
 
   const prepareSwipeSnapshot = (): PreparedSwipeSnapshot | null => {
     const media = mediaRef.current;
     if (!media) return null;
-    const snapshot = media.cloneNode(true) as HTMLDivElement;
+    const snapshot = media.cloneNode(false) as HTMLDivElement;
     snapshot.classList.add("viewer-swipe-outgoing");
     snapshot.setAttribute("aria-hidden", "true");
     snapshot.tabIndex = -1;
     snapshot.removeAttribute("aria-haspopup");
-    snapshot.querySelector(".photo-card-controls")?.remove();
-    snapshot.querySelector(".media-preview")?.remove();
-    snapshot.querySelectorAll<HTMLElement>("[id]").forEach((element) => {
-      element.removeAttribute("id");
-    });
-    const thumbnail = snapshot.querySelector<HTMLElement>(".viewer-thumbnail");
-    snapshot.querySelectorAll(".viewer-original").forEach((original) => original.remove());
+    const thumbnail = media.querySelector(".viewer-thumbnail")?.cloneNode(false) as HTMLImageElement | undefined;
     if (thumbnail) {
       thumbnail.style.opacity = "1";
       thumbnail.style.filter = "none";
+      snapshot.append(thumbnail);
     }
     return {
       imageId: image.id,
@@ -714,7 +723,7 @@ function PhotoViewer({
       void animation.finished.catch(() => undefined).then(() => {
         if (swipeOutgoingRef.current !== outgoing) return;
         swipeOutgoingRef.current = null;
-        outgoing.remove();
+        disposeSwipeSnapshot(outgoing);
       });
     }
 
@@ -722,7 +731,7 @@ function PhotoViewer({
       dialogRef.current?.removeAttribute("data-swipe-direction");
       const staleOutgoing = swipeOutgoingRef.current;
       swipeOutgoingRef.current = null;
-      staleOutgoing?.remove();
+      disposeSwipeSnapshot(staleOutgoing);
       swipeCleanupTimerRef.current = 0;
     }, MOBILE_SWIPE_CLEANUP_MS);
   };
@@ -740,11 +749,7 @@ function PhotoViewer({
       loaded: getViewerThumbnailStatus(image) === "ready",
       failed: false,
     });
-    const originalReady = isDirectOriginalReady(
-      image,
-      sourceStrategy,
-      displayedOriginalsRef.current,
-    );
+    const originalReady = isDirectOriginalReady(image, sourceStrategy);
     setLoadState(initialViewerSourceState(image.id, originalReady));
     setFullResolutionState({
       id: image.id,
@@ -964,6 +969,18 @@ function PhotoViewer({
     }
   };
 
+  useViewerKeyboardNavigation({
+    viewerRef: dialogRef,
+    canPrevious,
+    canNext: activeIndex < images.length - 1,
+    hasMore,
+    onNavigate: (direction, signal) => {
+      parkViewerControlFocus();
+      onNavigate(direction, signal);
+    },
+    onLoadMoreImages,
+  });
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Tab") {
@@ -993,20 +1010,6 @@ function PhotoViewer({
           if (document.fullscreenElement === dialogRef.current) return;
           event.preventDefault();
           onClose();
-          break;
-        case "ArrowLeft":
-          if (canPrevious) {
-            event.preventDefault();
-            parkViewerControlFocus();
-            onNavigate(-1);
-          }
-          break;
-        case "ArrowRight":
-          if (canNext) {
-            event.preventDefault();
-            parkViewerControlFocus();
-            onNavigate(1);
-          }
           break;
         case "+":
         case "=":
@@ -1045,7 +1048,7 @@ function PhotoViewer({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [canNext, canPrevious, onClose, onNavigate]);
+  }, [image.id, onClose, viewport.width, viewport.height]);
 
   useEffect(() => {
     const pressedButtons = new Set<number>();
@@ -1094,79 +1097,7 @@ function PhotoViewer({
     };
   }, [canNext, canPrevious, onNavigate]);
 
-  useEffect(() => {
-    prepareViewerImages(images, activeIndex, {
-      preloadOriginals: !viewportBitmapCapable,
-    });
-    if (!viewportBitmapCapable) return;
-    let disposed = false;
-    let delayTimer = 0;
-    let idleHandle = 0;
-    const activeAsset = useViewportBitmapRenderer
-      ? getViewerViewportRenderAsset(
-        image,
-        viewportRender.width,
-        viewportRender.height,
-        0,
-        "high",
-      )
-      : getViewerOriginalAsset(image, 0, "high");
-    const idleScheduler = window as IdleScheduler;
-    const preloadNeighbors = async () => {
-      if (disposed || !canPreloadViewerNeighbors()) return;
-      // Forward navigation is the common path. Prepare one neighbor at a time, using
-      // its original only when it is already no larger than the target render size.
-      for (const offset of [1, -1]) {
-        if (disposed) return;
-        const candidate = images[activeIndex + offset];
-        if (!candidate || candidate.video) continue;
-        const render = viewportRenderDimensions(candidate, viewport);
-        const strategy = selectViewerSourceStrategy(
-          candidate,
-          render,
-          viewportBitmapCapable,
-        );
-        const asset = strategy === "viewport-upgrade"
-          ? getViewerViewportRenderAsset(
-            candidate,
-            render.width,
-            render.height,
-            0,
-            "low",
-          )
-          : getViewerOriginalAsset(candidate, 0, "low");
-        if (asset.status === "loading") await asset.promise;
-      }
-    };
-    const scheduleNeighbors = () => {
-      if (disposed) return;
-      delayTimer = window.setTimeout(() => {
-        if (idleScheduler.requestIdleCallback) {
-          idleHandle = idleScheduler.requestIdleCallback(
-            () => void preloadNeighbors(),
-            { timeout: 600 },
-          );
-        } else {
-          void preloadNeighbors();
-        }
-      }, MOBILE_NEIGHBOR_PRELOAD_DELAY_MS);
-    };
-    if (activeAsset.status === "loading") void activeAsset.promise.then(scheduleNeighbors);
-    else scheduleNeighbors();
-    return () => {
-      disposed = true;
-      window.clearTimeout(delayTimer);
-      if (idleHandle) idleScheduler.cancelIdleCallback?.(idleHandle);
-    };
-  }, [
-    activeIndex,
-    image,
-    images,
-    useViewportBitmapRenderer,
-    viewportBitmapCapable,
-    viewport.height,
-    viewport.width,
-  ]);
+  useViewerPreloads(images, activeIndex, viewport, viewportBitmapCapable, currentLoadState.loaded);
 
   useEffect(() => {
     if (
@@ -1186,6 +1117,7 @@ function PhotoViewer({
 
   useEffect(() => {
     if (!compactViewport || reducedMotion()) {
+      disposeSwipeSnapshot(preparedSwipeSnapshotRef.current?.element ?? null);
       preparedSwipeSnapshotRef.current = null;
       return;
     }
@@ -1210,6 +1142,7 @@ function PhotoViewer({
       globalThis.clearTimeout(fallbackTimer);
       if (preparedSwipeSnapshotRef.current === prepared) {
         preparedSwipeSnapshotRef.current = null;
+        disposeSwipeSnapshot(prepared?.element ?? null);
       }
     };
   }, [
@@ -1225,7 +1158,9 @@ function PhotoViewer({
     window.clearTimeout(sourceUpgradeTimerRef.current);
     window.clearTimeout(swipeCleanupTimerRef.current);
     cancelTransformFrame();
-    swipeOutgoingRef.current?.remove();
+    disposeSwipeSnapshot(swipeOutgoingRef.current);
+    swipeOutgoingRef.current = null;
+    disposeSwipeSnapshot(preparedSwipeSnapshotRef.current?.element ?? null);
     preparedSwipeSnapshotRef.current = null;
   }, []);
 
@@ -1254,6 +1189,15 @@ function PhotoViewer({
       currentLoadState.attempt + 1,
     ));
   };
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    return () => {
+      if (!canvas) return;
+      canvas.width = 0;
+      canvas.height = 0;
+    };
+  }, [fullSource, useCanvasRenderer]);
 
   useLayoutEffect(() => {
     if (
@@ -1976,7 +1920,7 @@ function PhotoViewer({
           <div className="viewer-media-center">
             <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}
               data-image-id={image.id} data-image-name={image.name} tabIndex={0} aria-label={`图片：${image.name}`} aria-haspopup="menu">
-              <img
+              <ViewerImage
                 key={`thumbnail-${image.id}`}
                 className="viewer-thumbnail"
                 src={viewerThumbnailUrl(image)}
@@ -2009,7 +1953,7 @@ function PhotoViewer({
                   data-original-url={fullSource}
                 />
               ) : (
-                <img
+                <ViewerImage
                   key={fullSource}
                   className="viewer-original"
                   src={fullSource}
@@ -2027,15 +1971,14 @@ function PhotoViewer({
                       ? original.decode().catch(() => undefined)
                       : Promise.resolve();
                     void decoded.then(() => {
-                      displayedOriginalsRef.current.add(fullSource);
-                      markOriginalReady(image.id, currentLoadState.attempt);
+                      if (original.isConnected) markOriginalReady(image.id, currentLoadState.attempt);
                     });
                   }}
                   onError={handleOriginalError}
                 />
               )}
               {useViewportBitmapRenderer && currentFullResolution.requested && (
-                <img
+                <ViewerImage
                   key={`native-original-${fullSource}`}
                   className="viewer-original viewer-native-original"
                   src={fullSource}
@@ -2048,7 +1991,6 @@ function PhotoViewer({
                   fetchPriority="high"
                   draggable={false}
                   onLoad={() => {
-                    displayedOriginalsRef.current.add(fullSource);
                     setFullResolutionState({
                       id: image.id,
                       requested: true,

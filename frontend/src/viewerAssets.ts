@@ -7,6 +7,8 @@ const VIEWPORT_RENDER_CACHE_LIMIT = 4;
 const THUMBNAIL_PRELOAD_DISTANCE = 10;
 const ORIGINAL_PRELOAD_DISTANCE = 2;
 const ASSET_LOAD_TIMEOUT_MS = 30_000;
+// Fetch the next page before the thumbnail window needs its first image.
+export const VIEWER_PAGE_PREFETCH_DISTANCE = THUMBNAIL_PRELOAD_DISTANCE * 2;
 
 type AssetPriority = "high" | "low";
 
@@ -22,6 +24,7 @@ type ViewerImageAsset = {
   promise: Promise<void>;
   status: ViewerAssetStatus;
   lastUsed: number;
+  cancel: () => void;
 };
 
 type ViewerRenderAsset = {
@@ -41,6 +44,7 @@ type ViewportRenderJob = {
   key: string;
   controller: AbortController;
   cancelled: boolean;
+  timeout: number;
   resolve: () => void;
 };
 
@@ -100,11 +104,13 @@ function loadImageAsset(
   priority: AssetPriority,
 ): ViewerImageAsset {
   const cached = cache.get(url);
-  if (cached) {
+  // Retry failures on demand, not on every hover or speculative preload.
+  if (cached && (cached.status !== "failed" || priority === "low")) {
     cached.lastUsed = ++assetClock;
     if (priority === "high") cached.element.fetchPriority = "high";
     return cached;
   }
+  cached?.cancel();
 
   const element = new Image();
   element.decoding = "async";
@@ -117,6 +123,10 @@ function loadImageAsset(
     }),
     status: "loading",
     lastUsed: ++assetClock,
+    cancel: () => {
+      settle("failed");
+      element.removeAttribute("src");
+    },
   };
   let settled = false;
   let timeout = 0;
@@ -124,33 +134,45 @@ function loadImageAsset(
     if (settled) return;
     settled = true;
     window.clearTimeout(timeout);
+    element.removeEventListener("load", onLoad);
+    element.removeEventListener("error", onError);
     asset.status = status;
     asset.lastUsed = ++assetClock;
     resolveAsset();
     pruneCache(cache, limit, url);
   };
-  element.addEventListener("load", () => {
+  const onLoad = () => {
     const decoded = typeof element.decode === "function"
       ? element.decode().catch(() => undefined)
       : Promise.resolve();
     void decoded.then(() => {
       settle(element.naturalWidth > 0 ? "ready" : "failed");
     });
-  }, { once: true });
-  element.addEventListener("error", () => {
+  };
+  const onError = () => {
+    if (settled) return;
     settle("failed");
     // These preload elements are detached, so document-level image error handlers cannot see them.
     void checkAuthentication();
-  }, { once: true });
+  };
+  element.addEventListener("load", onLoad);
+  element.addEventListener("error", onError);
   cache.set(url, asset);
   element.src = url;
   timeout = window.setTimeout(() => {
     if (settled) return;
-    element.removeAttribute("src");
-    settle("failed");
+    asset.cancel();
   }, ASSET_LOAD_TIMEOUT_MS);
   pruneCache(cache, limit, url);
   return asset;
+}
+
+function cancelUnusedPreloads(cache: Map<string, ViewerImageAsset>, needed: Set<string>): void {
+  for (const [url, asset] of cache) {
+    if (asset.status !== "loading" || needed.has(url.replace(/\?retry=\d+$/, ""))) continue;
+    cache.delete(url);
+    asset.cancel();
+  }
 }
 
 function preloadViewerThumbnail(
@@ -217,23 +239,27 @@ function pruneViewportRenderCache(protectedKey?: string): void {
 }
 
 function cancelViewportRenderJob(job: ViewportRenderJob): void {
+  if (job.cancelled) return;
   job.cancelled = true;
+  window.clearTimeout(job.timeout);
   job.controller.abort();
   job.asset.status = "failed";
   if (viewportRenderAssets.get(job.key) === job.asset) {
     viewportRenderAssets.delete(job.key);
   }
+  // Settle consumers immediately even if the browser is still decoding. Keep
+  // the active slot until that work ends, then close any late bitmap below.
+  job.resolve();
 }
 
-function cancelStaleViewportRenderJobs(activeKey: string): void {
+function cancelUnusedViewportRenderJobs(needed: (job: ViewportRenderJob) => boolean): void {
   for (let index = viewportRenderQueue.length - 1; index >= 0; index -= 1) {
     const job = viewportRenderQueue[index]!;
-    if (job.key === activeKey) continue;
+    if (needed(job)) continue;
     viewportRenderQueue.splice(index, 1);
     cancelViewportRenderJob(job);
-    job.resolve();
   }
-  if (activeViewportRenderJob && activeViewportRenderJob.key !== activeKey) {
+  if (activeViewportRenderJob && !needed(activeViewportRenderJob)) {
     cancelViewportRenderJob(activeViewportRenderJob);
   }
 }
@@ -250,7 +276,7 @@ function startNextViewportRenderJob(): void {
   activeViewportRenderJob = job;
   void (async () => {
     const { asset, attempt, controller, image, key, resolve } = job;
-    const timeout = window.setTimeout(() => controller.abort(), ASSET_LOAD_TIMEOUT_MS);
+    job.timeout = window.setTimeout(() => cancelViewportRenderJob(job), ASSET_LOAD_TIMEOUT_MS);
     try {
       const requestOptions: RequestInit & { priority: "high" | "low" } = {
         cache: authentication.enabled ? "no-cache" : attempt ? "reload" : "force-cache",
@@ -259,6 +285,7 @@ function startNextViewportRenderJob(): void {
         signal: controller.signal,
       };
       const response = await fetch(viewerOriginalUrl(image, attempt), requestOptions);
+      if (job.cancelled) return;
       if (!response.ok) {
         if (response.status === 401) requireLogin();
         throw new Error(`original request failed: ${response.status}`);
@@ -267,6 +294,7 @@ function startNextViewportRenderJob(): void {
         throw new Error("original response is not an image");
       }
       const blob = await response.blob();
+      if (job.cancelled) return;
       if (!blob.size) throw new Error("original response is empty");
       const bitmap = await createImageBitmap(blob, {
         imageOrientation: "from-image",
@@ -283,13 +311,7 @@ function startNextViewportRenderJob(): void {
     } catch {
       asset.status = "failed";
     } finally {
-      window.clearTimeout(timeout);
-      if (job.cancelled) {
-        asset.bitmap?.close();
-        asset.bitmap = null;
-        asset.status = "failed";
-        if (viewportRenderAssets.get(key) === asset) viewportRenderAssets.delete(key);
-      }
+      window.clearTimeout(job.timeout);
       asset.lastUsed = ++assetClock;
       if (activeViewportRenderJob === job) activeViewportRenderJob = null;
       resolve();
@@ -308,9 +330,9 @@ export function getViewerViewportRenderAsset(
 ): ViewerRenderAsset {
   const request = viewportRenderRequest(image, width, height, attempt);
   const { key } = request;
-  if (priority === "high") cancelStaleViewportRenderJobs(key);
+  if (priority === "high") cancelUnusedViewportRenderJobs(job => job.key === key);
   const cached = viewportRenderAssets.get(key);
-  if (cached) {
+  if (cached && (cached.status !== "failed" || priority === "low")) {
     cached.lastUsed = ++assetClock;
     if (priority === "high") cached.priority = "high";
     startNextViewportRenderJob();
@@ -341,6 +363,7 @@ export function getViewerViewportRenderAsset(
     key,
     controller: new AbortController(),
     cancelled: false,
+    timeout: 0,
     resolve: resolveAsset,
   });
   startNextViewportRenderJob();
@@ -367,6 +390,35 @@ export function getDecodedViewerOriginal(source: string): HTMLImageElement | nul
   return asset?.status === "ready" ? asset.element : null;
 }
 
+export function suspendViewerPreloads(current: GalleryImage): void {
+  cancelUnusedPreloads(thumbnailAssets, new Set([viewerThumbnailUrl(current)]));
+  cancelUnusedPreloads(originalAssets, new Set([viewerOriginalUrl(current)]));
+  cancelUnusedViewportRenderJobs(job => job.image.id === current.id);
+}
+
+export function releaseViewerAssets(): void {
+  // Small, completed thumbnails remain bounded and useful in the gallery.
+  cancelUnusedPreloads(thumbnailAssets, new Set());
+  const originals = [...originalAssets.values()];
+  originalAssets.clear();
+  for (const asset of originals) asset.cancel();
+  cancelUnusedViewportRenderJobs(() => false);
+  for (const asset of viewportRenderAssets.values()) asset.bitmap?.close();
+  viewportRenderAssets.clear();
+}
+
+export function releaseViewerMedia(container: ParentNode): void {
+  // Detached images can keep downloading, and canvases retain their pixel buffers.
+  container.querySelectorAll("img").forEach(image => {
+    image.removeAttribute("srcset");
+    image.removeAttribute("src");
+  });
+  container.querySelectorAll("canvas").forEach(canvas => {
+    canvas.width = 0;
+    canvas.height = 0;
+  });
+}
+
 export function preloadOriginalImage(image: GalleryImage): void {
   if (
     image.video || supportsViewerViewportBitmaps()
@@ -383,10 +435,22 @@ export function prepareViewerImages(
   if (activeIndex < 0 || activeIndex >= images.length) return;
   const preloadOriginals = options.preloadOriginals
     ?? !supportsViewerViewportBitmaps();
+  const preloadNeighbors = canPreloadViewerNeighbors();
+
+  // Cache limits only evict completed images. Cancel obsolete downloads as well
+  // so rapid navigation cannot leave a growing queue ahead of the current image.
+  const thumbnailDistance = document.visibilityState === "visible" ? THUMBNAIL_PRELOAD_DISTANCE : 0;
+  const thumbnails = images.slice(Math.max(0, activeIndex - thumbnailDistance), activeIndex + thumbnailDistance + 1);
+  cancelUnusedPreloads(thumbnailAssets, new Set(thumbnails.map(viewerThumbnailUrl)));
+  const originalDistance = preloadNeighbors ? (preloadOriginals ? ORIGINAL_PRELOAD_DISTANCE : 1) : 0;
+  const originals = images.slice(Math.max(0, activeIndex - originalDistance), activeIndex + originalDistance + 1);
+  cancelUnusedPreloads(originalAssets, new Set(originals.map(image => viewerOriginalUrl(image))));
+  const renderIds = new Set(images[activeIndex]!.video ? [] : originals.map(image => image.id));
+  cancelUnusedViewportRenderJobs(job => renderIds.has(job.image.id));
 
   // Thumbnail preparation is deliberately independent from masonry visibility. It is
   // cheap enough to keep a generous navigation window decoded even on constrained links.
-  for (let distance = 0; distance <= THUMBNAIL_PRELOAD_DISTANCE; distance += 1) {
+  for (let distance = 0; distance <= thumbnailDistance; distance += 1) {
     const offsets = distance === 0 ? [0] : [distance, -distance];
     for (const offset of offsets) {
       const image = images[activeIndex + offset];
@@ -401,7 +465,7 @@ export function prepareViewerImages(
   // The active desktop original is always requested. Neighboring originals are
   // speculative and respect Save-Data/slow-network signals.
   if (!images[activeIndex]!.video) getViewerOriginalAsset(images[activeIndex]!, 0, "high");
-  if (!canPreloadViewerNeighbors()) return;
+  if (!preloadNeighbors) return;
   for (let distance = 1; distance <= ORIGINAL_PRELOAD_DISTANCE; distance += 1) {
     const next = images[activeIndex + distance];
     const previous = images[activeIndex - distance];

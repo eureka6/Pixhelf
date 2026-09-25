@@ -2,7 +2,7 @@ import type { RefObject } from "preact";
 import { useLayoutEffect, useState } from "preact/hooks";
 
 import type { GalleryImage } from "./types";
-import { getViewerOriginalStatus, viewerOriginalUrl } from "./viewerAssets";
+import { getViewerOriginalStatus } from "./viewerAssets";
 
 const MAX_NATIVE_IMAGE_EDGE = 12_288;
 const MOBILE_VIEWPORT_RENDER_EDGE = 2048;
@@ -143,12 +143,8 @@ export function selectViewerSourceStrategy(
 export function isDirectOriginalReady(
   image: GalleryImage,
   strategy: ViewerSourceStrategy,
-  displayedSources: ReadonlySet<string>,
 ): boolean {
-  return strategy === "direct-original" && (
-    displayedSources.has(viewerOriginalUrl(image))
-    || getViewerOriginalStatus(image) === "ready"
-  );
+  return strategy === "direct-original" && getViewerOriginalStatus(image) === "ready";
 }
 
 export function initialViewerSourceState(id: string, ready: boolean): ViewerSourceState {
