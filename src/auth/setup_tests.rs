@@ -64,6 +64,7 @@ async fn unconfigured_instance_keeps_gallery_private_until_the_first_account_is_
         "/api/status".into(),
         format!("/api/images/{id}/thumbnail"),
         format!("/api/images/{id}/original"),
+        format!("/api/images/{id}.png"),
     ] {
         assert_eq!(
             call(

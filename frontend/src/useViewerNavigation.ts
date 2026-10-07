@@ -2,20 +2,20 @@ import type { RefObject } from "preact";
 import { useLayoutEffect, useRef } from "preact/hooks";
 import type { GalleryImage } from "./types";
 
-const INITIAL_REPEAT_INTERVAL_MS = 240;
-const MIN_REPEAT_INTERVAL_MS = 160;
-const REPEAT_ACCELERATION_MS = 1200;
+const POINTER_HOLD_DELAY_MS = 500;
+
+// Match deliberate rapid tapping; the cadence is constant for the whole hold.
+const REPEAT_INTERVAL_MS = 170;
 
 type Direction = -1 | 1;
-type HeldArrow = {
-  key: string;
+type HeldNavigation = {
+  key?: string;
   direction: Direction;
-  lastStep: number;
-  repeatStarted: number | null;
+  repeating: boolean;
   controller: AbortController;
 };
 
-type KeyboardNavigationOptions = {
+type NavigationOptions = {
   viewerRef: RefObject<HTMLElement>;
   canPrevious: boolean;
   canNext: boolean;
@@ -24,14 +24,17 @@ type KeyboardNavigationOptions = {
   onLoadMoreImages: () => Promise<GalleryImage[]>;
 };
 
-export function useViewerKeyboardNavigation(options: KeyboardNavigationOptions): void {
+export function useViewerNavigation(options: NavigationOptions) {
   const latest = useRef(options);
   latest.current = options;
   const { viewerRef } = options;
+  const controls = useRef({
+    beginHold: (_direction: Direction): ((commitTap: boolean) => void) => () => {},
+    tap: (_direction: Direction) => {},
+  });
 
-  // Keep the held key and its cadence alive across image changes and new callbacks.
   useLayoutEffect(() => {
-    let held: HeldArrow | null = null;
+    let held: HeldNavigation | null = null;
     let pendingTap: AbortController | null = null;
     let timer = 0;
     const stop = () => {
@@ -51,71 +54,73 @@ export function useViewerKeyboardNavigation(options: KeyboardNavigationOptions):
           active.isContentEditable || active.closest("input, textarea, select, [role='menu']")
         ));
     };
-    const interval = (gesture: HeldArrow) => {
-      const progress = Math.min(1, (performance.now() - gesture.repeatStarted!) / REPEAT_ACCELERATION_MS);
-      const eased = progress * progress * (3 - 2 * progress);
-      return INITIAL_REPEAT_INTERVAL_MS + (MIN_REPEAT_INTERVAL_MS - INITIAL_REPEAT_INTERVAL_MS) * eased;
-    };
-    const schedule = (gesture: HeldArrow, delay: number) => {
+    const schedule = (gesture: HeldNavigation, delay: number) => {
       timer = window.setTimeout(() => repeat(gesture), delay);
     };
-    const repeat = (gesture: HeldArrow) => {
+    const repeat = (gesture: HeldNavigation) => {
       timer = 0;
       if (held !== gesture) return;
       if (!ownsFocus()) { stop(); return; }
+      gesture.repeating = true;
       const current = latest.current;
       if (gesture.direction < 0 ? !current.canPrevious : !current.canNext) {
         if (gesture.direction < 0 || !current.hasMore) { stop(); return; }
-        // Fetch the page without queuing a navigation. Releasing or reversing the
-        // key invalidates this continuation, even if the request finishes later.
+        // No queued steps at a page boundary and no catch-up burst after a wait.
         void current.onLoadMoreImages().then(incoming => {
           if (held !== gesture) return;
           if (!incoming.length || !ownsFocus()) { stop(); return; }
-          // Restart gently after a network wait; never catch up missed repeats.
-          gesture.repeatStarted = performance.now();
-          schedule(gesture, INITIAL_REPEAT_INTERVAL_MS);
+          schedule(gesture, REPEAT_INTERVAL_MS);
         }, () => { if (held === gesture) stop(); });
         return;
       }
-      gesture.lastStep = performance.now();
       current.onNavigate(gesture.direction, gesture.controller.signal);
-      if (held === gesture) schedule(gesture, interval(gesture));
+      if (held === gesture) schedule(gesture, REPEAT_INTERVAL_MS);
+    };
+    const start = (direction: Direction, key?: string) => {
+      stop();
+      const current = latest.current;
+      if (direction < 0 ? !current.canPrevious : !current.canNext && !current.hasMore) return;
+      const gesture: HeldNavigation = { key, direction, repeating: false, controller: new AbortController() };
+      held = gesture;
+      if (key) current.onNavigate(direction, gesture.controller.signal);
+      if (held === gesture) schedule(gesture, key ? REPEAT_INTERVAL_MS : POINTER_HOLD_DELAY_MS);
+      return gesture;
     };
     const down = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || !ownsFocus()) {
-        stop();
-        return;
+        stop(); return;
       }
       const direction = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : null;
       if (!direction) { stop(); return; }
       event.preventDefault();
-      if (!event.repeat) {
-        stop();
-        const current = latest.current;
-        if (direction < 0 ? !current.canPrevious : !current.canNext && !current.hasMore) return;
-        held = { key: event.key, direction, lastStep: performance.now(), repeatStarted: null, controller: new AbortController() };
-        current.onNavigate(direction, held.controller.signal);
-        return;
-      }
-      // Let the OS decide when a press becomes a hold. Once it does, one timer
-      // supplies a smooth cadence instead of following the OS repeat frequency.
-      if (!held || held.key !== event.key || held.repeatStarted !== null) return;
-      held.repeatStarted = performance.now();
-      const delay = Math.max(0, INITIAL_REPEAT_INTERVAL_MS - (performance.now() - held.lastStep));
-      schedule(held, delay);
+      // Own the entire cadence, including the initial hold delay, on every OS.
+      if (!event.repeat) start(direction, event.key);
     };
     const up = (event: KeyboardEvent) => {
       if (event.key !== held?.key) return;
-      // A single tap can finish its one requested page turn after release. A
-      // long press must also cancel a turn requested before repetition began.
-      if (held.repeatStarted === null) {
+      if (!held.repeating) {
+        window.clearTimeout(timer);
         pendingTap = held.controller;
         held = null;
-        return;
-      }
-      stop();
+      } else stop();
     };
     const focus = () => { if (!ownsFocus()) stop(); };
+    const tap = (direction: Direction) => {
+      stop();
+      pendingTap = new AbortController();
+      latest.current.onNavigate(direction, pendingTap.signal);
+    };
+    controls.current.tap = tap;
+    controls.current.beginHold = direction => {
+      const gesture = start(direction);
+      return commitTap => {
+        // A cancelled contact must not stop a newer hold or add a release click.
+        if (!gesture || held !== gesture) return;
+        const shouldTap = commitTap && !gesture.repeating;
+        stop();
+        if (shouldTap) tap(direction);
+      };
+    };
 
     const controller = new AbortController();
     const { signal } = controller;
@@ -126,9 +131,7 @@ export function useViewerKeyboardNavigation(options: KeyboardNavigationOptions):
     window.addEventListener("pointerdown", stop, { signal, capture: true });
     document.addEventListener("visibilitychange", focus, { signal });
     document.addEventListener("focusin", focus, { signal });
-    return () => {
-      stop();
-      controller.abort();
-    };
+    return () => { stop(); controller.abort(); };
   }, [viewerRef]);
+  return controls.current;
 }

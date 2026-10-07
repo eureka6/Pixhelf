@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { authentication, AuthRequestError, updateAccount } from "./auth";
-import { Cloud, ExternalLink, Info, KeyRound, LoaderCircle, Settings, UserRound, X } from "./icons";
+import { Cloud, ExternalLink, Info, KeyRound, LoaderCircle, Settings, SlidersHorizontal, UserRound, X } from "./icons";
 import { StorageSettings } from "./StorageSettings";
 import { GuestSettings } from "./GuestSettings";
+import { CategorySettings } from "./CategorySettings";
+import type { ContentCategory } from "./types";
 import { useModalDialog } from "./useModalDialog";
 import logoMark from "./assets/pixhelf-mark.svg?inline";
 import { version } from "../package.json";
@@ -10,13 +12,14 @@ import { version } from "../package.json";
 // Keep settings sections together so future service configuration can use the same dialog.
 const SETTINGS_SECTIONS = [
   { id: "account", label: "账号安全", icon: KeyRound, content: AccountSettings },
+  { id: "categories", label: "图片分类", icon: SlidersHorizontal, content: CategorySettings },
   { id: "guest", label: "访客模式", icon: UserRound, content: GuestSettings },
   { id: "storage", label: "外部存储", icon: Cloud, content: StorageSettings },
   { id: "about", label: "关于", icon: Info, content: AboutSettings },
 ] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number]["id"];
 
-export function SettingsDialog({ onClose, initialSection = "account", onStorageSaved }: { onClose: () => void; initialSection?: SettingsSection; onStorageSaved: () => void }) {
+export function SettingsDialog({ onClose, initialSection = "account", onStorageSaved, onCategoriesSaved }: { onClose: () => void; initialSection?: SettingsSection; onStorageSaved: () => void; onCategoriesSaved: (categories: ContentCategory[]) => void }) {
   const [activeId, setActiveId] = useState<SettingsSection>(initialSection);
   const [pending, setPending] = useState(false);
   const section = SETTINGS_SECTIONS.find(section => section.id === activeId) ?? SETTINGS_SECTIONS[0];
@@ -40,7 +43,7 @@ export function SettingsDialog({ onClose, initialSection = "account", onStorageS
           ))}
         </nav>
         <section key={section.id} className="settings-content" aria-labelledby={`${section.id}-settings-title`}>
-          <Content onPendingChange={setPending} onSaved={onStorageSaved} />
+          <Content onPendingChange={setPending} onSaved={onStorageSaved} onCategoriesSaved={onCategoriesSaved} />
         </section>
       </div>
     </dialog>

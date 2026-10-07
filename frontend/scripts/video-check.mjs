@@ -103,7 +103,7 @@ try {
     }
     page.on("request", request => {
       if (request.url().includes("/libmedia/")) decoderRequests.push(request.url());
-      const id = new URL(request.url()).pathname.match(/^\/api\/images\/([^/]+)\/original$/)?.[1];
+      const id = new URL(request.url()).pathname.match(/^\/api\/images\/([^/.]+)\.[a-z0-9]+$/)?.[1];
       if (!videoIds.has(id)) return;
       videoRequests.push(request.url());
       if (request.resourceType() === "image") imageDecodeRequests.push(request.url());
@@ -430,7 +430,7 @@ try {
     await viewer.locator('[role="alert"]').waitFor();
     assert.match(await viewer.locator('[role="alert"]').textContent(), /准备失败/);
     assert.equal(await viewer.locator('[role="alert"] a').getAttribute("download"), failureVideo.name);
-    assert.equal(await viewer.locator('[role="alert"] a').getAttribute("href"), `/api/images/${first.id}/original`);
+    assert.equal(await viewer.locator('[role="alert"] a').getAttribute("href"), `/api/images/${first.id}.${first.name.split(".").pop().toLowerCase()}`);
     {
       await page.unroute(`**${first.playback}*`);
       await viewer.getByRole("button", { name: "重试", exact: true }).click();

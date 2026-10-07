@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { formatFileSize } from "./format";
 import { Folder, LoaderCircle, RefreshCw, RotateCcw, Trash2 } from "./icons";
 import { MANAGEMENT_CHANGED, MAX_SELECTION, managementRequest, useManagement, type TrashItem } from "./management";
@@ -9,18 +9,28 @@ export function TrashView({ search }: { search: string }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const requestRef = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true); setError("");
     try {
-      const value = await managementRequest("/trash") as { items?: TrashItem[] } | null;
+      const value = await managementRequest("/trash", undefined, controller.signal) as { items?: TrashItem[] } | null;
+      if (controller.signal.aborted) return;
       if (!value || !Array.isArray(value.items) || !value.items.every(item => typeof item.id === "string" && typeof item.name === "string" && typeof item.originalPath === "string" && Number.isSafeInteger(item.deletedAt))) throw new Error("回收站记录无效");
       setItems(value.items);
       const ids = new Set(value.items.map(item => item.id));
       setSelected(current => new Set([...current].filter(id => ids.has(id))));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取回收站"); }
-    finally { setLoading(false); }
+    } catch (reason) { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "无法读取回收站"); }
+    finally { if (!controller.signal.aborted) setLoading(false); }
   }, []);
-  useEffect(() => { void load(); const changed = () => void load(); window.addEventListener(MANAGEMENT_CHANGED, changed); return () => window.removeEventListener(MANAGEMENT_CHANGED, changed); }, [load]);
+  useEffect(() => {
+    void load();
+    const changed = () => void load();
+    window.addEventListener(MANAGEMENT_CHANGED, changed);
+    return () => { requestRef.current?.abort(); window.removeEventListener(MANAGEMENT_CHANGED, changed); };
+  }, [load]);
   useEffect(() => setSelected(new Set()), [search]);
   const visible = useMemo(() => items.filter(item => `${item.name} ${item.originalPath}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [items, search]);
   const restore = async (ids: string[]) => {

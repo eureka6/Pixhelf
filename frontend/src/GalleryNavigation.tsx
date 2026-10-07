@@ -6,9 +6,8 @@ import { formatCount } from "./format";
 import {
   BookImage,
   Cloud,
+  ChevronDown,
   HardDrive,
-  Dices,
-  House,
   Images,
   Heart,
   Trash2,
@@ -18,10 +17,11 @@ import {
   X,
 } from "./icons";
 import { ToolbarPopover } from "./ToolbarPopover";
+import { GalleryFilters, imageFilterLabels } from "./GalleryFilters";
 import { AuthControls } from "./AuthControls";
 import { authentication } from "./auth";
 import { useManagement } from "./management";
-import type { GallerySection, GallerySummary } from "./types";
+import type { ContentCategory, GallerySection, GallerySummary, ImageFilters } from "./types";
 
 export function Header({
   search,
@@ -33,14 +33,17 @@ export function Header({
   localSearch = false,
   similarSearch,
   onSearchChange,
-  onExplore,
-  exploreActive,
-  exploreLoading,
-  exploreScope,
   onHome,
   onToggleNavigation,
   navigationOpen,
   compactLayout,
+  filters,
+  onFiltersChange,
+  onContentChange,
+  onResetFilters,
+  categories,
+  categoriesHint,
+  onConfigureCategories,
 }: {
   search: string;
   searchOpen: boolean;
@@ -51,33 +54,41 @@ export function Header({
   localSearch?: boolean;
   similarSearch: boolean;
   onSearchChange: (value: string) => void;
-  onExplore: () => void;
-  exploreActive: boolean;
-  exploreLoading: boolean;
-  exploreScope?: string;
   onHome: () => void;
   onToggleNavigation: () => void;
   navigationOpen: boolean;
   compactLayout: boolean;
+  filters: ImageFilters | null;
+  onFiltersChange: (filters: ImageFilters) => void;
+  onContentChange: (query: string) => void;
+  onResetFilters: () => void;
+  categories: ContentCategory[];
+  categoriesHint: string;
+  onConfigureCategories?: () => void;
 }) {
-  const [exploreMotionKey, setExploreMotionKey] = useState(0);
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mobileNavigationOpen = compactLayout && navigationOpen;
   const semanticSearch = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "semantic";
   const searchIndexing = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "indexing";
+  const filterLabels = filters ? imageFilterLabels(filters, semanticSearch ? search : "", categories) : [];
+  const filtersActive = filterLabels.length > 0;
   const searchPlaceholder = localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
     ? "描述想找的图片"
-    : searchIndexing
-      ? "文字索引中 · 暂搜文件名"
-      : "搜索文件名";
+    : "搜索文件名";
 
   useEffect(() => {
-    if (!searchOpen) return;
+    if (!searchOpen) {
+      setFiltersExpanded(false);
+      searchInputRef.current?.blur();
+      return;
+    }
+    if (compactLayout || window.matchMedia("(pointer: coarse)").matches) return;
     const frame = window.requestAnimationFrame(() => {
       searchInputRef.current?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [searchOpen]);
+  }, [searchOpen, compactLayout]);
 
   useEffect(() => {
     if (mobileNavigationOpen) {
@@ -90,12 +101,8 @@ export function Header({
     if (open && mobileNavigationOpen) onToggleNavigation();
     onSearchOpenChange(open);
   };
-  const handleExplore = () => {
-    searchInputRef.current?.blur();
-    setExploreMotionKey((value) => value + 1);
-    onExplore();
-  };
   const handleHome = () => {
+    onSearchOpenChange(false);
     searchInputRef.current?.blur();
     onHome();
   };
@@ -108,83 +115,72 @@ export function Header({
           onClick={onToggleNavigation}
           controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
         />
+        <Brand onHome={handleHome} />
       </div>
       <div className="topbar-actions" role="toolbar" aria-label="图库工具">
-        <button
-          type="button"
-          className="icon-button toolbar-action-button topbar-home"
-          onClick={handleHome}
-          aria-label="主页"
-          title="主页"
-        >
-          <House size={18} />
-        </button>
-        <button
-          type="button"
-          className="icon-button toolbar-action-button explore-toggle"
-          onClick={handleExplore}
-          aria-label="探索列队"
-          aria-pressed={exploreActive}
-          aria-busy={exploreLoading}
-          title={`${exploreScope ? `探索 ${exploreScope}` : "探索列队"}${exploreActive ? " · 换一组图片" : ""}`}
-        >
-          <Dices
-            key={exploreMotionKey}
-            className={`explore-icon ${exploreMotionKey ? "is-rolling" : ""}`}
-            size={18}
-          />
-          <span className="toolbar-state-dot" aria-hidden="true" />
-        </button>
         <ToolbarPopover
           id="gallery-search-field"
           open={searchOpen}
+          autoDismiss
           onOpenChange={handleSearchOpenChange}
-          openLabel="打开搜索"
-          closeLabel="收起搜索"
-          panelLabel={localSearch ? "搜索本地目录" : similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索图片"}
+          openLabel={filters ? "搜索与筛选" : "打开搜索"}
+          closeLabel={filters ? "收起搜索与筛选" : "收起搜索"}
+          panelLabel={localSearch ? "搜索本地目录" : similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索与筛选"}
           icon={
             <>
-              <Search className="search-toggle-icon" size={18} />
+              {searchOpen ? <X className="search-toggle-icon" size={18} /> : <Search className="search-toggle-icon" size={18} />}
               <span className="toolbar-state-dot" aria-hidden="true" />
             </>
           }
-          rootClassName={`topbar-search ${search ? "has-query" : ""} ${semanticSearch ? "is-semantic" : ""}`}
+          rootClassName={`topbar-search ${search || filtersActive ? "has-query" : ""} ${filters ? "gallery-search" : ""} ${semanticSearch ? "is-semantic" : ""}`}
           triggerClassName="search-toggle"
-          panelClassName="search-popover-panel"
+          panelClassName="search-popover-panel gallery-search-panel"
         >
-          <Search className="search-popover-icon" aria-hidden="true" size={17} />
-          <input
-            ref={searchInputRef}
-            type="search"
-            value={search}
-            onInput={(event) => onSearchChange(event.currentTarget.value)}
-            placeholder={searchPlaceholder}
-            aria-label={localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
-            enterKeyHint="search"
-            autoComplete="off"
-            tabIndex={searchOpen ? 0 : -1}
-          />
-          {!albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode !== "filename" && (
-            <span
-              className="search-mode-badge"
-              data-state={searchMode}
-              title={semanticSearch ? "Chinese-CLIP 本地语义搜索" : "正在建立文字搜图索引"}
-            >
-              {semanticSearch ? "语义" : "索引中"}
-            </span>
-          )}
-          {search && (
-            <button
-              type="button"
-              className="clear-search"
-              onClick={() => onSearchChange("")}
-              aria-label="清空搜索"
-              title="清空搜索"
-              tabIndex={searchOpen ? 0 : -1}
-            >
-              <X size={15} />
-            </button>
-          )}
+          <div className="gallery-search-top">
+            <div className="gallery-search-input">
+              <Search className="search-popover-icon" aria-hidden="true" size={17} />
+              <input
+                ref={searchInputRef}
+                type="search"
+                value={search}
+                onInput={(event) => onSearchChange(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
+                    event.preventDefault();
+                    handleSearchOpenChange(false);
+                  }
+                }}
+                placeholder={searchPlaceholder}
+                aria-label={localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
+                enterKeyHint="search"
+                autoComplete="off"
+                tabIndex={searchOpen ? 0 : -1}
+              />
+              {search && (
+                <button
+                  type="button"
+                  className="clear-search"
+                  onClick={() => { onSearchChange(""); searchInputRef.current?.focus({ preventScroll: true }); }}
+                  aria-label="清空搜索"
+                  title="清空搜索"
+                  tabIndex={searchOpen ? 0 : -1}
+                >
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+            {filters && <button type="button" className="gallery-filter-toggle" aria-expanded={filtersExpanded}
+              aria-label={filtersExpanded ? "收起筛选" : "展开筛选"} title={filterLabels.join(" · ") || "分类、类型、画幅与排序"}
+              onClick={() => setFiltersExpanded(expanded => !expanded)}>
+              筛选{filtersActive && <span className="gallery-filter-count">{filterLabels.length}</span>}<ChevronDown size={15} />
+            </button>}
+          </div>
+          {filters && filtersExpanded && <GalleryFilters filters={filters} search={search} categories={categories} categoriesHint={categoriesHint}
+            onChange={onFiltersChange} onContentChange={onContentChange} onConfigureCategories={onConfigureCategories && (() => { onSearchOpenChange(false); onConfigureCategories(); })}
+            contentReady={semanticSearch}
+            contentHint={searchIndexing ? "内容分类准备中，完成后即可使用。" : "在开启自然语言搜索的图库或相册中可用。"} />}
+          {filters && filtersExpanded && (search || filtersActive) && <button type="button"
+            className="gallery-filter-reset gallery-search-reset" onClick={onResetFilters}>重置</button>}
         </ToolbarPopover>
       </div>
     </header>
@@ -218,36 +214,34 @@ function SidebarToggleButton({
   );
 }
 
-function SidebarBrand({ onHome }: { onHome: () => void }) {
+function Brand({ onHome }: { onHome: () => void }) {
   return (
-    <div className="sidebar-brand">
-      <div className="brand-lockup">
-        <a
-          className="brand"
-          href="/"
-          aria-label="主页"
-          title="主页"
-          onClick={(event) => {
-            if (
-              event.button !== 0
-              || event.metaKey
-              || event.ctrlKey
-              || event.shiftKey
-              || event.altKey
-            ) return;
-            event.preventDefault();
-            onHome();
-          }}
-        >
-          <span className="brand-symbol">
-            <img className="brand-mark" src={logoMark} width="32" height="32" alt="" />
-          </span>
-          <span className="brand-name">
-            Pixhelf
-          </span>
-        </a>
-        <VersionLink className="brand-version" />
-      </div>
+    <div className="brand-lockup">
+      <a
+        className="brand"
+        href="/"
+        aria-label="主页"
+        title="主页"
+        onClick={(event) => {
+          if (
+            event.button !== 0
+            || event.metaKey
+            || event.ctrlKey
+            || event.shiftKey
+            || event.altKey
+          ) return;
+          event.preventDefault();
+          onHome();
+        }}
+      >
+        <span className="brand-symbol">
+          <img className="brand-mark" src={logoMark} width="32" height="32" alt="" />
+        </span>
+        <span className="brand-name">
+          Pixhelf
+        </span>
+      </a>
+      <VersionLink className="brand-version" />
     </div>
   );
 }
@@ -256,7 +250,6 @@ export function Sidebar({
   summary,
   activeSection,
   onChoose,
-  onHome,
   mobileOpen,
   mobileMounted,
   onMobileExited,
@@ -267,7 +260,6 @@ export function Sidebar({
   summary: GallerySummary | null;
   activeSection: GallerySection;
   onChoose: (section: GallerySection) => void;
-  onHome: () => void;
   mobileOpen: boolean;
   mobileMounted: boolean;
   onMobileExited: () => void;
@@ -322,7 +314,6 @@ export function Sidebar({
         aria-hidden={desktopCollapsed}
         inert={desktopCollapsed}
       >
-        <SidebarBrand onHome={onHome} />
         {navigation}
       </aside>
       {mobileMounted && (
@@ -352,7 +343,6 @@ export function Sidebar({
               ) onMobileExited();
             }}
           >
-            <SidebarBrand onHome={onHome} />
             {navigation}
           </aside>
         </div>

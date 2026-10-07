@@ -23,7 +23,7 @@ const bundle = await build({
       };
       window.prepareImages = prepareViewerImages;
       window.thumbnailStatus = id => getViewerThumbnailStatus({ id });
-      window.originalStatus = id => getViewerOriginalStatus({ id });
+      window.originalStatus = id => getViewerOriginalStatus({ id, name: id + ".jpg" });
       window.renderAsset = getViewerViewportRenderAsset;
       window.readyRenderAsset = getReadyViewerViewportRenderAsset;
       window.imageRenderAsset = (image, priority = "high") => {
@@ -43,7 +43,7 @@ const bundle = await build({
   define: { "import.meta.env.DEV": "true", "import.meta.url": '"https://viewer.test/assets/app.js"' },
 });
 const photo = readFileSync(new URL("./fixtures/live-photo.jpg", import.meta.url));
-const css = ["styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
+const css = ["base.css", "styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
   .map(file => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8")).join("\n");
 const images = Array.from({ length: 120 }, (_, i) => ({ id: `photo-${i}`, name: `photo-${i}.jpg`, width: 1200, height: 900 }));
 const similar = Array.from({ length: 60 }, (_, i) => ({ ...images[i], id: `similar-${i}` }));
@@ -81,7 +81,7 @@ async function fixture(mobile = false, holdThumbnails = false) {
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <script id="pixhelf-auth" type="application/json">{"enabled":false,"authenticated":false}</script>
       <script id="pixhelf-bootstrap" type="application/json">${JSON.stringify(bootstrap)}</script><div id="root"></div>` });
-    if (path.endsWith("/original")) {
+    if (path.endsWith(".jpg")) {
       await originals.promise;
       return route.fulfill({ contentType: "image/jpeg", body: photo }).catch(() => {});
     }
@@ -170,15 +170,15 @@ try {
 
   const recovered = await fixture(true);
   try {
-    await recovered.page.route("**/photo-40/original*", route => new URL(route.request().url()).search
+    await recovered.page.route("**/photo-40.jpg*", route => new URL(route.request().url()).search
       ? route.fulfill({ contentType: "image/jpeg", body: photo })
       : route.fulfill({ status: 503, body: "temporarily unavailable" }));
     recovered.originals.resolve();
     await recovered.open(40);
     await recovered.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
-    await recovered.waitForPath(path => path === "/api/images/photo-41/original");
-    await recovered.waitForPath(path => path === "/api/images/photo-39/original");
-    assert.equal(recovered.requests.filter(path => path === "/api/images/photo-40/original?retry=1").length, 1,
+    await recovered.waitForPath(path => path === "/api/images/photo-41.jpg");
+    await recovered.waitForPath(path => path === "/api/images/photo-39.jpg");
+    assert.equal(recovered.requests.filter(path => path === "/api/images/photo-40.jpg?retry=1").length, 1,
       "one successful retry should restore display and neighbor preloading without duplicate downloads");
     checks++;
     console.log("mobile recovery: a successful retry also restores neighbor preloading passed");
@@ -196,12 +196,12 @@ try {
     await client.send("Network.clearBrowserCache");
     await client.send("HeapProfiler.collectGarbage");
     await client.detach();
-    await revisited.page.route("**/photo-40/original", async route => {
+    await revisited.page.route("**/photo-40.jpg", async route => {
       await revisitGate.promise;
       await route.fulfill({ contentType: "image/jpeg", body: photo }).catch(() => {});
     });
     await revisited.open(40);
-    await revisited.waitForPath(path => path === "/api/images/photo-40/original", 2);
+    await revisited.waitForPath(path => path === "/api/images/photo-40.jpg", 2);
     assert.equal(await revisited.page.locator(".image-viewer").getAttribute("data-full-loaded"), "false",
       "having displayed an image earlier must not hide its thumbnail while the evicted original reloads");
     await revisited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.thumbnailLoaded === "true");
@@ -230,7 +230,7 @@ try {
   const hoverRetry = await fixture();
   try {
     let attempts = 0;
-    await hoverRetry.page.route("**/photo-0/original", route => ++attempts === 1
+    await hoverRetry.page.route("**/photo-0.jpg", route => ++attempts === 1
       ? route.fulfill({ status: 503, body: "temporarily unavailable" })
       : route.fulfill({ contentType: "image/jpeg", body: photo }));
     const card = hoverRetry.page.locator('.image-card[data-image-id="photo-0"]');
@@ -250,7 +250,7 @@ try {
   try {
     let attempts = 0;
     const image = { ...images[0], id: "decode-retry" };
-    await decodeRetry.page.route("**/decode-retry/original", route => ++attempts === 1
+    await decodeRetry.page.route("**/decode-retry.jpg", route => ++attempts === 1
       ? route.fulfill({ status: 503, body: "temporarily unavailable" })
       : route.fulfill({ contentType: "image/jpeg", body: photo }));
     await decodeRetry.page.evaluate(async image => {
@@ -269,15 +269,15 @@ try {
   const hiddenReady = await fixture(true);
   try {
     await hiddenReady.open(40);
-    await hiddenReady.waitForPath(path => path === "/api/images/photo-40/original");
+    await hiddenReady.waitForPath(path => path === "/api/images/photo-40.jpg");
     await hiddenReady.page.evaluate(() => dispatchEvent(new Event("pagehide")));
     hiddenReady.originals.resolve();
     await hiddenReady.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
     await hiddenReady.page.waitForTimeout(180);
-    assert(!hiddenReady.requests.includes("/api/images/photo-41/original"),
+    assert(!hiddenReady.requests.includes("/api/images/photo-41.jpg"),
       "a late original completion must not restart neighbors after pagehide");
     await hiddenReady.page.evaluate(() => dispatchEvent(new Event("pageshow")));
-    await hiddenReady.waitForPath(path => path === "/api/images/photo-41/original");
+    await hiddenReady.waitForPath(path => path === "/api/images/photo-41.jpg");
     checks++;
     console.log("page suspension: an original finishing after pagehide waits for pageshow before preloading passed");
   } finally { await hiddenReady.close(); }
@@ -286,14 +286,14 @@ try {
     const f = await fixture(mobile);
     try {
       await f.open(40);
-      await f.waitForPath(path => path === "/api/images/photo-40/original");
+      await f.waitForPath(path => path === "/api/images/photo-40.jpg");
       await f.dismissViewer();
-      await f.page.waitForEvent("requestfailed", { predicate: request => request.url().endsWith("/photo-40/original"), timeout: 1500 })
-        .catch(error => { if (!f.failed.includes("/api/images/photo-40/original")) throw error; });
+      await f.page.waitForEvent("requestfailed", { predicate: request => request.url().endsWith("/photo-40.jpg"), timeout: 1500 })
+        .catch(error => { if (!f.failed.includes("/api/images/photo-40.jpg")) throw error; });
       assert.equal(await f.page.evaluate(() => window.originalStatus("photo-40")), "idle",
         "closing the viewer must remove its original cache entries");
       await f.open(40);
-      await f.waitForPath(path => path === "/api/images/photo-40/original", 2);
+      await f.waitForPath(path => path === "/api/images/photo-40.jpg", 2);
       checks++;
       console.log(`${mobile ? "mobile" : "desktop"}: closing aborts pending downloads and reopening can start fresh passed`);
     } finally { await f.close(); }
@@ -304,7 +304,7 @@ try {
     await hovered.page.emulateMedia({ reducedMotion: "no-preference" });
     await hovered.page.locator('.image-card[data-image-id="photo-0"]').click();
     await hovered.expectImage("photo-0");
-    await hovered.waitForPath(path => path === "/api/images/photo-0/original");
+    await hovered.waitForPath(path => path === "/api/images/photo-0.jpg");
     await hovered.dismissViewer();
     await hovered.page.evaluate(() => { window.returnVisuals = [...document.querySelectorAll(".viewer-return-media img")]; });
     await hovered.page.locator(".viewer-return-layer").waitFor({ state: "detached" });
@@ -314,7 +314,7 @@ try {
     assert.equal(await hovered.page.evaluate(() => window.originalStatus("photo-0")), "idle",
       "returning focus and the cursor to the opening card must not restart its cancelled download");
     await hovered.page.locator('.image-card[data-image-id="photo-0"]').hover({ position: { x: 12, y: 12 } });
-    await hovered.waitForPath(path => path === "/api/images/photo-0/original", 2);
+    await hovered.waitForPath(path => path === "/api/images/photo-0.jpg", 2);
     checks++;
     console.log("close to gallery: restoring focus and pointer position does not restart the original passed");
   } finally { await hovered.close(); }
@@ -322,24 +322,24 @@ try {
   const background = await fixture(false, true);
   try {
     await background.open(40);
-    await background.waitForPath(path => path === "/api/images/photo-42/original");
+    await background.waitForPath(path => path === "/api/images/photo-42.jpg");
     await background.waitForPath(path => path === "/api/images/photo-50/thumbnail");
     await setVisibility(background.page, "hidden");
     assert.deepEqual(await background.page.evaluate(() => [window.originalStatus("photo-40"),
       window.originalStatus("photo-42"), window.thumbnailStatus("photo-50")]), ["loading", "idle", "idle"],
     "backgrounding retains the current download and discards speculative neighbors");
     await setVisibility(background.page, "visible");
-    await background.waitForPath(path => path === "/api/images/photo-42/original", 2);
+    await background.waitForPath(path => path === "/api/images/photo-42.jpg", 2);
     await background.page.evaluate(() => dispatchEvent(new Event("pagehide")));
     assert.equal(await background.page.evaluate(() => window.originalStatus("photo-42")), "idle");
     await background.page.evaluate(() => dispatchEvent(new Event("pageshow")));
-    await background.waitForPath(path => path === "/api/images/photo-42/original", 3);
+    await background.waitForPath(path => path === "/api/images/photo-42.jpg", 3);
     await background.dismissViewer();
-    const count = background.requests.filter(path => path.endsWith("/original")).length;
+    const count = background.requests.filter(path => path.endsWith(".jpg")).length;
     await setVisibility(background.page, "visible");
     await background.page.evaluate(() => dispatchEvent(new Event("pageshow")));
     await background.page.waitForTimeout(180);
-    assert.equal(background.requests.filter(path => path.endsWith("/original")).length, count,
+    assert.equal(background.requests.filter(path => path.endsWith(".jpg")).length, count,
       "closed sessions must not restart downloads on visibility or history lifecycle events");
     checks++;
     console.log("background lifecycle: stops neighbors, resumes on return, removes listeners on close passed");
@@ -365,7 +365,7 @@ try {
     await late.page.evaluate(() => window.decodeReleases[0]());
     await late.page.waitForFunction(() => window.decodeReleases.length === 2);
     assert.equal(await late.page.evaluate(() => window.bitmaps[0].width), 0, "late bitmap must be explicitly closed");
-    assert(!late.requests.includes("/api/images/queued-cancelled/original"), "cancelled queued jobs must never start");
+    assert(!late.requests.includes("/api/images/queued-cancelled.jpg"), "cancelled queued jobs must never start");
     await late.page.evaluate(() => { window.holdDecodes = false; window.decodeReleases[1](); });
     await late.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
     await late.page.evaluate(() => { window.oldCanvas = document.querySelector(".viewer-original-canvas"); });
@@ -380,21 +380,21 @@ try {
   const mobileBackground = await fixture(true);
   const neighbor = Promise.withResolvers();
   try {
-    await mobileBackground.page.route("**/photo-41/original", async route => {
+    await mobileBackground.page.route("**/photo-41.jpg", async route => {
       await neighbor.promise;
       await route.fulfill({ contentType: "image/jpeg", body: photo }).catch(() => {});
     });
     mobileBackground.originals.resolve();
     await mobileBackground.open(40);
-    await mobileBackground.waitForPath(path => path === "/api/images/photo-41/original");
+    await mobileBackground.waitForPath(path => path === "/api/images/photo-41.jpg");
     await setVisibility(mobileBackground.page, "hidden");
     await mobileBackground.page.waitForTimeout(180);
-    assert(!mobileBackground.requests.includes("/api/images/photo-39/original"),
+    assert(!mobileBackground.requests.includes("/api/images/photo-39.jpg"),
       "a cancelled neighbor must not trigger the next neighbor from its promise continuation");
     await setVisibility(mobileBackground.page, "visible");
-    await mobileBackground.waitForPath(path => path === "/api/images/photo-41/original", 2);
+    await mobileBackground.waitForPath(path => path === "/api/images/photo-41.jpg", 2);
     neighbor.resolve();
-    await mobileBackground.waitForPath(path => path === "/api/images/photo-39/original");
+    await mobileBackground.waitForPath(path => path === "/api/images/photo-39.jpg");
     checks++;
     console.log("mobile background: cancels neighbor downloads and delayed continuations, then resumes passed");
   } finally { neighbor.resolve(); await mobileBackground.close(); }
@@ -422,14 +422,14 @@ try {
   try {
     const probes = images.map((image, i) => ({ ...image, id: `probe-${i}` }));
     await pending.page.evaluate(items => window.prepareImages(items, 10), probes);
-    await pending.waitForPath(path => path === "/api/images/probe-12/original");
+    await pending.waitForPath(path => path === "/api/images/probe-12.jpg");
     await pending.page.evaluate(items => window.prepareImages(items, 60), probes);
     assert.equal(await pending.page.evaluate(() => window.thumbnailStatus("probe-10")), "idle",
       "a pending thumbnail outside the new navigation window must be discarded");
     await pending.page.waitForFunction(() => window.thumbnailStatus("probe-60") === "loading");
-    await pending.waitForPath(path => path === "/api/images/probe-62/original");
+    await pending.waitForPath(path => path === "/api/images/probe-62.jpg");
     assert(pending.failed.includes("/api/images/probe-10/thumbnail"), "discarded thumbnails must release their network request");
-    assert(pending.failed.includes("/api/images/probe-10/original"), "old original preloads must release their network request too");
+    assert(pending.failed.includes("/api/images/probe-10.jpg"), "old original preloads must release their network request too");
     await pending.page.evaluate(items => window.prepareImages(items, 10), probes);
     await pending.waitForPath(path => path === "/api/images/probe-10/thumbnail", 2);
     assert.equal(await pending.page.evaluate(() => window.thumbnailStatus("probe-10")), "loading",
@@ -467,14 +467,14 @@ try {
   try {
     await boundary.open(59);
     await boundary.waitForPath(path => path.startsWith("/api/images?"));
-    await boundary.waitForPath(path => path === "/api/images/photo-58/original");
+    await boundary.waitForPath(path => path === "/api/images/photo-58.jpg");
     await boundary.page.locator(".image-viewer").focus();
     await boundary.page.keyboard.press("ArrowRight");
     await boundary.expectImage("photo-59");
     boundary.pagination.resolve();
     await boundary.expectImage("photo-60");
     await boundary.page.waitForFunction(() => window.thumbnailStatus("photo-61") === "ready");
-    assert(!boundary.failed.includes("/api/images/photo-58/original"),
+    assert(!boundary.failed.includes("/api/images/photo-58.jpg"),
       "crossing a pending page must retain nearby downloads from the preceding page");
     assert.equal(boundary.requests.filter(path => path.startsWith("/api/images?")).length, 1);
     checks++;

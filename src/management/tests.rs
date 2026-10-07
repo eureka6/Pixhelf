@@ -46,6 +46,51 @@ async fn call(
 }
 
 #[tokio::test]
+async fn category_settings_are_validated_saved_and_reloaded() {
+    let (_temporary, state) = fixture();
+    let make_app = || {
+        router(state.clone()).merge(
+            Router::new()
+                .route("/api/categories", get(categories::read))
+                .with_state(state.clone()),
+        )
+    };
+    let app = make_app();
+    let saved = json!({"categories":[{"name":"旅行", "query":"海边的日落"}]});
+    let (status, result) = call(&app, "POST", "/api/management/categories", saved.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result, saved);
+    let (status, result) = call(&make_app(), "GET", "/api/categories", json!(null)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result, saved);
+    for input in [
+        json!({"categories":[{"name":"", "query":"海边"}]}),
+        json!({"categories":[{"name":"一", "query":"海边"}, {"name":"二", "query":"海边"}]}),
+        json!({"categories":[{"name":"一", "query":"a".repeat(201)}]}),
+    ] {
+        let (status, _) = call(&app, "POST", "/api/management/categories", input).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            call(&app, "GET", "/api/categories", json!(null)).await.1,
+            saved
+        );
+    }
+    let cleared = json!({"categories":[]});
+    assert_eq!(
+        call(&app, "POST", "/api/management/categories", cleared.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&make_app(), "GET", "/api/categories", json!(null))
+            .await
+            .1,
+        cleared
+    );
+}
+
+#[tokio::test]
 async fn favorites_apply_sorting_search_and_pagination_consistently() {
     let (_temporary, state) = fixture();
     let root = state.index.read().await.root.clone();

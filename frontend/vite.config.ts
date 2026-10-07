@@ -15,6 +15,7 @@ async function libmediaFiles() {
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [{
     name: "libmedia-assets",
     async generateBundle() {
@@ -40,13 +41,13 @@ export default defineConfig({
     target: "es2022",
     outDir: "dist",
     emptyOutDir: true,
-    cssCodeSplit: false,
+    cssCodeSplit: true,
     rollupOptions: {
       output: {
         entryFileNames: "assets/app.js",
         chunkFileNames: "assets/[name].js",
         assetFileNames: (asset) =>
-          asset.name?.endsWith(".css") ? "assets/app.css" : "assets/[name][extname]",
+          asset.name === "index.css" ? "assets/app.css" : "assets/[name][extname]",
       },
     },
   },

@@ -1,10 +1,12 @@
 import { authentication, requireLogin } from "./auth";
+import { isCategoryConfig } from "./contentCategories";
 import type {
   Album,
   BootstrapData,
   GalleryImage,
   GallerySummary,
   ImagesPage,
+  ImageFilters,
   PhotoDetails,
   SortMode,
   ThumbnailStatus,
@@ -36,7 +38,9 @@ function isAlbum(value: unknown): value is Album {
     && typeof value.path === "string"
     && typeof value.name === "string"
     && isNonNegativeInteger(value.count)
-    && (value.cover === null || typeof value.cover === "string");
+    && (value.cover === null || typeof value.cover === "string")
+    && (value.previews === undefined || (Array.isArray(value.previews)
+      && value.previews.length <= 3 && value.previews.every(id => typeof id === "string")));
 }
 
 export function isGalleryImage(value: unknown): value is GalleryImage {
@@ -65,7 +69,8 @@ function isGallerySummary(value: unknown): value is GallerySummary {
     && isNonNegativeInteger(value.total)
     && Array.isArray(value.albums)
     && value.albums.every(isAlbum)
-    && typeof value.revision === "string";
+    && typeof value.revision === "string"
+    && (value.initializing === undefined || typeof value.initializing === "boolean");
 }
 
 function isImagesPage(value: unknown): value is ImagesPage {
@@ -218,12 +223,18 @@ export function getStatus(signal?: AbortSignal): Promise<ThumbnailStatus> {
   return requestJson("/api/status", isThumbnailStatus, signal);
 }
 
+export async function getContentCategories(signal?: AbortSignal) {
+  return (await requestJson("/api/categories", isCategoryConfig, signal)).categories;
+}
+
 export function getImages(
   options: {
     album: string;
     favorites?: boolean;
     search: string;
     sort: SortMode;
+    kind?: ImageFilters["kind"];
+    orientation?: ImageFilters["orientation"];
     seed: string;
     offset: number;
     limit: number;
@@ -238,6 +249,8 @@ export function getImages(
   if (options.album) params.set("album", options.album);
   if (options.search) params.set("search", options.search);
   if (options.seed) params.set("seed", options.seed);
+  if (options.kind && options.kind !== "all") params.set("kind", options.kind);
+  if (options.orientation && options.orientation !== "all") params.set("orientation", options.orientation);
   return requestJson(
     `${options.favorites ? "/api/management/favorites" : "/api/images"}?${params}`,
     isImagesPage,

@@ -2,11 +2,11 @@ import { copyText } from "./clipboard";
 import type { JSX } from "preact";
 import { memo } from "preact/compat";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Check, Copy, Download, ExternalLink, ImageIcon, Info, Maximize2, Minimize2, Play, ScanSearch } from "./icons";
+import { Check, Copy, Download, ImageIcon, Info, Maximize2, Minimize2, Play, ScanSearch } from "./icons";
 import { CARD_MENU_EVENT, CARD_SELECTOR } from "./cardInteraction";
 import type { CardMenuRequest } from "./cardInteraction";
 import type { GalleryImage, ImageCardAction } from "./types";
-import { originalImageUrl } from "./viewerAssets";
+import { originalImageUrl } from "./mediaUrls";
 import { SelectionMenuItems, type SelectionActions } from "./SelectionMenu";
 
 
@@ -26,7 +26,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
   const menuRef = useRef<HTMLDivElement>(null);
   const [request, setRequest] = useState<CardMenuRequest | null>(null);
   const open = request !== null;
-  const [copyState, setCopyState] = useState<"idle" | "pending" | "done" | "failed">("idle");
+  const [copyState, setCopyState] = useState<{ target: "link" | "name"; status: "pending" | "done" | "failed" } | null>(null);
   const originalUrl = originalImageUrl(image);
 
   useLayoutEffect(() => { onMenuChange?.(open); }, [open, onMenuChange]);
@@ -58,7 +58,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
     const menu = menuRef.current;
     const card = controlsRef.current?.closest<HTMLElement>(CARD_SELECTOR);
     if (!menu || !card) return;
-    setCopyState("idle");
+    setCopyState(null);
     // The top layer lets menus escape a thumbnail's clipped edges, including in the viewer.
     // Dismiss on a new outside contact, never on the release that opened a context menu.
     menu.setAttribute("popover", "manual");
@@ -159,6 +159,18 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
     onAction(action);
   };
 
+  const copy = async (target: "link" | "name") => {
+    const menu = menuRef.current;
+    if (!menu || copyState?.status === "pending") return;
+    setCopyState({ target, status: "pending" });
+    try {
+      await copyText(target === "link" ? new URL(originalUrl, window.location.href).href : image.name, menu);
+      if (menu.isConnected) setCopyState({ target, status: "done" });
+    } catch {
+      if (menu.isConnected) setCopyState({ target, status: "failed" });
+    }
+  };
+
   const handleMenuKey = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Tab") {
       closeMenu(true);
@@ -211,22 +223,15 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
           </button>}
           <div className="photo-card-menu-divider" role="separator" />
           <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>{image.video ? "下载原视频" : "下载原图"}</span></a>
-          <a role="menuitem" href={originalUrl} target="_blank" rel="noopener noreferrer" onClick={() => closeMenu()}><ExternalLink size={17} /><span>{image.video ? "在新标签页打开原视频" : "在新标签页打开原图"}</span></a>
-          <button type="button" role="menuitem" aria-disabled={copyState === "pending"} onClick={async () => {
-            const menu = menuRef.current;
-            if (!menu || copyState === "pending") return;
-            setCopyState("pending");
-            try {
-              await copyText(image.name, menu);
-              if (menu.isConnected) setCopyState("done");
-            } catch {
-              if (menu.isConnected) setCopyState("failed");
-            }
-          }}>
-            {copyState === "done" ? <Check size={17} /> : <Copy size={17} />}
-            <span>{copyState === "done" ? "已复制文件名" : copyState === "pending" ? "正在复制…" : "复制文件名"}</span>
-          </button>
-          <span className="photo-card-feedback" role="status">{copyState === "failed" ? "复制失败，请重试" : copyState === "done" ? "文件名已复制" : ""}</span>
+          {(["link", "name"] as const).map(target => {
+            const label = target === "name" ? "文件名" : image.video ? "视频链接" : "图片链接";
+            const state = copyState?.target === target ? copyState.status : "idle";
+            return <button key={target} type="button" role="menuitem" aria-disabled={copyState?.status === "pending"} onClick={() => void copy(target)}>
+              {state === "done" ? <Check size={17} /> : <Copy size={17} />}
+              <span>{state === "done" ? `已复制${label}` : state === "pending" ? "正在复制…" : `复制${label}`}</span>
+            </button>;
+          })}
+          <span className="photo-card-feedback" role="status">{copyState?.status === "failed" ? "复制失败，请重试" : copyState?.status === "done" ? `${copyState.target === "name" ? "文件名" : "链接"}已复制` : ""}</span>
         </div>
       )}
     </div>

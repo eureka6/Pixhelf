@@ -78,7 +78,7 @@ const bundle = await build({
   define: { "import.meta.env.DEV": "true", "import.meta.url": '"https://viewer.test/assets/app.js"' },
 });
 const photo = readFileSync(new URL("./fixtures/live-photo.jpg", import.meta.url));
-const css = ["styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
+const css = ["base.css", "styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
   .map(file => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8")).join("\n");
 const browser = await chromium.launch({
   executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
@@ -87,7 +87,7 @@ const browser = await chromium.launch({
 });
 let checks = 0;
 try {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, hasTouch: true });
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
@@ -95,7 +95,7 @@ try {
     const path = new URL(route.request().url()).pathname;
     if (path === "/") return route.fulfill({ contentType: "text/html", body: `<!doctype html>
       <script id="pixhelf-auth" type="application/json">{"enabled":false,"authenticated":false}</script><div id="root"></div>` });
-    if (/\/(thumbnail|original)$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: photo });
+    if (/\/thumbnail$|\/api\/images\/[^/]+\.jpg$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: photo });
     return route.fulfill({ json: { fileSize: photo.length, modifiedMs: 0, exif: [], histogram: null } });
   });
   await page.goto("https://viewer.test/");
@@ -113,9 +113,7 @@ try {
   };
   const beginHold = async () => {
     await page.keyboard.down("ArrowRight");
-    await advance(400);
-    await page.keyboard.down("ArrowRight");
-    await advance(1);
+    await advance(501);
   };
   const check = async (name, action) => {
     await reset();
@@ -125,7 +123,7 @@ try {
     console.log(`${name} passed`);
   };
 
-  await check("taps and reversal respond immediately without starting a repeat timer", async () => {
+  await check("taps and reversal respond immediately and release prevents repetition", async () => {
     await page.keyboard.press("ArrowRight");
     await page.keyboard.press("ArrowRight");
     await page.keyboard.press("ArrowLeft");
@@ -133,23 +131,25 @@ try {
     await advance(1000);
     assert.equal((await events()).length, 3, "released taps must never repeat");
     await page.keyboard.down("ArrowRight");
-    await advance(800);
-    assert.equal((await events()).length, 4, "respect the OS delay before its first repeated keydown");
+    await advance(169);
+    assert.equal((await events()).length, 4, "the hold threshold must protect deliberate single steps");
+    await advance(2);
+    assert.equal((await events()).length, 5, "holding must work without an OS-generated repeat");
     await page.keyboard.up("ArrowRight");
   });
 
-  await check("holding accelerates smoothly with a bounded speed despite dense OS repeats", async () => {
+  await check("holding matches rapid manual tapping at a constant speed despite dense OS repeats", async () => {
     await beginHold();
-    for (let elapsed = 0; elapsed < 2800; elapsed += 20) {
+    for (let elapsed = 0; elapsed < 6000; elapsed += 20) {
       await page.keyboard.down("ArrowRight");
       await advance(20);
     }
     const steps = await events();
     const gaps = steps.slice(2).map((event, i) => event.time - steps[i + 1].time);
-    assert(steps.length >= 14 && steps.length <= 19, `a hold should browse at a controlled speed, got ${steps.length}`);
-    assert(gaps.every(gap => gap >= 159 && gap <= 241), `repeat intervals stay bounded: ${gaps}`);
-    assert(gaps[0] >= 230 && gaps.at(-1) <= 170, "the hold starts gently and reaches a faster cruise speed");
-    assert(gaps.every((gap, i) => !i || gap <= gaps[i - 1] + 1), "acceleration must survive every component rerender");
+    assert(steps.length >= 38 && steps.length <= 40, `a hold should browse at a controlled speed, got ${steps.length}`);
+    assert(gaps.every(gap => gap >= 169 && gap <= 171), `repeat intervals stay bounded: ${gaps}`);
+    assert.equal(steps[1].time - steps[0].time, 170, "the first keyboard repeat must have the same cadence");
+    assert(Math.max(...gaps) - Math.min(...gaps) <= 2, "a hold must keep the same speed from its first repeat to its last");
     await page.keyboard.up("ArrowRight");
     await advance(800);
     assert.equal((await events()).length, steps.length, "release discards excess repeats instead of draining a queue");
@@ -182,14 +182,14 @@ try {
     assert.equal((await events()).at(-1).index, 5, "finishing a page after release must not change the photo");
   });
 
-  await check("pagination resumes gently only while the same key remains held", async () => {
+  await check("pagination resumes at the same cadence only while the same key remains held", async () => {
     await reset({ count: 6, index: 3, more: true });
     await beginHold(); await advance(1500);
     await page.evaluate(() => window.finishPage());
-    await advance(1000);
+    await advance(1600);
     const resumed = (await events()).filter(event => event.index >= 6);
-    assert(resumed.length >= 3 && resumed.length <= 5, "continue browsing after the page arrives without catching up the wait");
-    assert(resumed[1].time - resumed[0].time >= 220, "restart at a gentle pace after the network pause");
+    assert(resumed.length >= 9 && resumed.length <= 10, "continue browsing after the page arrives without catching up the wait");
+    assert(resumed[1].time - resumed[0].time === 170, "resume the same cadence without a catch-up burst");
     await page.keyboard.up("ArrowRight");
   });
 
@@ -229,7 +229,7 @@ try {
 
   await check("reversal during pagination cancels the previous direction's continuation", async () => {
     await reset({ count: 6, index: 3, more: true });
-    await beginHold(); await advance(500);
+    await beginHold(); await advance(800);
     await page.keyboard.press("ArrowLeft");
     const before = await events();
     assert.equal(before.at(-1).index, 4);
@@ -241,7 +241,7 @@ try {
 
   await check("a failed page stops the hold without automatic retry floods", async () => {
     await reset({ count: 6, index: 3, more: true });
-    await beginHold(); await advance(500);
+    await beginHold(); await advance(800);
     await page.evaluate(() => window.finishPage(true));
     await advance(2000);
     assert.equal(await page.evaluate(() => window.pageRequests), 1);
@@ -256,6 +256,93 @@ try {
     assert.equal(await page.evaluate(() => window.unloadedNavigations), 0);
     await page.keyboard.up("ArrowRight");
   });
+
+  await check("pointer hold shares the keyboard cadence and release does not add a click", async () => {
+    await page.keyboard.down("ArrowRight"); await advance(4800); await page.keyboard.up("ArrowRight");
+    const keyboard = (await events()).slice(1);
+    await reset();
+    const edge = await page.locator(".viewer-next").boundingBox();
+    await page.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2);
+    await page.mouse.down(); await advance(5130);
+    const pointer = await events();
+    assert.equal(pointer.length, keyboard.length);
+    assert.deepEqual(pointer.map(event => event.time - pointer[0].time), keyboard.map(event => event.time - keyboard[0].time));
+    await page.mouse.up(); await advance(1500);
+    assert.equal((await events()).length, pointer.length, "release must not add a final step");
+  });
+
+  await check("releasing an edge hold during pagination cancels delayed navigation", async () => {
+    await reset({ count: 6, index: 5, more: true });
+    const edge = await page.locator(".viewer-next").boundingBox();
+    await page.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2);
+    await page.mouse.down(); await advance(600);
+    assert.equal(await page.evaluate(() => window.pageRequests), 1);
+    await page.mouse.up();
+    await page.evaluate(() => window.finishPage()); await advance(1500);
+    assert.deepEqual(await events(), []);
+  });
+
+  const edgePoint = async () => {
+    const rect = await page.locator(".viewer-next").boundingBox();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  };
+  await check("touch edge turns immediately with no queued double-tap delay", async () => {
+    const point = await edgePoint();
+    await page.touchscreen.tap(point.x, point.y);
+    assert.deepEqual((await events()).map(event => event.direction), [1], "release must turn before any timer advances");
+    await advance(400);
+    assert.equal((await events()).length, 1);
+  });
+  await check("two rapid edge taps turn twice without zooming", async () => {
+    const point = await edgePoint();
+    await page.touchscreen.tap(point.x, point.y); await advance(140);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, ...point }] });
+    await advance(90);
+    assert.equal((await events()).length, 1);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    assert.deepEqual((await events()).map(event => event.direction), [1, 1]);
+    await advance(300);
+    assert.equal(await page.locator('.viewer-media').evaluate(element => new DOMMatrix(element.style.transform).a), 1);
+    await cdp.detach();
+  });
+  await check("center double tap still zooms without navigation", async () => {
+    await page.touchscreen.tap(720, 450); await advance(120);
+    await page.touchscreen.tap(720, 450);
+    assert.equal(await page.locator('.viewer-media').evaluate(element => new DOMMatrix(element.style.transform).a), 2.5);
+    assert.deepEqual(await events(), []);
+  });
+  await check("disabled side zones absorb taps and are skipped by keyboard focus", async () => {
+    await reset({ count: 1, index: 0 });
+    for (const selector of [".viewer-previous", ".viewer-next"]) {
+      const button = page.locator(selector);
+      assert.equal(await button.getAttribute("aria-disabled"), "true");
+      assert.equal(await button.getAttribute("tabindex"), "-1");
+      const rect = await button.boundingBox();
+      const point = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      assert.equal(await page.evaluate(({ selector, point }) => document.querySelector(selector).contains(
+        document.elementFromPoint(point.x, point.y)), { selector, point }), true);
+      await page.touchscreen.tap(point.x, point.y); await advance(80);
+      await page.touchscreen.tap(point.x, point.y);
+    }
+    await advance(600);
+    assert.deepEqual(await events(), []);
+    assert.equal(await page.locator('.viewer-media').evaluate(element => new DOMMatrix(element.style.transform).a), 1);
+    await page.locator('.viewer-close').focus(); await page.keyboard.press("Tab");
+    assert.equal(await page.locator('.viewer-media').evaluate(element => element === document.activeElement), true);
+  });
+  for (const reason of ["blur", "key", "close"]) {
+    await check(`${reason} after an edge tap leaves no queued step`, async () => {
+      const point = await edgePoint();
+      await page.touchscreen.tap(point.x, point.y);
+      assert.deepEqual((await events()).map(event => event.direction), [1]);
+      if (reason === "key") await page.keyboard.press("ArrowLeft");
+      else if (reason === "close") await page.locator('.viewer-close').click();
+      else await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      await advance(300);
+      assert.deepEqual((await events()).map(event => event.direction), reason === "key" ? [1, -1] : [1]);
+    });
+  }
 
   for (const reason of ["blur", "hidden", "input", "pointer", "close"]) {
     await check(`${reason} cancels an active hold`, async () => {

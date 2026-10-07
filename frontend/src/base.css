@@ -1,0 +1,87 @@
+:root {
+  /* Keep the gallery width stable when a dialog locks page scrolling. */
+  scrollbar-gutter: stable;
+  color: #202523;
+  background: #f5f7f6;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: auto;
+  -webkit-tap-highlight-color: transparent;
+  --topbar-height: 54px;
+  --sidebar-width: 238px;
+  --sidebar-rail-width: 0px;
+  --visual-viewport-top: 0px;
+  --bg: #f5f7f6;
+  --surface: #fdfefd;
+  --ink: #202523;
+  --muted: #68716d;
+  --border: #dce2df;
+  --accent: #24786f;
+  --accent-soft: #e2efec;
+  --motion-fast: 140ms;
+  --motion-medium: 220ms;
+  --motion-slow: 360ms;
+  --ease-standard: cubic-bezier(.2, .7, .2, 1);
+  --ease-emphasized: cubic-bezier(.22, .9, .28, 1);
+  letter-spacing: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 0;
+  min-height: 100%;
+  min-height: 100dvh;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button,
+select {
+  cursor: pointer;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.image-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes feedback-in {
+  from { opacity: 0; transform: translateY(-6px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.startup-page { min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; text-align: center; }
+.startup-page h1 { font-size: 20px; font-weight: 550; }
+.startup-page p { color: var(--muted); font-size: 14px; }
+.startup-page button { padding: 10px 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.startup-spinner { color: var(--accent); animation: spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .spin, .startup-spinner { animation: none; } }

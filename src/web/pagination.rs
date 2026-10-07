@@ -1,14 +1,18 @@
 use std::{cmp::Reverse, sync::Arc};
 
-use super::{ImageRequest, ImageSort, ImageView, ImagesResponse};
+use super::{ImageKind, ImageOrientation, ImageRequest, ImageSort, ImageView, ImagesResponse};
 use crate::gallery::{GalleryIndex, ImageRecord};
 
 pub(super) fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {
-    if query.album.is_none() && query.search.is_none() {
+    if query.album.is_none()
+        && query.search.is_none()
+        && query.kind == ImageKind::All
+        && query.orientation == ImageOrientation::All
+    {
         let total = index.images.len();
         let offset = query.offset.min(total);
         let items = match query.sort {
-            ImageSort::NameAsc => Some(
+            ImageSort::Default | ImageSort::NameAsc => Some(
                 index
                     .images
                     .iter()
@@ -51,13 +55,22 @@ pub(crate) fn image_page_from_records<'a>(
                 .search
                 .as_deref()
                 .is_none_or(|search| record.search_key.contains(search))
+            && query.matches_filters(record)
     });
+    sorted_image_page(records, query)
+}
+
+pub(super) fn sorted_image_page<'a>(
+    records: impl DoubleEndedIterator<Item = &'a ImageRecord>,
+    query: &ImageRequest,
+) -> ImagesResponse {
     match query.sort {
-        ImageSort::NameAsc => page_from_ordered_records(records, query),
+        ImageSort::Default | ImageSort::NameAsc => page_from_ordered_records(records, query),
         ImageSort::NameDesc => page_from_ordered_records(records.rev(), query),
         ImageSort::Newest => {
             page_from_ranked_records(records, query, |record| Reverse(record.modified_ms))
         }
+        ImageSort::Oldest => page_from_ranked_records(records, query, |record| record.modified_ms),
         ImageSort::Explore => {
             let seed = *blake3::hash(query.seed.as_bytes()).as_bytes();
             page_from_ranked_records(records, query, |record| exploration_rank(&seed, &record.id))
@@ -167,9 +180,11 @@ mod tests {
             .collect();
 
         for sort in [
+            ImageSort::Default,
             ImageSort::NameAsc,
             ImageSort::NameDesc,
             ImageSort::Newest,
+            ImageSort::Oldest,
             ImageSort::Explore,
         ] {
             for (album, search) in [
@@ -187,11 +202,12 @@ mod tests {
                         })
                         .collect();
                     match sort {
-                        ImageSort::NameAsc => {}
+                        ImageSort::Default | ImageSort::NameAsc => {}
                         ImageSort::NameDesc => expected.reverse(),
                         ImageSort::Newest => {
                             expected.sort_by_key(|record| Reverse(record.modified_ms))
                         }
+                        ImageSort::Oldest => expected.sort_by_key(|record| record.modified_ms),
                         ImageSort::Explore => {
                             let key = *blake3::hash(seed.as_bytes()).as_bytes();
                             expected
@@ -207,6 +223,7 @@ mod tests {
                                 seed: seed.into(),
                                 offset,
                                 limit,
+                                ..ImageRequest::default()
                             };
                             let page = image_page(&index, &query);
                             let expected_ids: Vec<_> = expected

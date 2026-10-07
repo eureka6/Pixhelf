@@ -133,7 +133,8 @@ async function expectMenu(page) {
   const menu = page.locator(".photo-card-menu:popover-open");
   await menu.waitFor();
   const waterfall = await menu.evaluate(element => Boolean(element.closest(".image-card, .viewer-similar-card")));
-  assert.equal(await menu.getByRole("menuitem").count(), waterfall ? 8 : 6);
+  const fullscreen = await menu.getByRole("menuitem", { name: /^(全屏查看|退出全屏)$/ }).count();
+  assert.equal(await menu.getByRole("menuitem").count(), (waterfall ? 8 : 6) + fullscreen);
   const bounds = await menu.boundingBox();
   const viewport = page.viewportSize();
   assert(bounds && bounds.x >= 10 && bounds.y >= 10);
@@ -251,7 +252,7 @@ try {
     await card.waitFor();
     const imageId = await card.getAttribute("data-image-id");
     const filename = await card.getAttribute("data-image-name");
-    const originalPath = `/api/images/${encodeURIComponent(imageId)}/original`;
+    const originalPath = `/api/images/${encodeURIComponent(imageId)}.${filename.split(".").pop().toLowerCase()}`;
     assert.equal(await page.locator(".image-card[title], .image-card [title]:not(.photo-card-select), .image-name").count(), 0);
     assert.equal(await page.locator(".photo-card-download").count(), 0);
     const more = card.locator(".photo-card-more");
@@ -322,13 +323,16 @@ try {
     }
     await openMenu(card);
     menu = await expectMenu(page);
-    const popupEvent = page.waitForEvent("popup");
-    await clickVisible(menu.getByRole("menuitem", { name: "在新标签页打开原图", exact: true }));
-    const popup = await popupEvent;
-    await popup.waitForLoadState();
-    assert.equal(new URL(popup.url()).pathname, originalPath);
-    assert.equal(await popup.evaluate(() => window.opener), null);
-    await popup.close();
+    const pageCount = context.pages().length;
+    await clickVisible(menu.getByRole("menuitem", { name: "复制图片链接", exact: true }));
+    await menu.getByRole("menuitem", { name: "已复制图片链接", exact: true }).waitFor();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    assert.equal(copied, new URL(originalPath, baseUrl).href);
+    assert.equal(context.pages().length, pageCount, "copying a link must not open a tab");
+    const linked = await context.request.get(copied);
+    assert.equal(linked.status(), 200);
+    assert.match(linked.headers()["content-type"], /^image\//);
+    await page.keyboard.press("Escape");
     await card.click({ button: "right" });
     await expectMenu(page);
     await page.mouse.click(100, 5);
@@ -403,7 +407,7 @@ try {
     await page.goBack();
     await expectSimilar(page, nestedId);
     assert.deepEqual(errors, []);
-    results.push({ width, disclosure: width > 720 ? "context menu beside cursor; no more button" : "long press; no more button; survives release/cancel and remains actionable", download: true, clipboard: true, originalTab: true, keyboard: true, details: true, similarActions: true, viewerMenu: true, lightDetails: true });
+    results.push({ width, disclosure: width > 720 ? "context menu beside cursor; no more button" : "long press; no more button; survives release/cancel and remains actionable", download: true, clipboard: true, copyImageLink: true, keyboard: true, details: true, similarActions: true, viewerMenu: true, lightDetails: true });
     await context.close();
   }
 } finally {

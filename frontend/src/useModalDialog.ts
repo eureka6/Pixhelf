@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { useLayoutEffect, useRef } from "preact/hooks";
 
 function canRestoreFocus(element: Element | null | undefined): element is HTMLElement {
   return element instanceof HTMLElement && element !== document.body
@@ -21,7 +21,7 @@ export function useModalDialog(onClose: () => void, {
   const fallbackRef = useRef(fallbackFocus);
   fallbackRef.current = fallbackFocus;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog = ref.current;
     const opener = document.activeElement;
     dialog?.showModal();

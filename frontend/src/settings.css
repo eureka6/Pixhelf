@@ -45,6 +45,14 @@ html:has(.settings-dialog[open]) { overflow: hidden; }
 .settings-note { margin: 20px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .password-settings-form .login-submit { min-height: 44px; margin-top: 18px; padding: 10px 14px; border-radius: 8px; }
 
+.category-settings-form fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.category-settings-list { display: grid; gap: 16px; }
+.category-settings-row { display: grid; grid-template-columns: minmax(0, 1fr) 36px; gap: 12px 8px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.category-settings-row > .icon-button { align-self: end; margin-bottom: 4px; }
+.category-settings-row .category-query { grid-column: 1 / -1; margin: 0; }
+.category-settings-form .login-submit { width: 100%; margin-top: 18px; min-height: 42px; border-radius: 8px; }
+.category-settings-form button:disabled { opacity: .5; cursor: default; }
+
 .settings-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 0; border-block: 1px solid var(--border); }
 .settings-toggle-row strong { display: block; color: #405247; font-size: 13px; font-weight: 550; }
 .settings-toggle-row [role="status"] { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
@@ -72,8 +80,9 @@ html:has(.settings-dialog[open]) { overflow: hidden; }
   .settings-header { padding: 10px 14px; }
   .settings-layout { flex-direction: column; }
   .settings-nav { display: flex; gap: 4px; flex: none; overflow-x: auto; padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
-  .settings-nav button { width: auto; min-width: 0; flex: 1; justify-content: center; gap: 5px; padding: 8px 6px; white-space: nowrap; }
+  .settings-nav button { width: auto; flex: 0 0 auto; justify-content: center; gap: 5px; padding: 8px 6px; white-space: nowrap; }
   .settings-content { padding: 20px; }
+  .category-settings-row input { font-size: 16px; }
 }
 
 @media (max-width: 380px) {

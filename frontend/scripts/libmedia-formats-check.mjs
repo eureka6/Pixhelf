@@ -1,3 +1,4 @@
+import { serveFrontendAsset } from "./frontend-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -5,10 +6,8 @@ import { launchBrowser, serveLibmediaAsset, serveMotion } from "./live-photo-fix
 
 const directory = resolve(process.env.PIXHELF_PINE_SAMPLES ?? "../pic/video");
 const manifest = JSON.parse(await readFile(join(directory, "pine-and-birch-manifest.json"), "utf8"));
-const [html, js, css, poster] = await Promise.all([
+const [html, poster] = await Promise.all([
   readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
-  readFile(new URL("../dist/assets/app.js", import.meta.url)),
-  readFile(new URL("../dist/assets/app.css", import.meta.url)),
   readFile(new URL("fixtures/live-photo.jpg", import.meta.url)),
 ]);
 const base = process.env.PIXHELF_TEST_ORIGIN ?? "https://pixhelf.test";
@@ -34,13 +33,12 @@ try {
       const path = new URL(route.request().url()).pathname;
       if (path === "/") return route.fulfill({ contentType: "text/html", body: documentHtml });
       if (path.startsWith("/assets/libmedia/")) return serveLibmediaAsset(route);
-      if (path === "/assets/app.js") return route.fulfill({ contentType: "text/javascript", body: js });
-      if (path === "/assets/app.css") return route.fulfill({ contentType: "text/css", body: css });
+      if (path.startsWith("/assets/")) return serveFrontendAsset(route);
       if (path === "/api/gallery") return route.fulfill({ json: summary });
       if (path === "/api/status") return route.fulfill({ json: status });
       if (path === "/api/images") return route.fulfill({ json: images });
       if (path === "/api/images/sample") return route.fulfill({ json: item });
-      if (path.endsWith("/original")) return serveMotion(route, { clip, contentType: sample.mime_type });
+      if (/^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(path)) return serveMotion(route, { clip, contentType: sample.mime_type });
       if (path.endsWith("/thumbnail")) return route.fulfill({ contentType: "image/jpeg", body: poster });
       return route.fulfill({ status: 404, json: {} });
     });

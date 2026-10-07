@@ -22,6 +22,99 @@ mod guest_tests;
 const ORIGIN: &str = "https://photos.example.test";
 const PASSWORD: &str = "test-only-long-password";
 
+#[tokio::test]
+async fn authentication_works_while_initial_gallery_scan_is_pending() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = Arc::new(RwLock::new(Arc::new(
+        crate::gallery::GalleryIndex::pending(temp.path().to_owned()),
+    )));
+    let app = crate::web::router(
+        AppState {
+            index: Arc::clone(&index),
+            thumbnails: ThumbnailManager::new(temp.path().join("cache")).unwrap(),
+        },
+        config(),
+    );
+
+    let login_page = call(&app, request(Method::GET, "/login", None), Body::empty()).await;
+    assert_eq!(login_page.status(), StatusCode::OK);
+    let anonymous = call(
+        &app,
+        request(Method::GET, "/api/images", None),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let login = sign_in(&app, None).await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let cookie = session_cookie(&login);
+    let account = json_body(login).await;
+    assert_eq!(account["authenticated"], true);
+    let summary = call(
+        &app,
+        request(Method::GET, "/api/gallery", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(json_body(summary).await["initializing"], true);
+    let progress = call(
+        &app,
+        request(Method::GET, "/api/status", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(json_body(progress).await["backgroundComplete"], false);
+    let home = call(
+        &app,
+        request(Method::GET, "/", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(home.status(), StatusCode::OK);
+    for path in [
+        "/api/images",
+        "/api/management",
+        "/api/management/directories",
+    ] {
+        let response = call(
+            &app,
+            request(Method::GET, path, Some(&cookie)),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+    let mutation = call(
+        &app,
+        request(Method::POST, "/api/management/batch", Some(&cookie))
+            .header(header::ORIGIN, ORIGIN)
+            .header("x-pixhelf-origin", ORIGIN)
+            .header("x-csrf-token", account["csrfToken"].as_str().unwrap())
+            .header(header::CONTENT_TYPE, "application/json"),
+        Body::from(r#"{"action":"delete","ids":["missing"]}"#),
+    )
+    .await;
+    assert_eq!(mutation.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    *index.write().await = Arc::new(scan_gallery(temp.path(), None).unwrap());
+    let summary = call(
+        &app,
+        request(Method::GET, "/api/gallery", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(json_body(summary).await["initializing"], false);
+    let images = call(
+        &app,
+        request(Method::GET, "/api/images", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(images.status(), StatusCode::OK);
+}
+
 fn password_hash() -> &'static str {
     static HASH: OnceLock<String> = OnceLock::new();
     HASH.get_or_init(|| {
@@ -299,6 +392,7 @@ async fn anonymous_requests_cannot_access_bootstrap_apis_or_conditional_media() 
         format!("/api/images/{id}/similar"),
         format!("/api/images/{id}/thumbnail"),
         format!("/api/images/{id}/original"),
+        format!("/api/images/{id}.png"),
         format!("/api/images/{id}/motion/original/missing"),
         "/not-a-public-route".into(),
     ] {
@@ -724,6 +818,7 @@ async fn valid_session_protects_cached_and_range_responses_until_csrf_checked_lo
         "/api/images".into(),
         format!("/api/images/{id}/thumbnail"),
         format!("/api/images/{id}/original"),
+        format!("/api/images/{id}.png"),
         motion.clone(),
     ] {
         let response = call(

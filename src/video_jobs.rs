@@ -109,17 +109,23 @@ impl VideoManager {
     pub fn new(cache_dir: &Path) -> Result<Arc<Self>> {
         let cache_root = cache_dir.join(CACHE_VERSION);
         fs::create_dir_all(&cache_root).context("cannot create video cache")?;
-        for entry in fs::read_dir(&cache_root)?.flatten() {
-            if entry.file_name().to_string_lossy().ends_with(".tmp") {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
         Ok(Arc::new(Self {
             cache_root,
             entries: RwLock::new(HashMap::new()),
             queue: PriorityQueue::default(),
             started: AtomicBool::new(false),
         }))
+    }
+
+    pub fn cleanup_startup(&self) {
+        let Ok(entries) = fs::read_dir(&self.cache_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 
     pub fn reconcile(&self, records: &[Arc<ImageRecord>]) {

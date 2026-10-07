@@ -14,6 +14,8 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
+import { DEFAULT_IMAGE_FILTERS, imageFilterLabels } from "./GalleryFilters";
+import { contentCategory } from "./contentCategories";
 import { AlbumBackLink, AlbumGrid, AlbumsView } from "./AlbumsView";
 import { useAlbumSelection } from "./SelectableAlbums";
 import { LocalStorageView, type LocalMediaPage } from "./LocalStorageView";
@@ -44,6 +46,7 @@ import { ensureSelectionHistory, handleSelectionHistory, writeHistoryState } fro
 import { useSelectionDismiss } from "./useSelectionDismiss";
 import {
   getGallery,
+  getContentCategories,
   getImages,
   getGalleryImage,
   getSimilarImages,
@@ -52,10 +55,12 @@ import {
   takeInitialBootstrap,
 } from "./api";
 import type {
+  ContentCategory,
   GalleryImage,
   GallerySection,
   GallerySummary,
   ImageCardAction,
+  ImageFilters,
   ThumbnailStatus,
 } from "./types";
 import {
@@ -147,6 +152,7 @@ function createViewerReturnFlight(): ViewerReturnFlight | null {
     width: `${sourceRect.width}px`,
     height: `${sourceRect.height}px`,
     transform: "none",
+    translate: "none",
     transformOrigin: "top left",
     transition: "none",
     animation: "none",
@@ -236,6 +242,7 @@ function useVisualViewportTop(): void {
         "--visual-viewport-top",
         `${Math.round(offset * 100) / 100}px`,
       );
+      document.documentElement.style.setProperty("--visual-viewport-height", `${viewport.height}px`);
     };
     const schedule = () => {
       if (!frame) frame = window.requestAnimationFrame(update);
@@ -254,6 +261,7 @@ function useVisualViewportTop(): void {
       viewport.removeEventListener("scroll", schedule);
       window.removeEventListener("orientationchange", schedule);
       document.documentElement.style.removeProperty("--visual-viewport-top");
+      document.documentElement.style.removeProperty("--visual-viewport-height");
     };
   }, []);
 }
@@ -336,6 +344,20 @@ function App() {
   }, []);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [imageFilters, setImageFilters] = useState<ImageFilters>(DEFAULT_IMAGE_FILTERS);
+  const [categories, setCategories] = useState<ContentCategory[]>([]);
+  const [categoriesHint, setCategoriesHint] = useState("正在读取分类…");
+  const categoriesController = useRef<AbortController>();
+  useEffect(() => {
+    const controller = new AbortController();
+    categoriesController.current = controller;
+    void getContentCategories(controller.signal).then(value => {
+      if (!controller.signal.aborted) { setCategories(value); setCategoriesHint(""); }
+    }).catch(() => {
+      if (!controller.signal.aborted) setCategoriesHint("分类暂时无法读取，请刷新重试。");
+    });
+    return () => controller.abort();
+  }, []);
   const [exploreSeed, setExploreSeed] = useState("");
   const [loading, setLoading] = useState(!hasInitialImages && !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -399,10 +421,12 @@ function App() {
     status?.textSearch.enabled ? 500 : 250,
   );
   const debouncedSearch = search.trim() ? delayedSearch : "";
+  const filtersAvailable = !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar;
+  const filterLabels = imageFilterLabels(imageFilters, textSearchReady && !browsingFavorites ? search : "", categories);
   const requestImages = useCallback((offset: number, signal: AbortSignal) => getImages({
     album, favorites: browsingFavorites, search: debouncedSearch,
-    sort: exploreSeed ? "explore" : "name-asc", seed: exploreSeed, offset, limit: PAGE_SIZE,
-  }, signal), [album, browsingFavorites, debouncedSearch, exploreSeed]);
+    ...imageFilters, seed: exploreSeed, offset, limit: PAGE_SIZE,
+  }, signal), [album, browsingFavorites, debouncedSearch, exploreSeed, imageFilters]);
   const requestVersionRef = useRef(0);
   const summaryRevisionRef = useRef<string | null>(
     INITIAL_BOOTSTRAP?.summary.revision ?? null,
@@ -465,7 +489,7 @@ function App() {
 
   useLayoutEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [location, debouncedSearch, exploreSeed]);
+  }, [location, debouncedSearch, exploreSeed, imageFilters]);
 
   useLayoutEffect(() => {
     viewerImageIdRef.current = viewerImageId;
@@ -695,6 +719,7 @@ function App() {
     setSearch("");
     setSearchOpen(false);
     setExploreSeed("");
+    setImageFilters(DEFAULT_IMAGE_FILTERS);
     setMobileNavOpen(false);
     setInfoImage(null);
     viewerImageIdRef.current = null;
@@ -829,20 +854,29 @@ function App() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || nextOffset === null) return;
+    if (!sentinel || nextOffset === null || loading || loadingMore || error || viewerImageId) return;
+    const margin = compactLayout ? MOBILE_PAGE_PREFETCH_MARGIN : DESKTOP_PAGE_PREFETCH_MARGIN;
+    let active = true;
+    const gallery = sentinel.parentElement?.querySelector<HTMLElement>(".justified-gallery");
+    const ready = () => !gallery || (Number(gallery.dataset.layoutWidth) > 0 && gallery.getBoundingClientRect().height > 0);
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) void loadMore();
+        // A queued notification may describe the position before a scroll or resize.
+        if (active && entry.isIntersecting && ready()
+          && sentinel.getBoundingClientRect().top <= window.innerHeight + parseFloat(margin)) void loadMore();
       },
-      {
-        rootMargin: compactLayout
-          ? MOBILE_PAGE_PREFETCH_MARGIN
-          : DESKTOP_PAGE_PREFETCH_MARGIN,
-      },
+      { rootMargin: margin },
     );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [compactLayout, loadMore, nextOffset]);
+    // Do not treat the gallery's unmeasured, zero-height first frame as an empty page.
+    const layout = new ResizeObserver(() => {
+      if (!ready()) return;
+      layout.disconnect();
+      observer.observe(sentinel);
+    });
+    if (ready()) observer.observe(sentinel);
+    else layout.observe(gallery!);
+    return () => { active = false; layout.disconnect(); observer.disconnect(); };
+  }, [compactLayout, loadMore, nextOffset, loading, loadingMore, error, viewerImageId]);
 
   const viewerIndex = viewerImageId
     ? viewerBranch?.index ?? viewerImages.findIndex((image) => image.id === viewerImageId)
@@ -1060,7 +1094,15 @@ function App() {
     const gallerySelector = scrollRoot ? ".viewer-similar-gallery" : ".justified-gallery";
     const findGallery = () => (scrollRoot ?? document).querySelector<HTMLElement>(gallerySelector);
     const getScroll = () => scrollRoot?.scrollTop ?? window.scrollY;
-    const setScroll = (top: number) => scrollRoot ? scrollRoot.scrollTo({ top, behavior: "instant" }) : scrollWindowImmediately(top);
+    let trackedScroll = getScroll();
+    let scrollTranslation = 0;
+    let userControlled = false;
+    const setScroll = (top: number) => {
+      if (userControlled) return;
+      if (scrollRoot) scrollRoot.scrollTo({ top, behavior: "instant" });
+      else scrollWindowImmediately(top);
+      trackedScroll = getScroll();
+    };
     const requestFlight = viewerReturnFlightRef.current;
     if (scrollRoot && requestFlight) scrollRoot.append(requestFlight.layer);
     let frame = 0;
@@ -1127,12 +1169,25 @@ function App() {
       finished = true;
       disposeViewerReturnFlight(requestFlight);
       if (viewerReturnFlightRef.current === requestFlight) viewerReturnFlightRef.current = null;
-      if (card?.isConnected) card.focus({ preventScroll: true });
+      if (!userControlled && card?.isConnected) card.focus({ preventScroll: true });
       // Returning after a reload can fetch metadata above the waterfall. Keep
       // its card anchored through that layout change, until the user takes over.
       if (!informationLoading()) settleReturn();
     };
-    const takeOver = () => { if (finished) releaseRequest(); };
+    const takeOver = () => { userControlled = true; if (finished) releaseRequest(); };
+    const followScroll = () => {
+      const top = getScroll();
+      const delta = trackedScroll - top;
+      if (Math.abs(delta) < 0.5) return;
+      trackedScroll = top;
+      takeOver();
+      if (!finished && requestFlight) {
+        // Compose scroll movement separately from the shrink animation, so its
+        // destination follows the waterfall without restarting its timeline.
+        scrollTranslation += delta;
+        requestFlight.media.style.translate = `0 ${scrollTranslation}px`;
+      }
+    };
 
     const pauseAnimationForLayout = () => {
       const flight = requestFlight;
@@ -1148,7 +1203,9 @@ function App() {
         width: `${mediaRect.width}px`,
         height: `${mediaRect.height}px`,
         transform: "none",
+        translate: "none",
       });
+      scrollTranslation = 0;
       flight.backdrop.style.opacity = backdropOpacity;
       if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
       animationTarget = null;
@@ -1254,8 +1311,10 @@ function App() {
       const information = scrollRoot.querySelector(".viewer-photo-information");
       if (information) resizeObserver.observe(information);
       mutationObserver.observe(scrollRoot, { attributes: true, attributeFilter: ["aria-busy"], subtree: true });
-      for (const event of ["pointerdown", "wheel", "keydown"]) scrollRoot.addEventListener(event, takeOver, true);
     }
+    const scrollEvents = scrollRoot ?? window;
+    scrollEvents.addEventListener("scroll", followScroll, { passive: true });
+    for (const event of ["pointerdown", "wheel", "keydown"]) scrollEvents.addEventListener(event, takeOver, true);
     window.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("resize", schedule);
     schedule();
@@ -1270,7 +1329,8 @@ function App() {
       window.clearTimeout(timeoutTimer);
       resizeObserver?.disconnect();
       mutationObserver.disconnect();
-      for (const event of ["pointerdown", "wheel", "keydown"]) scrollRoot?.removeEventListener(event, takeOver, true);
+      scrollEvents.removeEventListener("scroll", followScroll);
+      for (const event of ["pointerdown", "wheel", "keydown"]) scrollEvents.removeEventListener(event, takeOver, true);
       window.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);
     };
@@ -1380,20 +1440,29 @@ function App() {
   };
   const changeSearch = (value: string) => {
     setSearch(value);
-    setExploreSeed("");
     setViewerImageId(null);
+  };
+  const changeFilters = (next: ImageFilters, reshuffle = false) => {
+    clearSelection();
+    requestVersionRef.current++;
+    skipInitialImagesRef.current = false;
+    loadMoreControllerRef.current?.abort();
+    setImagePage(EMPTY_IMAGE_PAGE);
+    setLoading(true);
+    setImageFilters({ ...next });
+    setExploreSeed(current => next.sort === "explore" ? (reshuffle || !current ? createExploreSeed() : current) : "");
+    setViewerImageId(null);
+  };
+  const changeContent = (query: string) => {
+    if (query || contentCategory(search, categories)) changeSearch(query);
+  };
+  const resetFilters = () => {
+    changeFilters(DEFAULT_IMAGE_FILTERS);
+    changeSearch("");
   };
   const goHome = () => {
     navigateTo("library");
     setReloadToken((value) => value + 1);
-  };
-  const startExploring = () => {
-    if (section !== "library" && !album && !browsingFavorites) navigateTo("library");
-    setSearch("");
-    setSearchOpen(false);
-    setMobileNavOpen(false);
-    setViewerImageId(null);
-    setExploreSeed(createExploreSeed());
   };
 
   useEffect(() => {
@@ -1423,10 +1492,6 @@ function App() {
         localSearch={browsingLocal}
         similarSearch={browsingSimilar}
         onSearchChange={changeSearch}
-        onExplore={startExploring}
-        exploreActive={Boolean(exploreSeed)}
-        exploreLoading={Boolean(exploreSeed) && loading}
-        exploreScope={selectedAlbum?.name ?? (browsingFavorites ? "收藏" : undefined)}
         onHome={goHome}
         onToggleNavigation={() => {
           if (compactLayout) {
@@ -1439,6 +1504,13 @@ function App() {
         }}
         navigationOpen={compactLayout ? mobileNavOpen : !sidebarCollapsed}
         compactLayout={compactLayout}
+        filters={filtersAvailable ? imageFilters : null}
+        onFiltersChange={changeFilters}
+        onContentChange={changeContent}
+        onResetFilters={resetFilters}
+        categories={categories}
+        categoriesHint={categoriesHint}
+        onConfigureCategories={authentication.guest ? undefined : () => setSettingsSection("categories")}
       />
       <div
         className="request-progress"
@@ -1453,7 +1525,6 @@ function App() {
         summary={summary}
         activeSection={section}
         onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}
-        onHome={goHome}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
         onMobileExited={finishMobileNavExit}
@@ -1517,13 +1588,21 @@ function App() {
         ) : (
           <>
             {selectedAlbum && <AlbumBackLink onOpen={chooseAlbum} />}
+            {filterLabels.length > 0 && <div className="gallery-filter-summary" role="status">
+              <span>{filterLabels.join(" · ")}<small>{loading ? "正在筛选…" : `${formatCount(total)} 项`}</small></span>
+              <div className="gallery-filter-actions">
+                {imageFilters.sort === "explore" && <button type="button" className="gallery-filter-reset gallery-reshuffle" disabled={loading || total < 2}
+                  aria-busy={loading} title="保留当前条件，重新打乱顺序" onClick={() => changeFilters(imageFilters, true)}><RefreshCw size={14} className={loading ? "spin" : ""} />换一组</button>}
+                <button type="button" className="gallery-filter-reset" aria-label="重置搜索与筛选" onClick={resetFilters}>重置</button>
+              </div>
+            </div>}
             {browsingFavorites && <header className="management-page-heading"><h1><Heart size={23} />收藏</h1><span>{visibleAlbums.length ? `${visibleAlbums.length} 个相册 · ${total} 个文件` : `${total} 项`}</span></header>}
             {browsingFavorites && visibleAlbums.length > 0 && <section className="favorite-albums" aria-label="收藏的相册"><h2>相册</h2><AlbumGrid albums={visibleAlbums} onOpen={chooseAlbum} onStorage={openLocal} onCover={id => void viewAlbumCover(id)} selection={albumSelection.selection} /></section>}
             {loading ? (
               <GallerySkeleton />
             ) : images.length ? (
               <SelectableGallery
-                key={`${section}:${path}:${debouncedSearch}:${exploreSeed}`}
+                key={`${section}:${path}:${debouncedSearch}:${exploreSeed}:${imageFilters.kind}:${imageFilters.orientation}:${imageFilters.sort}`}
                 ref={galleryLayoutRef}
                 toolbarTarget={selectionToolbar}
                 onSelectionChange={setSelectedIds}
@@ -1535,7 +1614,7 @@ function App() {
             ) : browsingFavorites && visibleAlbums.length > 0 ? null : (
               <div className="empty-state">
                 <ImageIcon size={30} strokeWidth={1.6} />
-                <strong>{browsingFavorites ? debouncedSearch ? "没有匹配的收藏" : "暂无收藏" : selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
+                <strong>{filterLabels.length ? "没有符合筛选条件的内容" : browsingFavorites ? debouncedSearch ? "没有匹配的收藏" : "暂无收藏" : selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
                 <span>
                   {browsingFavorites ? "选中图片、视频或相册，点击收藏即可添加" : summary?.total === 0 || selectedAlbum?.count === 0
                     ? "添加图片或视频后将自动显示"
@@ -1561,6 +1640,7 @@ function App() {
         <SettingsDialog
           initialSection={settingsSection}
           onClose={() => setSettingsSection(null)}
+          onCategoriesSaved={next => { categoriesController.current?.abort(); setCategories(next); setCategoriesHint(""); }}
           onStorageSaved={() => {
             setStorageRevision(value => value + 1);
             if (browsingStorage) navigateTo("storage");

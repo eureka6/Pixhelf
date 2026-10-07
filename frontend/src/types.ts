@@ -3,6 +3,7 @@ export interface Album {
   name: string;
   count: number;
   cover: string | null;
+  previews?: string[];
 }
 
 export type GallerySection = "library" | "albums" | "similar" | "storage" | "local" | "favorites" | "trash";
@@ -11,6 +12,7 @@ export interface GallerySummary {
   total: number;
   albums: Album[];
   revision: string;
+  initializing?: boolean;
 }
 
 export interface GalleryImage {
@@ -98,4 +100,15 @@ export interface BootstrapData {
   images: ImagesPage;
 }
 
-export type SortMode = "name-asc" | "name-desc" | "newest" | "explore";
+export type SortMode = "default" | "name-asc" | "name-desc" | "newest" | "oldest" | "explore";
+
+export interface ImageFilters {
+  kind: "all" | "photo" | "live" | "video";
+  orientation: "all" | "landscape" | "portrait" | "square";
+  sort: SortMode;
+}
+
+export interface ContentCategory {
+  name: string;
+  query: string;
+}

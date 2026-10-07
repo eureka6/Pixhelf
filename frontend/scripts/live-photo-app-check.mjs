@@ -1,13 +1,12 @@
+import { serveFrontendAsset } from "./frontend-fixture.mjs";
 // Exercise the production app with browser routes only: no HTTP listener or
 // backend process. Build the frontend before running this check.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { engine, isChromium, launchBrowser, loadSample, serveMotion, serveLibmediaAsset, imageDimensions } from "./live-photo-fixture.mjs";
 
-const [html, js, css, filler, sample] = await Promise.all([
+const [html, filler, sample] = await Promise.all([
   readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
-  readFile(new URL("../dist/assets/app.js", import.meta.url)),
-  readFile(new URL("../dist/assets/app.css", import.meta.url)),
   readFile(new URL("fixtures/live-photo.jpg", import.meta.url)),
   loadSample(),
 ]);
@@ -122,15 +121,15 @@ try {
       const path = url.pathname;
       if (path === "/") return route.fulfill({ contentType: "text/html", body: documentHtml });
       if (path.startsWith("/assets/libmedia/")) return serveLibmediaAsset(route);
-      if (path === "/assets/app.js") return route.fulfill({ contentType: "text/javascript", body: js });
-      if (path === "/assets/app.css") return route.fulfill({ contentType: "text/css", body: css });
+      if (path.startsWith("/assets/")) return serveFrontendAsset(route);
       if (path === "/api/gallery") return route.fulfill({ json: summary });
+      if (path === "/api/categories") return route.fulfill({ json: { categories: [] } });
       if (path === "/api/status") return route.fulfill({ json: status });
       if (path === "/api/images") return route.fulfill({ json: pageData });
       if (path === "/api/management") return route.fulfill({ json: { favoriteIds: [], favoriteAlbums: [], privateAlbums: [], trashCount: 0 } });
-      const image = images.find(image => path.startsWith(`/api/images/${image.id}/`) || path === `/api/images/${image.id}`);
+      const image = images.find(image => path.startsWith(`/api/images/${image.id}/`) || path.startsWith(`/api/images/${image.id}.`) || path === `/api/images/${image.id}`);
       if (image && path.endsWith(`/${image.id}`)) return route.fulfill({ json: image });
-      if (image && ["thumbnail", "original"].some(kind => path === `/api/images/${image.id}/${kind}`)) return route.fulfill({ contentType: "image/jpeg", body: image.motion ? poster : filler });
+      if (image && (path === `/api/images/${image.id}/thumbnail` || path === `/api/images/${image.id}.jpg`)) return route.fulfill({ contentType: "image/jpeg", body: image.motion ? poster : filler });
       if (image && path.endsWith("/similar")) return route.fulfill({ json: { ...pageData, items: [], total: 0 } });
       if (image && path.endsWith("/details")) return route.fulfill({ json: { fileSize: poster.length, modifiedMs: 0, exif: [],
         histogram: Object.fromEntries(["red", "green", "blue", "luminance"].map(key => [key, Array(256).fill(0)])),

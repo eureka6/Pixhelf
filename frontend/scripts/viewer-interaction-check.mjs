@@ -23,7 +23,7 @@ const bundle = await build({
           setIndex(4); setClosed(false); setSession(s => s + 1);
           return session + 1;
         };
-        const images = Array.from({ length: 9 }, (_, i) => ({
+        const images = Array.from({ length: 32 }, (_, i) => ({
           id: "fixture-" + session + "-" + i, name: "photo-" + i + ".jpg", width: 1200, height: 900,
         }));
         return closed ? null : <ImageViewer key={session} images={images} activeIndex={index}
@@ -39,7 +39,7 @@ const bundle = await build({
   bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", jsxImportSource: "preact",
   define: { "import.meta.env.DEV": "true", "import.meta.url": '"https://viewer.test/assets/app.js"' },
 });
-const css = ["styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
+const css = ["base.css", "styles.css", "photoCardActions.css", "selection.css", "PhotoInformation.css", "video.css"]
   .map(file => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8")).join("\n");
 const photo = readFileSync(new URL("./fixtures/live-photo.jpg", import.meta.url));
 const browser = await chromium.launch({
@@ -50,7 +50,7 @@ const browser = await chromium.launch({
 const failures = [];
 let checks = 0;
 try {
-  for (const touch of [false, true]) {
+  for (const touch of process.argv.includes("--mouse") ? [false] : [false, true]) {
     const width = touch ? 390 : 1440;
     const page = await browser.newPage({ viewport: { width, height: touch ? 844 : 900 }, hasTouch: touch, isMobile: touch });
     page.setDefaultTimeout(5000);
@@ -61,7 +61,7 @@ try {
       if (path === "/") return route.fulfill({ contentType: "text/html", body: `<!doctype html>
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <script id="pixhelf-auth" type="application/json">{"enabled":false,"authenticated":false}</script><div id="root"></div>` });
-      if (/\/(thumbnail|original|render)$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: photo });
+      if (/\/thumbnail$|\/api\/images\/[^/]+\.jpg$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: photo });
       return route.fulfill({ json: { fileSize: photo.length, modifiedMs: 0, exif: [], histogram: null } });
     });
     await page.goto("https://viewer.test/");
@@ -85,7 +85,7 @@ try {
       if (touch) await dispatchTouch("touchMove", [point]);
       else await page.mouse.move(point.x, point.y);
     };
-    const end = async () => { if (touch) await dispatchTouch("touchEnd"); else await page.mouse.up(); };
+    const end = async () => { if (touch) { if (touching) await dispatchTouch("touchEnd"); } else await page.mouse.up(); };
     const tap = async (point = center) => { await begin(point); await end(); };
     const state = () => page.evaluate(() => {
       const viewer = document.querySelector(".image-viewer"), media = document.querySelector(".viewer-media");
@@ -172,14 +172,15 @@ try {
       await end(); assert.deepEqual((await state()).events, []);
     });
 
-    await check("side tap and side drag stay distinct", async () => {
+    await check("side taps are immediate and moving into the center does not drag the image", async () => {
       const next = await page.locator(".viewer-next").boundingBox();
       const point = { x: next.x + next.width - 20, y: center.y };
-      await tap(point); await page.waitForTimeout(100);
+      await tap(point);
       assert.deepEqual((await state()).events, [1]);
       await begin(point); await move({ x: point.x - 230, y: point.y }); await page.waitForTimeout(40);
-      assert((await state()).x < -180); await end(); await page.waitForTimeout(250);
-      assert.deepEqual((await state()).events, [1, 1], "one navigation per tap or completed drag");
+      assert.equal((await state()).x, 0); assert.equal((await state()).dragging, "false");
+      await end(); await page.waitForTimeout(250);
+      assert.deepEqual((await state()).events, [1, 1], "the starting zone owns the entire contact");
     });
 
     await check("interrupted close press recovers", async () => {
@@ -193,7 +194,119 @@ try {
       assert.equal(await page.locator(".image-viewer").count(), 0);
     });
 
+    await check("edge hold repeats across image changes and stops on release", async () => {
+      const point = { x: width - 20, y: center.y };
+      await begin(point); await page.waitForTimeout(1550);
+      const steps = (await state()).events;
+      assert(steps.length >= 6 && steps.length <= 8, "the hold should match quick repeated taps without a slow ramp");
+      assert.equal(await page.locator(".photo-card-menu:popover-open").count(), 0);
+      await end(); await page.waitForTimeout(700);
+      assert.deepEqual((await state()).events, steps, "release must not add a click or retain a timer");
+    });
+    await check("holding while moving across zones keeps the original direction until release", async () => {
+      await begin({ x: width - 20, y: center.y });
+      await move(center); await page.waitForTimeout(600);
+      const first = (await state()).events;
+      assert.equal(first.length, 1, "movement before the hold threshold must not cancel the hold");
+      await move({ x: 20, y: center.y }); await page.waitForTimeout(400);
+      const middle = (await state()).events;
+      assert(middle.length >= 3);
+      await move({ x: center.x, y: 100 }); await page.waitForTimeout(340);
+      const result = await state();
+      assert(result.events.length >= middle.length + 1);
+      assert(result.events.every(direction => direction === 1), "crossing the opposite zone must not reverse the hold");
+      assert.equal(result.scale, 1); assert.equal(result.x, 0); assert.equal(result.scroll, 0);
+      assert.equal(await page.locator('.viewer-next[data-pressed="true"]').count(), 1);
+      await end(); await page.waitForTimeout(500);
+      assert.deepEqual((await state()).events, result.events);
+      assert.equal(await page.locator('.viewer-nav[data-pressed="true"]').count(), 0);
+    });
+    for (const interruption of ["cancel", "blur", "capture", "hidden"]) {
+      await check(`${interruption} stops an edge hold without a release click`, async () => {
+        await page.locator('.viewer-next').evaluate(button => button.addEventListener('pointerdown', event => {
+          window.viewerPointerId = event.pointerId;
+        }, { once: true }));
+        const point = { x: width - 20, y: center.y };
+        await begin(point); await page.waitForTimeout(600);
+        const steps = (await state()).events;
+        assert.equal(steps.length, 1);
+        if (interruption === "blur") await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+        else if (interruption === "hidden") await page.evaluate(() => {
+          Object.defineProperty(document, "hidden", { configurable: true, value: true });
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        else if (interruption === "capture") await page.locator('.viewer-next').evaluate(button => {
+          button.releasePointerCapture(window.viewerPointerId);
+        });
+        else if (touch) await dispatchTouch("touchCancel");
+        else await page.locator('.viewer-next').evaluate(button => {
+          button.dispatchEvent(new PointerEvent("pointercancel", { pointerId: window.viewerPointerId, pointerType: "mouse", bubbles: true }));
+        });
+        await end(); await page.waitForTimeout(800);
+        assert.deepEqual((await state()).events, steps);
+        assert.equal(await page.locator('.viewer-nav[data-pressed="true"]').count(), 0);
+        if (interruption === "hidden") await page.evaluate(() => { delete document.hidden; });
+      });
+    }
     if (touch) {
+      await check("edge double tap advances twice without zooming", async () => {
+        const point = { x: width - 20, y: center.y };
+        await tap(point); await page.waitForTimeout(60); await tap(point);
+        await page.waitForTimeout(240);
+        assert.deepEqual((await state()).events, [1, 1]);
+        assert.equal((await state()).scale, 1);
+      });
+      for (const side of ["previous", "next"]) {
+        await check(`${side} zone hides its arrow and navigates when zoomed`, async () => {
+          const edge = await page.locator(`.viewer-${side}`).boundingBox();
+          assert(edge.height > 250 && edge.width >= 44);
+          assert.equal(await page.locator(`.viewer-${side} .viewer-nav-glyph`).isVisible(), false);
+          await page.keyboard.press("="); await page.waitForTimeout(240);
+          const point = { x: edge.x + edge.width / 2, y: center.y };
+          await tap(point);
+          assert.deepEqual((await state()).events, [side === "next" ? 1 : -1]);
+          await page.waitForTimeout(250);
+          assert.equal((await state()).scale, 1);
+        });
+      }
+      await check("image long press still opens the menu without navigating", async () => {
+        await begin();
+        await page.locator(".viewer-media .photo-card-menu:popover-open").waitFor();
+        await end(); await page.waitForTimeout(340);
+        assert.deepEqual((await state()).events, []);
+        assert.equal(await page.locator(".viewer-media .photo-card-menu:popover-open").count(), 1);
+      });
+      await check("a second finger cancels an edge hold without a phantom release", async () => {
+        const edge = { x: width - 20, y: center.y };
+        await begin(edge); await page.waitForTimeout(600);
+        const steps = (await state()).events;
+        assert.equal(steps.length, 1);
+        await dispatchTouch("touchStart", [edge, center]);
+        await dispatchTouch("touchEnd"); await page.waitForTimeout(700);
+        assert.equal((await state()).scale, 1); assert.deepEqual((await state()).events, steps);
+      });
+      await check("center upward swipe scrolls to details", async () => {
+        const point = center;
+        await begin(point);
+        for (const distance of [20, 50, 100, 170, 240]) {
+          await move({ x: point.x, y: point.y - distance }); await page.waitForTimeout(25);
+        }
+        await end(); await page.waitForTimeout(340);
+        assert((await state()).scroll > 100); assert.deepEqual((await state()).events, []);
+      });
+      await check("center downward swipe dismisses the viewer", async () => {
+        const point = center;
+        await begin(point); await move({ x: point.x, y: point.y + 20 });
+        await move({ x: point.x, y: point.y + 180 }); await end();
+        await page.locator(".image-viewer").waitFor({ state: "detached" });
+        assert.deepEqual(await page.evaluate(() => window.navigationEvents), []);
+      });
+      await check("an immediate side tap and a center swipe each navigate once", async () => {
+        await tap({ x: width - 20, y: center.y });
+        await begin(center); await move({ x: 20, y: center.y }); await end();
+        await page.waitForTimeout(340);
+        assert.deepEqual((await state()).events, [1, 1]);
+      });
       await check("cancelled tap does not seed a double tap", async () => {
         await tap(); await begin(); await dispatchTouch("touchCancel"); await tap();
         await page.waitForTimeout(250); assert.equal((await state()).scale, 1);
@@ -203,12 +316,12 @@ try {
         await move(center); await end(); await tap();
         await page.waitForTimeout(250); assert.equal((await state()).scale, 1);
       });
-      await check("pinch and remaining finger do not navigate", async () => {
+      await check("center pinch can cross side zones without navigation", async () => {
         await watch();
         await dispatchTouch("touchStart", [{ x: 155, y: 422 }, { x: 235, y: 422 }]);
-        await dispatchTouch("touchMove", [{ x: 115, y: 422 }, { x: 275, y: 422 }]);
+        await dispatchTouch("touchMove", [{ x: 20, y: 422 }, { x: 370, y: 422 }]);
         await page.waitForTimeout(80);
-        await dispatchTouch("touchEnd", [{ x: 115, y: 422 }]);
+        await dispatchTouch("touchEnd", [{ x: 20, y: 422 }]);
         await dispatchTouch("touchMove", [{ x: 60, y: 422 }]);
         await dispatchTouch("touchEnd"); await page.waitForTimeout(250);
         await stableControls(); const result = await state();
@@ -233,6 +346,11 @@ try {
         await move({ x: center.x - 100, y: center.y }); await page.waitForTimeout(250);
         assert.equal((await state()).dragging, "false"); assert(Math.abs((await state()).x) < 1);
         await end(); assert.deepEqual((await state()).events, []);
+      });
+      await check("zoomed edge clicks still navigate on desktop", async () => {
+        await page.keyboard.press("="); await page.waitForTimeout(240);
+        await page.locator(".viewer-next").click();
+        assert.deepEqual((await state()).events, [1]);
       });
       await check("double clicking navigation does not zoom", async () => {
         await page.locator(".viewer-next").dblclick(); await page.waitForTimeout(250);

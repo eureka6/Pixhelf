@@ -66,7 +66,7 @@ try {
   const status = await fetch(`${origin}/api/status`).then(response => response.json());
   assert.equal(status.videos.playback.total, 0);
   assert.equal(status.videos.preview.total, 0);
-  for (const [url, source] of [[`/api/images/${image.id}/original`, photo], [image.motion, motion]]) {
+  for (const [url, source] of [[`/api/images/${image.id}.${image.name.split(".").pop().toLowerCase()}`, photo], [image.motion, motion]]) {
     const response = await fetch(origin + url);
     assert.equal(response.status, 200);
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), await readFile(source), "original downloads must preserve source bytes");
@@ -117,7 +117,7 @@ try {
         await page.locator(".viewer-media:not(.viewer-swipe-outgoing)").click({ button: "right" });
         const download = page.getByRole("menuitem", { name: "下载原图", exact: true });
         await download.waitFor();
-        assert.equal(await download.getAttribute("href"), `/api/images/${image.id}/original`);
+        assert.equal(await download.getAttribute("href"), `/api/images/${image.id}.${image.name.split(".").pop().toLowerCase()}`);
         await page.keyboard.press("Escape");
       }
       await page.screenshot({ path: `/tmp/pixhelf-heif-${sample ? "sample" : "fixture"}-${width}.png` });

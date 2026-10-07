@@ -21,12 +21,18 @@ type AlbumMenu = { album: Album; point: MenuPoint; opener: HTMLElement | null };
 
 function AlbumCard({ album, onOpen, onStorage, selection }: AlbumNavigation & { album: Album }) {
   const manager = useManagement();
-  const [failedCover, setFailedCover] = useState<string | null>(null);
+  const [failedCovers, setFailedCovers] = useState<Set<string>>(() => new Set());
+  const covers = [...new Set([album.cover, ...(album.previews ?? [])])]
+    .filter((id): id is string => id !== null && id.length > 0 && !failedCovers.has(id)).slice(0, 3);
   return <article className="album-card" data-album-path={album.path} data-selected={selection?.ids.has(album.path)}>
-    <a className="album-card-open" href={galleryHref("albums", album.path)} draggable={false} aria-label={`打开相册 ${album.name}`} onClick={event => follow(event, album.path, onOpen)}>
+    <a className="album-card-open" href={galleryHref("albums", album.path)} draggable={false} aria-label={`打开相册 ${album.name}`}
+      onClick={event => follow(event, album.path, onOpen)}>
       <div className="album-cover">
         <BookImage size={42} strokeWidth={1.2} />
-        {album.cover && album.cover !== failedCover && <img key={album.cover} src={`/api/images/${encodeURIComponent(album.cover)}/thumbnail`} alt="" loading="lazy" decoding="async" onError={() => setFailedCover(album.cover)} />}
+        {covers.map((id, layer) => <div key={id} className="album-cover-sheet" data-layer={layer}>
+          <img src={`/api/images/${encodeURIComponent(id)}/thumbnail`} alt="" loading="lazy" decoding="async" draggable={false}
+            onError={() => setFailedCovers(current => new Set(current).add(id))} />
+        </div>)}
       </div>
       <div className="album-caption">
         <h2 className="album-name" title={album.name}>{album.name}</h2>

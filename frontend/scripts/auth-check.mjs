@@ -325,11 +325,11 @@ async function checkAuthentication(protocol) {
         return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
       }), true, "logout is covered by navigation");
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-      assert.equal(await page.locator(`${panel} .brand-lockup`).evaluate(brand => {
+      assert.equal(await page.locator(".topbar .brand-lockup").evaluate(brand => {
         const name = brand.querySelector(".brand-name");
         const box = name.getBoundingClientRect();
         return brand.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-      }), true, "topbar covers the sidebar brand");
+      }), true, "navigation covers the logo");
       await page.screenshot({ path: join(tmpdir(), `pixhelf-auth-sidebar${screenshotSuffix}-${width}.png`) });
       if (width === 1440) {
         const rejected = await context.request.post(`${origin}/api/auth/logout`, { headers: { Origin: origin, "X-Pixhelf-Origin": origin, "X-CSRF-Token": "forged" } });
@@ -357,8 +357,11 @@ async function checkAuthentication(protocol) {
         const activeSession = await (await context.request.get(`${origin}/api/auth/session`)).json();
         const revoked = await context.request.post(`${origin}/api/auth/logout`, { headers: { Origin: origin, "X-Pixhelf-Origin": origin, "X-CSRF-Token": activeSession.csrfToken } });
         assert.equal(revoked.status(), 204);
-        // Revoke on the server without notifying the page, as on expiry. The image request must detect it.
-        await page.locator(".image-card").first().click();
+        // Revoke without notifying the page. An in-flight API or the next image
+        // request may detect expiry first, including while a gallery chunk mounts.
+        await page.locator(".image-card").first().click({ timeout: 2000 }).catch(async () => {
+          await page.waitForURL(`${origin}/login?expired=1`);
+        });
         await page.waitForURL(`${origin}/login?expired=1`);
         await page.getByRole("status").filter({ hasText: "登录已过期" }).waitFor();
       }
@@ -459,7 +462,13 @@ async function checkAuthentication(protocol) {
         assert(size.x >= 10 && size.x + size.width <= width - 10);
       }
       await guestSwitch.waitFor();
-      assert(await adminPage.locator(".settings-nav").evaluate(element => element.scrollWidth <= element.clientWidth + 1));
+      assert(await adminPage.locator(".settings-nav").evaluate(element => {
+        const selected = element.querySelector('[aria-current="page"]').getBoundingClientRect();
+        const bounds = element.getBoundingClientRect();
+        // Additional settings categories scroll horizontally on narrow screens.
+        return (element.scrollWidth <= element.clientWidth + 1 || getComputedStyle(element).overflowX === "auto")
+          && selected.left >= bounds.left && selected.right <= bounds.right;
+      }));
       await adminPage.screenshot({ path: join(tmpdir(), `pixhelf-guest-settings-${protocol}-${width}.png`), animations: "disabled" });
     }
     const visitors = [];

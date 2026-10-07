@@ -1,3 +1,4 @@
+import { serveFrontendAsset } from "./frontend-fixture.mjs";
 // Production UI, original/preview video bytes and browser requests are supplied
 // locally. No HTTP listener or application service is started.
 import assert from "node:assert/strict";
@@ -15,10 +16,8 @@ try {
   ffmpeg("-f", "lavfi", "-i", "testsrc2=size=1440x1080:rate=12:duration=8", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", "-threads", "2", "-an", originalPath);
   ffmpeg("-i", originalPath, "-vf", "scale=480:360", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-threads", "2", "-an", previewPath);
   ffmpeg("-i", originalPath, "-frames:v", "1", posterPath);
-  const [html, js, css, poster, original, preview] = await Promise.all([
+  const [html, poster, original, preview] = await Promise.all([
     readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../dist/assets/app.js", import.meta.url)),
-    readFile(new URL("../dist/assets/app.css", import.meta.url)),
     readFile(posterPath), readFile(originalPath), readFile(previewPath),
   ]);
   const photo = { id: "1".repeat(32), name: "Live.jpg", width: 1440, height: 1080,
@@ -40,15 +39,14 @@ try {
       if (url.hostname !== "pixhelf.test") return route.abort();
       if (path.startsWith("/assets/libmedia/")) { decoderRequests.push(path); return serveLibmediaAsset(route); }
       if (path === "/") return route.fulfill({ contentType: "text/html", body: documentHtml });
-      if (path === "/assets/app.js") return route.fulfill({ contentType: "text/javascript", body: js });
-      if (path === "/assets/app.css") return route.fulfill({ contentType: "text/css", body: css });
+      if (path.startsWith("/assets/")) return serveFrontendAsset(route);
       if (path === "/api/management") return route.fulfill({ json: { favoriteIds: [], favoriteAlbums: [], privateAlbums: [], trashCount: 0 } });
       if (path === "/api/gallery") return route.fulfill({ json: summary });
       if (path === "/api/status") return route.fulfill({ json: status });
       if (path === "/api/images") return route.fulfill({ json: images });
       if (path === `/api/images/${photo.id}`) return route.fulfill({ json: photo });
       if (path.endsWith("/similar")) return route.fulfill({ json: { ...images, items: [], total: 0 } });
-      if (path.endsWith("/thumbnail") || path.endsWith("/original")) return route.fulfill({ contentType: "image/jpeg", body: poster });
+      if (path.endsWith("/thumbnail") || /^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: poster });
       if (path === "/preview.mp4" || path === "/original-motion.mp4") {
         requests.push({ path, method: route.request().method(), range: route.request().headers().range });
         if (url.searchParams.has("status")) return route.fulfill({ json: { state: "ready" } });

@@ -51,6 +51,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
       ? event.pointerType !== "mouse" : gallery.dataset.cardInput === "touch";
     const cardAt = (target: EventTarget | null) => {
       if (!(target instanceof Element) || target.closest(".photo-card-controls, .photo-card-select, [inert]")) return null;
+      // The viewer's edge controls own their hold gesture; image menus belong to the image.
       const card = target.closest<HTMLElement>(CARD_SELECTOR);
       if (card?.matches(".video-viewer-stage") && target.closest("button, a, input, .video-controls-region")) return null;
       return card && gallery.contains(card) ? card : null;
@@ -129,6 +130,7 @@ export function useCardInteraction(ref: RefObject<HTMLDivElement>, enabled = tru
     };
     const followsLongPress = (event: MouseEvent) => consumed && event.detail > 0
       && ((event.target instanceof Node && consumed.card.contains(event.target))
+        || cardAt(event.target) === consumed.card
         || (event instanceof PointerEvent && event.pointerId === consumed.pointerId));
     const mouseDown = (event: MouseEvent) => {
       // Touch compatibility events must not move focus back from the menu to the photo.

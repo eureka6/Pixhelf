@@ -1,5 +1,7 @@
 import type { GalleryImage } from "./types";
 import { authentication, checkAuthentication, requireLogin } from "./auth";
+import { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
+export { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
 
 const THUMBNAIL_CACHE_LIMIT = 32;
 const ORIGINAL_CACHE_LIMIT = 4;
@@ -54,19 +56,6 @@ const viewportRenderAssets = new Map<string, ViewerRenderAsset>();
 const viewportRenderQueue: ViewportRenderJob[] = [];
 let activeViewportRenderJob: ViewportRenderJob | null = null;
 let assetClock = 0;
-
-export function viewerThumbnailUrl(image: GalleryImage): string {
-  return `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
-}
-
-export function originalImageUrl(image: GalleryImage): string {
-  return `/api/images/${encodeURIComponent(image.id)}/original`;
-}
-
-export function viewerOriginalUrl(image: GalleryImage, attempt = 0): string {
-  const url = image.display ?? originalImageUrl(image);
-  return attempt ? `${url}?retry=${attempt}` : url;
-}
 
 export function canPreloadViewerNeighbors(): boolean {
   if (document.visibilityState !== "visible") return false;

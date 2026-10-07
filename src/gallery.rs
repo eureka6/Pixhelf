@@ -83,11 +83,13 @@ pub struct Album {
     pub name: String,
     pub count: usize,
     pub cover: Option<String>,
+    pub previews: Vec<String>,
 }
 
 #[derive(Default)]
 pub struct GalleryIndex {
     pub root: PathBuf,
+    pub initializing: bool,
     pub images: Vec<Arc<ImageRecord>>,
     pub albums: Vec<Album>,
     pub revision: String,
@@ -95,6 +97,15 @@ pub struct GalleryIndex {
 }
 
 impl GalleryIndex {
+    pub fn pending(root: PathBuf) -> Self {
+        Self {
+            root,
+            initializing: true,
+            revision: "initializing".into(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn shared_view(&self, private: &BTreeSet<String>) -> Self {
         let images: Vec<_> = self
             .images
@@ -119,6 +130,7 @@ impl GalleryIndex {
         }
         Self {
             root: self.root.clone(),
+            initializing: self.initializing,
             images,
             albums,
             images_by_id,
@@ -183,6 +195,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
                         path,
                         count: 0,
                         cover: None,
+                        previews: Vec::new(),
                     },
                 );
             }
@@ -373,6 +386,9 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
         if let Some(album) = albums.get_mut(&image.album) {
             album.count += 1;
             album.cover.get_or_insert_with(|| image.id.clone());
+            if album.previews.len() < 3 {
+                album.previews.push(image.id.clone());
+            }
         }
     }
     // Directories without media belong in local storage, not the flat album catalog.
@@ -386,6 +402,7 @@ pub fn scan_gallery(root: &Path, previous: Option<&GalleryIndex>) -> Result<Gall
     images_by_id.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     Ok(GalleryIndex {
         root: root.to_path_buf(),
+        initializing: false,
         images,
         albums,
         revision,
@@ -630,6 +647,67 @@ mod tests {
             Some("image.png")
         );
         assert!(index.image("missing").is_none());
+    }
+
+    #[test]
+    fn album_previews_follow_cover_order_and_stay_within_the_album() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("album/child")).unwrap();
+        for path in [
+            "album/photo10.png",
+            "album/photo3.png",
+            "album/photo1.png",
+            "album/photo2.png",
+            "album/child/first.png",
+        ] {
+            image::RgbImage::new(20, 10)
+                .save(temp.path().join(path))
+                .unwrap();
+        }
+        let index = scan_gallery(temp.path(), None).unwrap();
+        let album = index
+            .albums
+            .iter()
+            .find(|album| album.path == "album")
+            .unwrap();
+        assert_eq!(album.count, 4);
+        assert_eq!(album.previews.first(), album.cover.as_ref());
+        assert_eq!(
+            album
+                .previews
+                .iter()
+                .map(|id| index.image(id).unwrap().name.as_str())
+                .collect::<Vec<_>>(),
+            ["photo1.png", "photo2.png", "photo3.png"]
+        );
+
+        let shared = index.shared_view(&BTreeSet::from(["album".to_owned()]));
+        assert_eq!(shared.albums.len(), 1);
+        assert_eq!(shared.albums[0].path, "album/child");
+        assert!(
+            shared.albums[0]
+                .previews
+                .iter()
+                .all(|id| shared.image(id).is_some())
+        );
+        assert!(album.previews.iter().all(|id| shared.image(id).is_none()));
+
+        fs::remove_file(temp.path().join("album/photo1.png")).unwrap();
+        let rescanned = scan_gallery(temp.path(), Some(&index)).unwrap();
+        let album = rescanned
+            .albums
+            .iter()
+            .find(|album| album.path == "album")
+            .unwrap();
+        assert_eq!(album.previews.first(), album.cover.as_ref());
+        assert_eq!(
+            album
+                .previews
+                .iter()
+                .map(|id| rescanned.image(id).unwrap().name.as_str())
+                .collect::<Vec<_>>(),
+            ["photo2.png", "photo3.png", "photo10.png"]
+        );
     }
 
     #[test]

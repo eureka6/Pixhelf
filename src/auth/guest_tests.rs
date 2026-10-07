@@ -27,6 +27,7 @@ async fn gallery_management_requires_admin_origin_and_csrf() {
         "/api/management/downloads",
         "/api/management/directories",
         "/api/management/sharing",
+        "/api/management/categories",
     ] {
         assert_eq!(
             call(&app, write_request(path, None, None), body.clone())
@@ -153,6 +154,7 @@ async fn guest_mode_is_opt_in_read_only_and_revocable_before_conditional_media()
     for path in [
         "/".into(),
         "/api/gallery".into(),
+        "/api/categories".into(),
         "/api/images".into(),
         "/api/status".into(),
         format!("/api/images/{id}"),
@@ -564,6 +566,7 @@ async fn album_sharing_filters_guest_bootstrap_search_and_every_media_route() {
     for suffix in [
         "",
         "/original",
+        ".png",
         "/thumbnail",
         "/display",
         "/details",

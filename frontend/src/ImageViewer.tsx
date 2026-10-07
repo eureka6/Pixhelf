@@ -10,7 +10,7 @@ import {
 import { PhotoInformation } from "./PhotoInformation";
 import { VideoViewer } from "./VideoViewer";
 import { ViewerNavigationButton } from "./ViewerNavigationButton";
-import { useViewerKeyboardNavigation } from "./useViewerKeyboardNavigation";
+import { useViewerNavigation } from "./useViewerNavigation";
 import { useViewerPreloads } from "./useViewerPreloads";
 import type { VideoFrame } from "./videoFrame";
 import { ImageCardActions } from "./ImageCardActions";
@@ -56,7 +56,7 @@ import {
 const MIN_SCALE = 1;
 const MAX_SCALE = 5;
 const DOUBLE_TAP_SCALE = 2.5;
-const DOUBLE_TAP_DELAY_MS = 280;
+const DOUBLE_TAP_DELAY_MS = 180;
 const VIEWER_SCROLL_EPSILON = 2;
 const WHEEL_HANDOFF_DELAY_MS = 220;
 const DETAILS_TOOLBAR_IDLE_MS = 2200;
@@ -95,7 +95,7 @@ type GestureStart = {
   scrollTop: number;
   startedAt: number;
   pointerType: string;
-  navigation?: HTMLButtonElement;
+  doubleTap?: boolean;
 };
 
 type GestureMode = "pan" | "navigate" | "page" | "dismiss" | "pinch";
@@ -144,7 +144,7 @@ type GestureGeometry = {
 };
 
 type GestureHandlers = {
-  begin: (id: number, point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => void;
+  begin: (id: number, point: PointerPoint, pointerType: string) => void;
   move: (id: number, point: PointerPoint) => void;
   finish: (id: number, point: PointerPoint, pointerType: string) => void;
   cancel: () => void;
@@ -607,7 +607,7 @@ function PhotoViewer({
   };
 
   const clearControlPresses = () => {
-    dialogRef.current?.querySelectorAll<HTMLElement>(".viewer-close[data-pressed], .viewer-nav[data-pressed]")
+    dialogRef.current?.querySelectorAll<HTMLElement>(".viewer-close[data-pressed]")
       .forEach(control => { delete control.dataset.pressed; });
   };
 
@@ -969,7 +969,7 @@ function PhotoViewer({
     }
   };
 
-  useViewerKeyboardNavigation({
+  const navigation = useViewerNavigation({
     viewerRef: dialogRef,
     canPrevious,
     canNext: activeIndex < images.length - 1,
@@ -983,10 +983,11 @@ function PhotoViewer({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      lastTapRef.current = null;
       if (event.key === "Tab") {
         const focusable = Array.from(
           dialogRef.current?.querySelectorAll<HTMLElement>(
-            'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+            'button:not(:disabled):not([aria-disabled="true"]), a[href], [tabindex]:not([tabindex="-1"])',
           ) ?? [],
         ).filter((element) => !element.closest("[inert]") && element.getClientRects().length > 0);
         if (!focusable.length) return;
@@ -1321,7 +1322,7 @@ function PhotoViewer({
     viewportRender.width,
   ]);
 
-  const beginContact = (id: number, point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => {
+  const beginContact = (id: number, point: PointerPoint, pointerType: string) => {
     if (pointersRef.current.has(id)) return;
     if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
     if (pointerType !== "mouse" && pointersRef.current.size === 0) clearSwipeMotion();
@@ -1347,13 +1348,17 @@ function PhotoViewer({
     pointersRef.current.set(id, point);
 
     if (pointersRef.current.size === 1) {
+      const lastTap = lastTapRef.current;
       gestureStartRef.current = {
         point,
         transform: transformRef.current,
         scrollTop: dialogRef.current?.scrollTop ?? 0,
         startedAt: performance.now(),
         pointerType,
-        navigation,
+        // Judge the interval at contact, so a slightly longer second press still zooms.
+        doubleTap: pointerType !== "mouse" && lastTap?.pointerType === pointerType
+          && performance.now() - lastTap.at <= DOUBLE_TAP_DELAY_MS
+          && pointDistance(lastTap.point, point) < 32,
       };
       gestureAxisRef.current = null;
       gestureModeRef.current = null;
@@ -1477,22 +1482,10 @@ function PhotoViewer({
     }
   };
 
-  const handleImageTap = (point: PointerPoint, pointerType: string, navigation?: HTMLButtonElement) => {
-    if (navigation) {
-      // Pointer capture and touchend suppress the native click; only a completed tap navigates.
-      lastTapRef.current = null;
-      if (navigation.isConnected && !navigation.disabled) navigation.click();
-      return;
-    }
+  const handleImageTap = (point: PointerPoint, pointerType: string, doubleTap = false) => {
     if (pointerType !== "mouse") {
       const now = performance.now();
-      const lastTap = lastTapRef.current;
-      if (
-        lastTap &&
-        lastTap.pointerType === pointerType &&
-        now - lastTap.at <= DOUBLE_TAP_DELAY_MS &&
-        pointDistance(lastTap.point, point) < 32
-      ) {
+      if (doubleTap) {
         lastTapRef.current = null;
         zoomAt(
           transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
@@ -1559,12 +1552,12 @@ function PhotoViewer({
     const deltaX = point.x - start.point.x;
     const deltaY = point.y - start.point.y;
     const elapsed = Math.max(1, performance.now() - start.startedAt);
-    const isTap = !gestureMode && Math.hypot(deltaX, deltaY) < 10 && elapsed < 320;
+    const isTap = !gestureMode && Math.hypot(deltaX, deltaY) < 10 && elapsed < 500;
     if (!isTap) lastTapRef.current = null;
 
     if (start.transform.scale > MIN_SCALE) {
       if (isTap) {
-        handleImageTap(point, start.pointerType, start.navigation);
+        handleImageTap(point, start.pointerType, start.doubleTap);
         gestureGeometryRef.current = null;
         return;
       }
@@ -1629,7 +1622,7 @@ function PhotoViewer({
 
     commitTransform(DEFAULT_TRANSFORM);
     if (isTap) {
-      handleImageTap(point, start.pointerType, start.navigation);
+      handleImageTap(point, start.pointerType, start.doubleTap);
     }
     gestureGeometryRef.current = null;
   };
@@ -1640,10 +1633,6 @@ function PhotoViewer({
     resetGesture();
     commitTransform(settled);
   };
-
-  const navigationButtonAt = (target: EventTarget | null) => target instanceof Element
-    ? target.closest<HTMLButtonElement>(".viewer-nav") ?? undefined
-    : undefined;
 
   const beginPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
     // Touch input is handled by non-passive native TouchEvent listeners below. Keeping
@@ -1661,7 +1650,6 @@ function PhotoViewer({
       event.pointerId,
       { x: event.clientX, y: event.clientY },
       event.pointerType,
-      navigationButtonAt(event.target),
     );
   };
 
@@ -1719,7 +1707,7 @@ function PhotoViewer({
     const handleTouchStart = (event: TouchEvent) => {
       if (menuContact(event)) return;
       for (const touch of Array.from(event.changedTouches)) {
-        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch", navigationButtonAt(touch.target));
+        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch");
       }
       if (event.cancelable && (pointersRef.current.size > 1 || transformRef.current.scale > MIN_SCALE)) {
         event.preventDefault();
@@ -1908,7 +1896,6 @@ function PhotoViewer({
         onWheel={handleWheel}
         onDblClick={(event: JSX.TargetedMouseEvent<HTMLDivElement>) => {
           event.preventDefault();
-          if (navigationButtonAt(document.elementFromPoint(event.clientX, event.clientY))) return;
           if (lastTouchAtRef.current > 0 && performance.now() - lastTouchAtRef.current < 500) return;
           zoomAt(
             transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
@@ -2020,9 +2007,9 @@ function PhotoViewer({
             </div>
           </div>
         </div>
-        <ViewerNavigationButton direction={-1} disabled={!canPrevious} onNavigate={onNavigate} />
-        <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} onNavigate={onNavigate} />
       </div>
+      <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
+      <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
 
       {currentLoadState.failed && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>

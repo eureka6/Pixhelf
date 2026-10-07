@@ -21,9 +21,8 @@ const results = [];
 async function closeNavigation(page) {
   const motion = await page.evaluate(async () => {
     const menu = document.querySelector(".gallery-sidebar-toggle");
-    const panel = document.querySelector(".mobile-sidebar") ?? document.querySelector(".desktop-sidebar");
-    const brand = panel.querySelector(".brand-lockup");
-    const home = document.querySelector(".topbar-home");
+    const brand = document.querySelector(".topbar .brand-lockup");
+    const home = document.querySelector(".topbar .brand");
     const homeBounds = home.getBoundingClientRect();
     const result = { samples: 0, minimumBrandMenuGap: null, homeStable: true };
     menu.click();
@@ -40,7 +39,6 @@ async function closeNavigation(page) {
       const style = getComputedStyle(brand);
       if (
         !brand.isConnected || style.visibility !== "visible" || Number(style.opacity) < .02
-        || panel.getBoundingClientRect().right <= rect.left
       ) continue;
       const gap = rect.left - menu.getBoundingClientRect().right;
       result.samples++;
@@ -55,24 +53,18 @@ async function closeNavigation(page) {
 }
 
 async function checkHomeNavigation(page, target, selector) {
-  const sidebar = target.name === "mobile" ? ".mobile-sidebar" : ".desktop-sidebar";
-  const toolbarButton = selector === ".topbar-home";
-  if (target.name === "mobile" && !toolbarButton) {
-    await page.locator(".gallery-sidebar-toggle").click();
-    await page.locator(`${sidebar} .brand`).waitFor({ state: "visible" });
-  }
   const shell = await page.locator(".app-shell").elementHandle();
   const homeRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return url.pathname === "/api/images" && url.searchParams.get("offset") === "0";
   });
-  await page.locator(toolbarButton ? selector : `${sidebar} ${selector}`).click();
+  await page.locator(`.topbar ${selector}`).click();
   const request = await homeRequest;
   const response = await request.response();
   const url = new URL(request.url());
   if (
     !response?.ok() || request.isNavigationRequest()
-    || url.searchParams.get("sort") !== "name-asc"
+    || url.searchParams.get("sort") !== "default"
     || url.searchParams.has("album") || url.searchParams.has("search")
   ) throw new Error(`${selector} did not load the homepage: ${request.url()}`);
   await response.finished();
@@ -144,8 +136,7 @@ try {
       const topbar = document.querySelector(".topbar");
       const sidebarFooter = document.querySelector(".desktop-sidebar .sidebar-footer");
       const searchRect = search?.getBoundingClientRect();
-      const exploreRect = document.querySelector(".topbar .explore-toggle")?.getBoundingClientRect();
-      const home = document.querySelector(".topbar-home");
+      const home = document.querySelector(".topbar .brand");
       const homeRect = home?.getBoundingClientRect();
       const topbarRect = topbar?.getBoundingClientRect();
       const footerRect = sidebarFooter?.getBoundingClientRect();
@@ -192,9 +183,8 @@ try {
         topbarHomeButtons: document.querySelectorAll(".topbar-actions > button.topbar-home").length,
         leadingHomeButtons: document.querySelectorAll(".topbar-leading .topbar-home, .topbar-home-slot").length,
         homeLabel: home?.getAttribute("aria-label"),
-        homeExploreGap: homeRect && exploreRect ? exploreRect.left - homeRect.right : -1,
-        exploreSearchGap: exploreRect && searchRect ? searchRect.left - exploreRect.right : -1,
-        homeStatic: home ? getComputedStyle(home).transitionProperty === "none" : false,
+        homeSearchGap: homeRect && searchRect ? searchRect.left - homeRect.right : -1,
+        homeStatic: home ? getComputedStyle(home).transform === "none" : false,
         brandLoaded: Boolean(brandImage?.complete && brandImage.naturalWidth > 0),
         brandMenuGap: brandRect && toggleRect ? brandRect.left - toggleRect.right : -1,
         sidebarControlSlots: document.querySelectorAll(".sidebar-control-slot").length,
@@ -474,7 +464,7 @@ try {
     await page.waitForFunction(() => {
       const originalPaths = performance.getEntriesByType("resource")
         .map((entry) => new URL(entry.name).pathname)
-        .filter((path) => path.endsWith("/original"));
+        .filter((path) => /^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(path));
       return new Set(originalPaths).size >= 2;
     }, undefined, { timeout: 60_000 });
     await page.waitForTimeout(260);
@@ -528,7 +518,7 @@ try {
           ? [original.width, original.height]
           : [original?.clientWidth ?? 0, original?.clientHeight ?? 0],
         prefetchedOriginals: new Set(
-          resourcePaths.filter((path) => path.endsWith("/original")),
+          resourcePaths.filter((path) => /^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(path)),
         ).size,
         previewRequests: resourcePaths.filter((path) => path.endsWith("/preview")).length,
         rootInert: document.querySelector("#root")?.inert ?? false,
@@ -714,7 +704,7 @@ try {
         mediaReplaced: previousMedia !== document.querySelector(".viewer-media"),
         mediaCount: document.querySelectorAll(".viewer-media").length,
         thumbnailMatches: thumbnailPath.includes(`/api/images/${encodeURIComponent(currentId)}/thumbnail`),
-        originalMatches: originalPath.includes(`/api/images/${encodeURIComponent(currentId)}/original`),
+        originalMatches: originalPath.includes(`/api/images/${encodeURIComponent(currentId)}.`),
         immediateSource: currentOverlay?.getAttribute("data-display-source") ?? "",
         mediaAnimations: document.querySelector(".viewer-media")?.getAnimations().length ?? -1,
       };
@@ -1384,7 +1374,9 @@ try {
         url.searchParams.get("sort") === "explore" &&
         url.searchParams.get("offset") === "0";
     });
-    await page.locator(".topbar .explore-toggle").click();
+    await page.locator('.search-toggle').click();
+    await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
+    await page.keyboard.press('Escape');
     const firstExplore = await firstExploreRequest;
     const firstExploreUrl = new URL(firstExplore.url());
     const firstExploreResponse = await firstExplore.response();
@@ -1397,7 +1389,7 @@ try {
         url.searchParams.get("sort") === "explore" &&
         url.searchParams.get("offset") === "0";
     });
-    await page.locator(".topbar .explore-toggle").click();
+    await page.getByRole('button', { name: '换一组', exact: true }).click();
     const secondExplore = await secondExploreRequest;
     const secondExploreUrl = new URL(secondExplore.url());
     const secondExploreResponse = await secondExplore.response();
@@ -1407,10 +1399,7 @@ try {
     const exploration = await page.evaluate(([firstSeed, secondSeed]) => ({
       firstSeed,
       secondSeed,
-      exploreMarker: getComputedStyle(
-        document.querySelector(".explore-toggle"),
-        "::after",
-      ).content,
+      contextualShuffle: Boolean(document.querySelector('.gallery-filter-summary .gallery-reshuffle')),
       searchMarker: getComputedStyle(
         document.querySelector(".search-toggle"),
         "::after",
@@ -1420,9 +1409,9 @@ try {
       secondExploreUrl.searchParams.get("seed") ?? "",
     ]);
 
-    const fromExplore = await checkHomeNavigation(page, target, ".topbar-home");
+    const fromExplore = await checkHomeNavigation(page, target, ".brand");
     await page.waitForFunction(() =>
-      document.querySelector(".explore-toggle")?.getAttribute("aria-pressed") === "false" &&
+      !document.querySelector(".gallery-reshuffle") &&
       document.querySelector(".desktop-sidebar .album-link")?.classList.contains("active") &&
       document.querySelector("#gallery-search-field input")?.value === ""
     , undefined, { timeout: 60_000 });
@@ -1433,7 +1422,7 @@ try {
     }));
     homeNavigation.fromExplore = fromExplore;
     homeNavigation.repeatedAtHome = [];
-    for (const selector of [".brand-mark", ".brand-name", ".topbar-home", ".topbar-home"]) {
+    for (const selector of [".brand-mark", ".brand-name", ".brand", ".brand"]) {
       homeNavigation.repeatedAtHome.push(await checkHomeNavigation(page, target, selector));
     }
 
@@ -1505,8 +1494,8 @@ try {
         inlineToggles: document.querySelectorAll(".desktop-sidebar-inline-toggle").length,
         galleryToggles: document.querySelectorAll(".gallery-sidebar-toggle").length,
         topbarSurfaceLeft: document.querySelector(".topbar-surface")?.getBoundingClientRect().left ?? -1,
-        brandVisibility: getComputedStyle(document.querySelector(".desktop-sidebar .brand-lockup")).visibility,
-        brandInert: Boolean(document.querySelector(".desktop-sidebar .brand")?.closest("[inert]")),
+        brandVisibility: getComputedStyle(document.querySelector(".topbar .brand-lockup")).visibility,
+        brandInert: Boolean(document.querySelector(".topbar .brand")?.closest("[inert]")),
       }));
       desktopSidebar.collapseMotion = collapseMotion;
       desktopSidebar.contentBefore = contentBefore?.x ?? -1;
@@ -1570,7 +1559,7 @@ try {
         : -1;
       desktopSidebar.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
-      desktopSidebar.restoredBrandRight = await page.locator(".desktop-sidebar .brand-lockup")
+      desktopSidebar.restoredBrandRight = await page.locator(".topbar .brand-lockup")
         .evaluate((brand) => brand.getBoundingClientRect().right);
     } else {
       await page.evaluate(() => window.scrollTo({ top: 320, behavior: "auto" }));
@@ -1591,7 +1580,7 @@ try {
       const topbar = await page.locator(".topbar").boundingBox();
       mobileNavigation = {
         opened: await page.locator(".mobile-nav-layer").count(),
-        brandVisible: await page.locator(".mobile-sidebar .brand").isVisible(),
+        brandVisible: await page.locator(".topbar .brand").isVisible(),
         fixedTop: fixedTop?.y ?? -1,
         expanded: await page.locator(".gallery-sidebar-toggle").getAttribute("aria-expanded"),
         internalToggles: await page.locator(".mobile-sidebar .sidebar-toggle-button").count(),
@@ -1647,12 +1636,12 @@ try {
         const dimensions = await page.evaluate(() => {
           const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
           const tools = document.querySelector(".topbar-actions").getBoundingClientRect();
-          const brand = document.querySelector(".mobile-sidebar .brand-lockup").getBoundingClientRect();
+          const brand = document.querySelector(".topbar .brand-lockup").getBoundingClientRect();
           return {
             width: innerWidth,
             drawerWidth: drawer.width,
             toolsClearance: tools.left - drawer.right,
-            brandClearance: drawer.right - brand.right,
+            brandClearance: tools.left - brand.right,
             toolsClickable: [...document.querySelectorAll(".topbar-actions button")].filter((button) => {
               const rect = button.getBoundingClientRect();
               return rect.width > 0 && rect.height > 0 && !button.closest("[inert]");
@@ -1660,7 +1649,7 @@ try {
               const rect = button.getBoundingClientRect();
               return button.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
             }),
-            brandClickable: [...document.querySelectorAll(".mobile-sidebar .brand-mark, .mobile-sidebar .brand-name, .mobile-sidebar .brand-version")].every((element) => {
+            brandClickable: [...document.querySelectorAll(".topbar .brand-mark, .topbar .brand-name, .topbar .brand-version")].every((element) => {
               const link = element.closest("a");
               const rect = element.getBoundingClientRect();
               return link.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
@@ -1683,7 +1672,7 @@ try {
       mobileNavigation.closed = await page.locator(".mobile-nav-layer").count();
       mobileNavigation.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
-      mobileNavigation.closedBrandVisible = await page.locator(".desktop-sidebar .brand").isVisible();
+      mobileNavigation.closedBrandVisible = await page.locator(".topbar .brand").isVisible();
     }
 
     const result = {
@@ -1714,7 +1703,7 @@ try {
       dialogsAfterImageClick !== 1 ||
       viewer.title !== firstViewerTitle ||
       viewer.fullLoaded !== "true" ||
-      !viewer.originalPath.endsWith("/original") ||
+      !/^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(viewer.originalPath) ||
       !["native", "safe-canvas", "viewport-bitmap"].includes(viewer.renderer) ||
       viewer.sourceStrategy !== (
         target.name === "mobile" ? "viewport-upgrade" : "direct-original"
@@ -1851,7 +1840,7 @@ try {
       returnRestoration.anchorDelta > 2 ||
       returnRestoration.returning !== "false" ||
       searchDisclosure.expanded !== "true" ||
-      !searchDisclosure.focused ||
+      searchDisclosure.focused !== (target.name === "desktop") ||
       searchDisclosure.panelRole !== "group" ||
       searchDisclosure.panelInert ||
       (target.name === "desktop" && searchDisclosure.leadingGap < 6) ||
@@ -1866,7 +1855,7 @@ try {
       exploration.firstSeed.length !== 32 ||
       exploration.secondSeed.length !== 32 ||
       exploration.firstSeed === exploration.secondSeed ||
-      exploration.exploreMarker !== "none" ||
+      !exploration.contextualShuffle ||
       exploration.searchMarker !== "none" ||
       !homeNavigation.allImagesActive ||
       homeNavigation.searchValue !== "" ||
@@ -1882,21 +1871,16 @@ try {
       layout.brandVersion !== `v${appVersion}` ||
       layout.brandVersionSize !== 11 ||
       layout.brandRepository !== "https://github.com/eureka6/Pixhelf" ||
-      layout.sidebarBrands !== 1 ||
-      layout.topbarBrands !== 0 ||
-      layout.brandDisplayed !== (target.name === "desktop") ||
-      layout.topbarHomeButtons !== 1 ||
+      layout.sidebarBrands !== 0 ||
+      layout.topbarBrands !== 1 ||
+      !layout.brandDisplayed ||
+      layout.topbarHomeButtons !== 0 ||
       layout.leadingHomeButtons !== 0 ||
       layout.homeLabel !== "主页" ||
-      layout.homeExploreGap < 4 ||
-      layout.homeExploreGap > 8 ||
-      layout.exploreSearchGap < 4 ||
-      layout.exploreSearchGap > 8 ||
+      layout.homeSearchGap < 12 ||
       !layout.homeStatic ||
       !layout.brandLoaded ||
-      (target.name === "desktop" && (
-        layout.brandMenuGap < 8 || layout.brandMenuGap > 12
-      )) ||
+      layout.brandMenuGap < 8 || layout.brandMenuGap > 12 ||
       layout.sidebarControlSlots !== 0 ||
       layout.gallerySidebarToggles !== 1 ||
       layout.galleryToggleOpacity !== 1 ||
@@ -1906,7 +1890,7 @@ try {
       layout.sortControls !== 0 ||
       layout.topbarSearchRightGap < 0 ||
       layout.topbarSearchRightGap > 20 ||
-      layout.topbarExploreButtons !== 1 ||
+      layout.topbarExploreButtons !== 0 ||
       layout.sidebarExploreButtons !== 0 ||
       layout.sidebarStatuses !== 0 ||
       layout.sidebarGalleryMetas !== 0 ||
@@ -1925,8 +1909,8 @@ try {
       (target.name === "desktop" && (
         !desktopSidebar ||
         desktopSidebar.expanded !== "false" ||
-        desktopSidebar.brandVisibility !== "hidden" ||
-        !desktopSidebar.brandInert ||
+        desktopSidebar.brandVisibility !== "visible" ||
+        desktopSidebar.brandInert ||
         desktopSidebar.restoredBrandRight <= 0 ||
         desktopSidebar.visibility !== "visible" ||
         desktopSidebar.navigationVisibility !== "hidden" ||
@@ -1975,7 +1959,7 @@ try {
         Math.abs(mobileNavigation.fixedTop) > 1 ||
         mobileNavigation.expanded !== "true" ||
         !mobileNavigation.brandVisible ||
-        mobileNavigation.closedBrandVisible ||
+        !mobileNavigation.closedBrandVisible ||
         mobileNavigation.internalToggles !== 0 ||
         mobileNavigation.metaRows !== 0 ||
         Math.abs(mobileNavigation.layerTopGap) > 1 ||

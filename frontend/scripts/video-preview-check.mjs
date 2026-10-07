@@ -1,12 +1,11 @@
+import { serveFrontendAsset } from "./frontend-fixture.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { engine, launchBrowser, loadSample, serveMotion } from "./live-photo-fixture.mjs";
 import { closeViewer, selectFromViewer } from "./selection-gestures-check.mjs";
 
-const [html, js, css, sample] = await Promise.all([
+const [html, sample] = await Promise.all([
   readFile(new URL("../dist/index.html", import.meta.url), "utf8"),
-  readFile(new URL("../dist/assets/app.js", import.meta.url)),
-  readFile(new URL("../dist/assets/app.css", import.meta.url)),
   loadSample(),
 ]);
 const video = { duration: 3, codec: "h264", audioCodec: null, frameRate: 30, container: "mov,mp4" };
@@ -67,8 +66,7 @@ try {
     await page.route("https://pixhelf.test/**", async route => {
       const path = new URL(route.request().url()).pathname;
       if (path === "/") return route.fulfill({ contentType: "text/html", body: documentHtml });
-      if (path === "/assets/app.js") return route.fulfill({ contentType: "text/javascript", body: js });
-      if (path === "/assets/app.css") return route.fulfill({ contentType: "text/css", body: css });
+      if (path.startsWith("/assets/")) return serveFrontendAsset(route);
       if (path === "/api/gallery") return route.fulfill({ json: summary });
       if (path === "/api/status") return route.fulfill({ json: status });
       if (path === "/api/management") return route.fulfill({ json: { favoriteIds: [], favoriteAlbums: [], privateAlbums: [], trashCount: 0 } });
@@ -77,7 +75,7 @@ try {
         frameSearches++;
         return route.fulfill({ json: { ...pageData, items: images.slice(4, 16), total: 12 } });
       }
-      const image = images.find(image => path === `/api/images/${image.id}` || path.startsWith(`/api/images/${image.id}/`));
+      const image = images.find(image => path === `/api/images/${image.id}` || (path.startsWith(`/api/images/${image.id}/`) || path.startsWith(`/api/images/${image.id}.`)));
       if (image && path === `/api/images/${image.id}`) return route.fulfill({ json: image });
       if (image && path.endsWith("/similar")) return route.fulfill({ json: { ...pageData, items: images.slice(0, 3), total: 3 } });
       if (image && path.endsWith("/details")) return route.fulfill({ json: { fileSize: sample.poster.length, modifiedMs: 0, exif: [], histogram: null, ...(image.video ? { video } : {}) } });
@@ -91,7 +89,7 @@ try {
         if (image.id === "preview-3") return route.fulfill({ contentType: "video/mp4", body: "damaged video" });
         return serveMotion(route, sample);
       }
-      if (image && (path.endsWith("/thumbnail") || path.endsWith("/original"))) return route.fulfill({ contentType: "image/jpeg", body: sample.poster });
+      if (image && (path.endsWith("/thumbnail") || /^\/api\/images\/[^/]+\.[a-z0-9]+$/.test(path))) return route.fulfill({ contentType: "image/jpeg", body: sample.poster });
       return route.fulfill({ status: 404, json: {} });
     });
     const card = id => page.locator(`.image-card[data-image-id="preview-${id}"]`);

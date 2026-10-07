@@ -1,4 +1,5 @@
 mod albums;
+pub(crate) mod categories;
 mod directories;
 mod download;
 mod files;
@@ -45,6 +46,7 @@ pub(crate) fn router(app: AppState) -> Router {
         .route("/api/management/favorites", get(favorites))
         .route("/api/management/trash", get(trash))
         .route("/api/management/batch", post(batch))
+        .route("/api/management/categories", post(categories::save))
         .route(
             "/api/management/directories",
             get(directories::list).post(directories::update),
@@ -65,7 +67,7 @@ pub(crate) fn router(app: AppState) -> Router {
         }))
 }
 
-struct Failure(anyhow::Error);
+pub(crate) struct Failure(anyhow::Error);
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
         Self(error)

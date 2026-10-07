@@ -86,7 +86,7 @@ try {
     };
   ` }, bundle: true, write: false, format: "esm", target: "es2022", jsx: "automatic", jsxImportSource: "preact",
     define: { "import.meta.env.DEV": "true" } });
-  const css = (await Promise.all(["styles.css", "video.css"].map(name => readFile(new URL(`../src/${name}`, import.meta.url), "utf8")))).join("\n");
+  const css = (await Promise.all(["base.css", "styles.css", "video.css"].map(name => readFile(new URL(`../src/${name}`, import.meta.url), "utf8")))).join("\n");
   browser = await launchBrowser();
   const results = [], errors = [];
   for (const viewportWidth of [1280, 390]) {

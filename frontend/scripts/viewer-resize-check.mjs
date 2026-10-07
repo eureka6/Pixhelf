@@ -23,7 +23,7 @@ try {
   let resizeRequested;
   const requestStarted = new Promise((resolve) => { resizeRequested = resolve; });
   const resizeGate = new Promise((resolve) => { releaseResize = resolve; });
-  await page.route(/\/api\/images\/[^/]+\/original(?:\?|$)/, async (route) => {
+  await page.route(/\/api\/images\/[^/]+\.[a-z0-9]+(?:\?|$)/, async (route) => {
     if (new URL(route.request().url()).pathname === activeOriginal) {
       activeRequests += 1;
       if (delayResize) {

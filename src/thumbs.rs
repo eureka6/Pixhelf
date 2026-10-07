@@ -104,6 +104,24 @@ pub struct ThumbnailStatus {
     pub videos: crate::video_jobs::VideoStatus,
 }
 
+impl ThumbnailStatus {
+    /// The first reconciliation may hold media locks while checking disk caches.
+    /// Startup pages must remain responsive without reading those partial entries.
+    pub fn pending() -> Self {
+        Self {
+            total: 0,
+            ready: 0,
+            queued: 0,
+            processing: 0,
+            failed: 0,
+            initial_batch_ready: false,
+            background_complete: false,
+            text_search: TextSearchStatus::disabled(),
+            videos: crate::video_jobs::VideoStatus::default(),
+        }
+    }
+}
+
 impl ThumbnailManager {
     pub(crate) fn settings_directory(&self) -> PathBuf {
         self.cache_root
@@ -124,17 +142,6 @@ impl ThumbnailManager {
         let cache_root = cache_dir.join(CACHE_VERSION);
         fs::create_dir_all(&cache_root)
             .with_context(|| format!("cannot create thumbnail cache: {}", cache_root.display()))?;
-        let legacy_viewer_cache = cache_dir.join(LEGACY_VIEWER_CACHE_VERSION);
-        if legacy_viewer_cache.is_dir()
-            && let Err(error) = fs::remove_dir_all(&legacy_viewer_cache)
-        {
-            warn!(
-                path = %legacy_viewer_cache.display(),
-                %error,
-                "无法清理旧版查看器缓存"
-            );
-        }
-        purge_temporary_files(&cache_root);
         Ok(Arc::new(Self {
             videos: crate::video_jobs::VideoManager::new(&cache_dir)?,
             cache_root,
@@ -144,6 +151,22 @@ impl ThumbnailManager {
             similarity_warmup_running: AtomicBool::new(false),
             text_search: RwLock::new(text_search),
         }))
+    }
+
+    /// Run once in the background, before starting any media workers.
+    pub fn cleanup_startup(&self) {
+        let legacy = self
+            .cache_root
+            .parent()
+            .unwrap()
+            .join(LEGACY_VIEWER_CACHE_VERSION);
+        if legacy.is_dir()
+            && let Err(error) = fs::remove_dir_all(&legacy)
+        {
+            warn!(path = %legacy.display(), %error, "无法清理旧版查看器缓存");
+        }
+        purge_temporary_files(&self.cache_root);
+        self.videos.cleanup_startup();
     }
 
     fn text_search(&self) -> Option<Arc<TextSearchIndex>> {
@@ -805,6 +828,8 @@ mod tests {
         let manager = ThumbnailManager::new(temp.path().to_path_buf()).unwrap();
 
         assert!(manager.cache_root.is_dir());
+        assert!(legacy.exists());
+        manager.cleanup_startup();
         assert!(!legacy.exists());
     }
 

@@ -1,5 +1,6 @@
 mod assets;
 mod auth;
+mod background;
 mod config;
 mod gallery;
 mod heif;
@@ -16,18 +17,15 @@ mod video;
 mod video_jobs;
 mod web;
 
-use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{process::ExitCode, sync::Arc};
 
 use anyhow::{Context, Result};
-use config::{Config, TextSearchFiles, TextSearchSource};
-use gallery::{GalleryIndex, scan_gallery};
-use text_search::TextSearchIndex;
+use config::Config;
+use gallery::GalleryIndex;
 use thumbs::ThumbnailManager;
 use tokio::{net::TcpListener, sync::RwLock};
 use tracing::{error, info, warn};
 use web::AppState;
-
-const AUTOMATIC_MODEL_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -59,40 +57,14 @@ async fn run() -> Result<()> {
         .await
         .with_context(|| format!("cannot listen on {}", config.listen))?;
     info!(version = env!("CARGO_PKG_VERSION"), "启动 Pixhelf");
-    info!(path = %config.gallery_dir.display(), "扫描图库");
-    let index = scan_gallery_async(config.gallery_dir.clone(), None).await?;
-    if index.images.is_empty() {
-        warn!(
-            gallery = %config.gallery_dir.display(),
-            "图库为空，添加 JPEG、PNG、WebP 图片或视频后会自动更新"
-        );
-    }
-    info!(
-        images = index.images.len(),
-        albums = index.albums.len(),
-        "图库扫描完成"
-    );
-
-    let initial_ids: Vec<String> = index
-        .images
-        .iter()
-        .take(config.initial_batch)
-        .map(|record| record.id.clone())
-        .collect();
-    let index = Arc::new(RwLock::new(Arc::new(index)));
-    let (text_search, automatic_text_search) = match config.text_search.as_ref() {
-        Some(TextSearchSource::Local(files)) => (load_text_search(files), None),
-        Some(TextSearchSource::AutoDownload(files)) => (None, Some(files.clone())),
-        None => (None, None),
+    let thumbnails = ThumbnailManager::new_with_text_search(config.cache_dir.clone(), None)?;
+    let state = AppState {
+        index: Arc::new(RwLock::new(Arc::new(GalleryIndex::pending(
+            config.gallery_dir.clone(),
+        )))),
+        thumbnails: Arc::clone(&thumbnails),
     };
-    let thumbnails = ThumbnailManager::new_with_text_search(
-        config.cache_dir.clone(),
-        text_search.as_ref().map(Arc::clone),
-    )?;
-    {
-        let current = index.read().await;
-        thumbnails.reconcile(&current.images);
-    }
+    let application = web::router(state.clone(), config.auth.clone());
     info!(listen = %listener.local_addr()?, "服务已就绪");
     if config.auth.setup.is_some() {
         info!("首次使用：打开网页，创建管理员账号即可进入图库");
@@ -102,140 +74,22 @@ async fn run() -> Result<()> {
         warn!("内置登录已关闭，请通过带认证的反向代理保护图库");
     }
 
-    // Keep the startup and setup messages together, before background workers can log.
-    thumbnails.start_workers(config.workers);
-    if let Some(text_search) = text_search {
-        text_search.start_worker();
-    }
-    thumbnails.start_similarity_warmup();
-    let initial_thumbnail_manager = Arc::clone(&thumbnails);
-    tokio::spawn(async move {
-        initial_thumbnail_manager
-            .prepare_initial(&initial_ids)
-            .await;
-    });
-
-    let state = AppState {
-        index: Arc::clone(&index),
-        thumbnails: Arc::clone(&thumbnails),
-    };
-    let cleanup_manager = Arc::clone(&thumbnails);
-    tokio::spawn(async move {
-        cleanup_manager.cleanup_stale().await;
-    });
-    tokio::spawn(rescan_gallery(state.clone(), config.clone()));
-
-    if let Some(files) = automatic_text_search {
-        start_automatic_text_search(Arc::clone(&thumbnails), files);
-    }
+    info!(path = %config.gallery_dir.display(), "后台扫描图库");
+    let background = tokio::spawn(background::run(state, config));
 
     let shutdown_videos = Arc::clone(&thumbnails.videos);
     axum::serve(
         listener,
-        web::router(state, config.auth)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        application.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
         shutdown_videos.shutdown();
     })
     .await?;
+    background.abort();
     info!("Pixhelf 已停止");
     Ok(())
-}
-
-fn load_text_search(files: &TextSearchFiles) -> Option<Arc<TextSearchIndex>> {
-    match TextSearchIndex::load(&files.model, &files.vocabulary) {
-        Ok(index) => {
-            info!("文字搜图已启用，模型将按需加载");
-            Some(index)
-        }
-        Err(error) => {
-            warn!(
-                model = %files.model.display(),
-                vocabulary = %files.vocabulary.display(),
-                %error,
-                "文字搜图模型不可用，继续使用文件名搜索"
-            );
-            None
-        }
-    }
-}
-
-fn start_automatic_text_search(thumbnails: Arc<ThumbnailManager>, files: TextSearchFiles) {
-    tokio::spawn(async move {
-        loop {
-            match prepare_automatic_text_search(&files).await {
-                Ok(index) => {
-                    if thumbnails.enable_text_search(index) {
-                        info!("文字搜图已启用，模型将按需加载");
-                    }
-                    return;
-                }
-                Err(error) => {
-                    warn!(
-                        retry_seconds = AUTOMATIC_MODEL_RETRY_INTERVAL.as_secs(),
-                        error = %format!("{error:#}"),
-                        "文字搜图模型准备失败，稍后自动重试；文件名搜索仍可用"
-                    );
-                    tokio::time::sleep(AUTOMATIC_MODEL_RETRY_INTERVAL).await;
-                }
-            }
-        }
-    });
-}
-
-async fn prepare_automatic_text_search(files: &TextSearchFiles) -> Result<Arc<TextSearchIndex>> {
-    text_search::ensure_automatic_model(files).await?;
-    let model = files.model.clone();
-    let vocabulary = files.vocabulary.clone();
-    tokio::task::spawn_blocking(move || TextSearchIndex::load(&model, &vocabulary))
-        .await
-        .context("natural-language search setup task stopped")?
-}
-
-async fn rescan_gallery(state: AppState, config: Config) {
-    loop {
-        tokio::time::sleep(config.scan_interval).await;
-        let previous = {
-            let index = state.index.read().await;
-            Arc::clone(&index)
-        };
-        let old_count = previous.images.len();
-        let root = config.gallery_dir.clone();
-        let updated = match scan_gallery_async(root, Some(Arc::clone(&previous))).await {
-            Ok(updated) => updated,
-            Err(error) => {
-                error!(%error, "图库刷新失败，保留上一次索引");
-                continue;
-            }
-        };
-        if previous.revision == updated.revision {
-            continue;
-        }
-
-        let new_count = updated.images.len();
-        let mut current = state.index.write().await;
-        // A management operation may have replaced the index during this scan.
-        if !Arc::ptr_eq(&previous, &current) {
-            continue;
-        }
-        state.thumbnails.reconcile(&updated.images);
-        state.thumbnails.start_similarity_warmup();
-        *current = Arc::new(updated);
-        drop(current);
-        state.thumbnails.cleanup_stale().await;
-        info!(previous = old_count, images = new_count, "图库已更新");
-    }
-}
-
-async fn scan_gallery_async(
-    root: PathBuf,
-    previous: Option<Arc<GalleryIndex>>,
-) -> Result<GalleryIndex> {
-    tokio::task::spawn_blocking(move || scan_gallery(&root, previous.as_deref()))
-        .await
-        .context("gallery scan task stopped")?
 }
 
 async fn shutdown_signal() {

@@ -68,13 +68,99 @@ async function waitCount(page, selector, count) {
   await page.waitForFunction(({ selector, count }) => document.querySelectorAll(selector).length === count, { selector, count });
 }
 async function openAlbum(page, path) {
-  await card(page, path).locator(".album-card-open").click();
+  const link = card(page, path).locator(".album-card-open");
+  if (page.viewportSize().width <= 720) await link.tap();
+  else await link.click();
   await page.waitForURL(url => url.searchParams.get("album") === path);
   await page.waitForFunction(() => document.querySelector(".content").getAttribute("aria-busy") === "false");
   assert.equal(await page.locator(".album-children").count(), 0);
   await page.getByRole("link", { name: "返回相册", exact: true }).waitFor();
 }
 async function catalog(page) { await navigate(page, "相册"); }
+
+async function checkAlbumMotion(page, width) {
+  if (width <= 720) await page.setViewportSize({ width, height: 600 });
+  const album = card(page, '旅行/山野');
+  assert.equal(await album.locator('.album-cover-sheet').count(), 3);
+  assert.equal(await card(page, '旅行').locator('.album-cover-sheet').count(), 1, 'single-image albums should not have fake preview layers');
+  const before = await album.boundingBox();
+  const positions = await page.locator('.album-card').evaluateAll(cards => cards.map(card => card.getBoundingClientRect().toJSON()));
+  const transforms = () => album.locator('.album-cover-sheet').evaluateAll(layers => layers.map(layer => {
+    const transform = getComputedStyle(layer).transform;
+    return [...new DOMMatrixReadOnly(transform === 'none' ? undefined : transform).toFloat64Array()];
+  }));
+  const folded = await transforms();
+  if (width > 720) {
+    await album.locator('.album-card-open').hover();
+    await page.waitForTimeout(300);
+    assert.notDeepEqual(await transforms(), folded, 'hover does not open the album stack');
+    assert.deepEqual(await album.boundingBox(), before, 'the animated album changed its layout');
+    assert.deepEqual(await page.locator('.album-card').evaluateAll(cards => cards.map(card => card.getBoundingClientRect().toJSON())), positions, 'the fan animation moved neighbouring cards');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: join(tmpdir(), `pixhelf-album-fan-${width}.png`) });
+    for (let index = 0; index < 4; index++) {
+      await page.mouse.move(0, 0); await page.waitForTimeout(45);
+      await album.locator('.album-card-open').hover(); await page.waitForTimeout(45);
+    }
+    await page.mouse.move(0, 0); await page.waitForTimeout(300);
+    assert.deepEqual(await transforms(), folded, 'interrupted album animations did not return to the folded state');
+    await page.keyboard.press('Tab');
+    await album.locator('.album-card-open').focus();
+    await page.waitForTimeout(300);
+    assert.notDeepEqual(await transforms(), folded, 'keyboard focus does not preview the album');
+    await album.locator('.album-card-open').evaluate(link => link.blur());
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await album.locator('.album-card-open').hover();
+    assert(await album.locator('.album-cover-sheet').evaluateAll(layers => layers.every(layer => Number.parseFloat(getComputedStyle(layer).transitionDuration) <= .001)), 'reduced motion still animates the album');
+    await page.mouse.move(0, 0);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    for (const viewport of [1000, 721, 320, width]) {
+      await page.setViewportSize({ width: viewport, height: 844 });
+      for (const path of ['收藏/同名', '旅行/山野', '旅行/海边']) {
+        await card(page, path).locator('.album-card-open').hover();
+        await page.waitForTimeout(280);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${viewport}px album previews overflow the screen`);
+      }
+    }
+    await page.mouse.move(0, 0);
+  } else {
+    const cdp = await page.context().newCDPSession(page);
+    const cover = await album.locator('.album-cover').boundingBox();
+    const point = { x: cover.x + cover.width / 2, y: cover.y + cover.height / 2 };
+    const touch = (type, point) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: point ? [{ id: 1, ...point }] : [] });
+    await touch('touchStart', point);
+    assert.equal(await album.getAttribute('data-card-active'), 'true', 'touch contact must preview before any click');
+    // A brush cancels the management hold and keeps native page gestures available.
+    await touch('touchMove', { x: point.x + 14, y: point.y });
+    await page.waitForTimeout(280);
+    assert.notDeepEqual(await transforms(), folded, 'the mobile album stack did not animate');
+    assert.equal(new URL(page.url()).searchParams.get('album'), null, 'touch contact entered the album');
+    assert.deepEqual(await album.boundingBox(), before, 'the preview moved its tap target');
+    assert.deepEqual(await page.locator('.album-card').evaluateAll(cards => cards.map(card => card.getBoundingClientRect().toJSON())), positions);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.equal(await album.locator('.album-select').evaluate(element => Number(getComputedStyle(element).opacity)), 1, 'the preview must share the selection ball feedback');
+    await page.screenshot({ path: join(tmpdir(), `pixhelf-album-fan-${width}.png`) });
+    const other = card(page, '旅行/海边');
+    const neighbor = await other.locator('.album-cover').boundingBox();
+    await touch('touchMove', { x: neighbor.x + neighbor.width / 2, y: neighbor.y + neighbor.height / 2 });
+    await page.waitForTimeout(280);
+    assert.equal(await other.getAttribute('data-card-active'), 'true', 'brushing another card did not transfer the preview');
+    assert.equal(await page.locator('.album-card[data-card-active="true"]').count(), 1);
+    assert.deepEqual(await transforms(), folded, 'leaving an album must fold its preview');
+    await touch('touchEnd');
+    await cdp.detach();
+    assert.equal(new URL(page.url()).searchParams.get('album'), null, 'brushing cards must not navigate');
+    const scroll = await page.evaluate(() => scrollY);
+    await page.mouse.wheel(0, 120); await page.waitForTimeout(250);
+    assert((await page.evaluate(() => scrollY)) > scroll, 'previews must not block page scrolling');
+    await page.evaluate(() => scrollTo(0, 0));
+    await openAlbum(page, '旅行/山野');
+    await page.getByRole('link', { name: '返回相册', exact: true }).tap();
+    await page.locator('.albums-grid').waitFor();
+    await page.setViewportSize({ width, height: 844 });
+  }
+  console.log(JSON.stringify({ width, realAlbumPreviews: true, stableFanAnimation: true, reducedMotion: width > 720 }));
+}
 
 try {
   const fixtures = new Map([["", 4], ["旅行", 1], ["旅行/山野", 65], ["旅行/海边", 3], ["旅行集", 1], ["日常", 3], ["项目 & 2026/同名", 2], ["收藏/同名", 2], ["空相册", 0]]);
@@ -103,10 +189,15 @@ try {
   assert.equal(summary.total, imageIndex);
   assert.equal(summary.albums.length, 7);
   assert.equal(summary.albums.find(album => album.path === "旅行").count, 1);
+  for (const album of summary.albums) {
+    assert.equal(album.previews.length, Math.min(3, album.count));
+    assert.equal(album.previews[0], album.cover);
+    assert.equal(new Set(album.previews).size, album.previews.length);
+  }
   assert(!summary.albums.some(album => ["项目 & 2026", "收藏", "空相册"].includes(album.path)));
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ?? "/root/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 
-  for (const width of [1440, 390, 320]) {
+  for (const width of process.argv.includes("--mobile") ? [390, 320] : [1440, 390, 320]) {
     const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: width <= 720 });
     const errors = [], imageRequests = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -118,13 +209,14 @@ try {
     await page.locator(".image-card").nth(24).waitFor();
     assert.equal(await page.locator(".album-heading").count(), 0, "library no longer starts with the waterfall");
     await navigate(page, "相册");
-    const requestsBeforeCatalog = imageRequests.length;
     await waitCount(page, ".album-card", 7);
     assert.equal(await page.locator(".image-card").count(), 0);
     assert.deepEqual(await page.locator(".album-path > span").allTextContents(), summary.albums.map(album => album.path));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.waitForFunction(() => [...document.querySelectorAll(".album-cover img")].filter(img => img.getBoundingClientRect().top < innerHeight).every(img => img.complete && img.naturalWidth > 0));
     await page.screenshot({ path: join(tmpdir(), `pixhelf-albums-${width}.png`), fullPage: true });
+    await checkAlbumMotion(page, width);
+    const requestsBeforeCatalog = imageRequests.length;
 
     await page.locator(".search-toggle").click();
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("同名");
@@ -179,11 +271,16 @@ try {
     await page.locator(".viewer-return-layer").waitFor({ state: "detached" });
     for (let round = 0; round < 2; round++) {
       const request = page.waitForRequest(request => { const url = new URL(request.url()); return url.pathname === "/api/images" && url.searchParams.get("sort") === "explore"; });
-      await page.locator(".explore-toggle").click();
+      if (round === 0) {
+        await page.locator('.search-toggle').click();
+        await page.getByRole('button', { name: '展开筛选', exact: true }).click();
+        await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
+        await page.keyboard.press('Escape');
+      } else await page.getByRole('button', { name: '换一组', exact: true }).click();
       const query = new URL((await request).url()).searchParams;
       assert.equal(query.get("album"), "旅行/山野", "exploration stays inside the open album");
       assert.equal(new URL(page.url()).searchParams.get("album"), "旅行/山野");
-      await page.waitForFunction(() => document.querySelector(".explore-toggle").getAttribute("aria-busy") === "false");
+      await page.waitForFunction(() => document.querySelector(".gallery-reshuffle").getAttribute("aria-busy") === "false");
       const ids = await page.locator(".image-card").evaluateAll(cards => cards.map(card => card.dataset.imageId));
       assert(ids.length > 0 && ids.every(id => expected.items.some(image => image.id === id)));
     }
@@ -218,10 +315,24 @@ try {
       assert.equal(new URL(page.url()).searchParams.get("album"), null);
     }
     await navigate(page, "相册");
-    await page.locator(".topbar .explore-toggle").click();
+    assert.equal(await page.locator('.topbar .explore-toggle').count(), 0);
+    await page.locator('.topbar .brand').click();
+    await page.locator('.search-toggle').click();
+    await page.getByRole('button', { name: '展开筛选', exact: true }).click();
+    await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
+    await page.keyboard.press('Escape');
     await page.locator(".image-card").nth(24).waitFor();
     assert.equal(new URL(page.url()).search, "");
-    assert.equal(await page.locator(".topbar .explore-toggle").getAttribute("aria-pressed"), "true");
+    assert(await page.getByRole('button', { name: '换一组', exact: true }).isVisible());
+    if (width === 1440) {
+      const preview = summary.albums.find(album => album.path === '旅行/山野').previews[1];
+      await page.route(`**/api/images/${preview}/thumbnail`, route => route.fulfill({ status: 404, body: '' }));
+      await catalog(page);
+      await page.reload();
+      await waitCount(page, '.album-card[data-album-path="旅行/山野"] .album-cover-sheet', 2);
+      assert.equal(await page.locator('.album-card').count(), 7, 'a broken preview removed its album');
+      await page.unroute(`**/api/images/${preview}/thumbnail`);
+    }
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ width, albums: 7, pathsAndCovers: true, emptyAndNestedAlbums: true, localSearch: true, pagination: true, albumExploration: true, viewerHistory: true, liveDirectories: width === 1440 }));
     await page.close();

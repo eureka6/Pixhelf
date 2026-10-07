@@ -36,6 +36,10 @@ export function ChevronLeft(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" /></Icon>;
 }
 
+export function SlidersHorizontal(props: IconProps) {
+  return <Icon {...props}><path d="M21 4h-7M10 4H3m18 8h-9m-4 0H3m18 8h-3m-4 0H3M14 2v4M8 10v4m10 4v4" /></Icon>;
+}
+
 export function Play(props: IconProps) {
   return <Icon {...props}><path d="m8 5 11 7-11 7V5Z" /></Icon>;
 }
@@ -92,17 +96,6 @@ export function ChevronDown(props: IconProps) {
   return <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
 }
 
-export function Dices(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <rect width="12" height="12" x="2" y="10" rx="2" ry="2" />
-      <path d="m17.92 14 3.5-3.5a2.24 2.24 0 0 0 0-3l-5-4.92a2.24 2.24 0 0 0-3 0L10 6" />
-      <path d="M6 18h.01" /><path d="M10 14h.01" />
-      <path d="M15 6h.01" /><path d="M18 9h.01" />
-    </Icon>
-  );
-}
-
 export function Download(props: IconProps) {
   return (
     <Icon {...props}>
@@ -151,15 +144,6 @@ export function Trash2(props: IconProps) {
 
 export function RotateCcw(props: IconProps) {
   return <Icon {...props}><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" /></Icon>;
-}
-
-export function House(props: IconProps) {
-  return (
-    <Icon {...props}>
-      <path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8" />
-      <path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-    </Icon>
-  );
 }
 
 export function ImageIcon(props: IconProps) {

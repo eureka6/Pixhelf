@@ -14,6 +14,7 @@
     "management-check": "node scripts/management-check.mjs",
     "image-search-check": "node scripts/image-search-check.mjs",
     "auth-check": "node scripts/auth-check.mjs",
+    "startup-check": "node scripts/startup-check.mjs",
     "video-check": "node scripts/video-check.mjs",
     "video-preview-check": "node scripts/video-preview-check.mjs",
     "libmedia-formats-check": "node scripts/libmedia-formats-check.mjs",
@@ -36,7 +37,9 @@
     "local-storage-check": "node scripts/local-storage-check.mjs",
     "live-photo-quality-check": "node scripts/live-photo-quality-check.mjs",
     "media-source-check": "node scripts/media-source-check.mjs",
-    "live-photo-orientation-check": "node scripts/live-photo-orientation-check.mjs"
+    "live-photo-orientation-check": "node scripts/live-photo-orientation-check.mjs",
+    "ui-stress-check": "node scripts/ui-stress-check.mjs",
+    "image-filters-check": "node scripts/image-filters-check.mjs"
   },
   "dependencies": {
     "@libmedia/avplayer": "1.3.1",
