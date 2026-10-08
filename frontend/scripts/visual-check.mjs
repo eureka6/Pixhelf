@@ -1839,7 +1839,7 @@ try {
       returnRestoration.anchorDelta > 2 ||
       returnRestoration.returning !== "false" ||
       searchDisclosure.expanded !== "true" ||
-      searchDisclosure.focused !== (target.name === "desktop") ||
+      searchDisclosure.focused !== false ||
       searchDisclosure.panelRole !== "group" ||
       searchDisclosure.panelInert ||
       (target.name === "desktop" && searchDisclosure.leadingGap < 6) ||

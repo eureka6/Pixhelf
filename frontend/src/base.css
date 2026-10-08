@@ -18,6 +18,8 @@
   --border: #dce2df;
   --accent: #24786f;
   --accent-soft: #e2efec;
+  --focus-border: #87918c;
+  --focus-ring: #737e78;
   --motion-fast: 140ms;
   --motion-medium: 220ms;
   --motion-slow: 360ms;
@@ -64,11 +66,16 @@ button {
 
 button:focus-visible,
 a:focus-visible,
-input:focus-visible,
-select:focus-visible,
+input:is([type="checkbox"], [type="radio"], [type="range"]):focus-visible,
 .image-card:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+:is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, select):focus {
+  outline: none;
+  border-color: var(--focus-border);
+  box-shadow: none;
 }
 
 @keyframes feedback-in {

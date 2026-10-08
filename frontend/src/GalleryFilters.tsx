@@ -2,7 +2,7 @@ import { contentCategory } from "./contentCategories";
 import type { ContentCategory, ImageFilters } from "./types";
 
 export const DEFAULT_IMAGE_FILTERS: ImageFilters = { kind: "all", orientation: "all", sort: "default" };
-const KINDS = [["all", "全部类型"], ["photo", "普通图片"], ["live", "实况照片"], ["video", "视频"]] as const;
+const KINDS = [["all", "全部类型"], ["photo", "普通图片"], ["live", "实况与动图"], ["video", "视频"]] as const;
 const ORIENTATIONS = [["all", "全部画幅"], ["landscape", "横图"], ["portrait", "竖图"], ["square", "方图"]] as const;
 const SORTS = [["default", "默认排序"], ["name-asc", "文件名 A → Z"], ["name-desc", "文件名 Z → A"], ["newest", "最近修改"], ["oldest", "最早修改"], ["explore", "随机浏览"]] as const;
 export function imageFilterLabels(filters: ImageFilters, search = "", categories: ContentCategory[] = []): string[] {

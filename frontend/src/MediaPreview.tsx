@@ -6,6 +6,7 @@ import { NativeMediaPlayer } from "./nativeMediaPlayer";
 import { LivePhotoPlayer } from "./livePhotoPlayer";
 import type { GalleryImage } from "./types";
 import { viewerOriginalUrl } from "./viewerAssets";
+import { isAnimatedImage } from "./mediaUrls";
 
 type PlaybackInput = "mouse" | "touch" | "keyboard" | "viewer";
 export const MEDIA_PREVIEW_PLAY_EVENT = "pixhelf:media-preview-play";
@@ -15,13 +16,39 @@ export function stopMediaPreview(): void { stopActivePlayback?.(); }
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopMediaPreview(); });
 window.addEventListener("pagehide", stopMediaPreview);
 
+function animatedPreview(host: HTMLElement, source: string, callbacks: PlayerCallbacks) {
+  const image = new Image();
+  let timeout = 0;
+  image.className = "animated-preview-image";
+  image.alt = "";
+  image.decoding = "async";
+  image.draggable = false;
+  image.onload = () => { window.clearTimeout(timeout); callbacks.state?.("playing"); callbacks.frame?.(); };
+  image.onerror = () => callbacks.error?.(new Error("动图加载失败"));
+  host.append(image);
+  return {
+    play() {
+      if (image.hasAttribute("src")) return;
+      timeout = window.setTimeout(() => callbacks.error?.(new Error("动图加载超时")), 15_000);
+      image.src = source;
+    },
+    destroy() {
+      window.clearTimeout(timeout);
+      image.onload = image.onerror = null;
+      image.removeAttribute("src");
+      image.remove();
+    },
+  };
+}
+
 export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false }: {
   image: GalleryImage; autoPlay?: boolean;
 }) {
   const isVideo = Boolean(image.video);
+  const animated = isAnimatedImage(image);
   // Live Photos own their original playback; only ordinary videos use prepared previews.
   const preview = isVideo ? image.preview : undefined;
-  const source = preview ?? (isVideo ? viewerOriginalUrl(image) : image.motion);
+  const source = preview ?? (isVideo || animated ? viewerOriginalUrl(image) : image.motion);
   const layerRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
 
@@ -79,11 +106,12 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
           if (!current()) return;
           failed = true;
           layer.dataset.failed = "true";
-          layer.title = isVideo ? "暂时无法预览此视频，可打开播放器或下载原视频" : "暂时无法播放此 live，仍可查看照片";
+          layer.title = isVideo ? "暂时无法预览此视频，可打开播放器或下载原视频" : "暂时无法预览动态，可打开图片重试";
           stop();
         },
       };
-      player = !isVideo ? new LivePhotoPlayer(viewport, source, callbacks, autoPlay)
+      player = animated ? animatedPreview(viewport, source, callbacks)
+        : !isVideo ? new LivePhotoPlayer(viewport, source, callbacks, autoPlay)
         : preview ? new NativeMediaPlayer(viewport, source, image.name, true, callbacks, true)
         : new MediaPlayer(viewport, source, image.name, true, callbacks, true);
       player.play();
@@ -124,11 +152,11 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     }
     card.addEventListener(CARD_MENU_EVENT, stop, options);
     return () => { listeners.abort(); viewerVisibility?.disconnect(); stop(); };
-  }, [image.id, preview, source, image.name, autoPlay, isVideo]);
+  }, [image.id, preview, source, image.name, autoPlay, isVideo, animated]);
 
   if (!source) return null;
   return (
-    <div ref={layerRef} className={`media-preview${isVideo ? " video-preview" : ""}`} data-playing="false" data-loading="false" title={isVideo ? "视频预览" : "live 照片"}>
+    <div ref={layerRef} className={`media-preview${isVideo ? " video-preview" : ""}`} data-playing="false" data-loading="false" title={isVideo ? "视频预览" : animated ? "GIF 动图" : "live 照片"}>
       <div className="media-preview-viewport" aria-hidden="true"><div ref={viewportRef} className="media-preview-player" /></div>
       {!isVideo && <span className="live-photo-badge" aria-hidden="true">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">

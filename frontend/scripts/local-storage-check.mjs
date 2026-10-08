@@ -62,9 +62,9 @@ try {
         return reply(imagePage(items, Number(url.searchParams.get("offset") ?? 0)));
       }
       if (path.startsWith("/api/images/")) {
-        const parts = path.split("/"), image = visiblePhotos().find(image => image.id === parts[3]);
+        const parts = path.split("/"), image = visiblePhotos().find(image => image.id === parts[3].split(".")[0]);
         if (!image) return reply({}, 404);
-        if (parts[4] === "thumbnail" || parts[4] === "original") return route.fulfill({ contentType: "image/jpeg", body: photo });
+        if (parts[4] === "thumbnail" || parts[4] === "original" || path.endsWith(".jpg")) return route.fulfill({ contentType: "image/jpeg", body: photo });
         if (parts[4] === "similar") return reply(imagePage([]));
         return reply(image);
       }
@@ -194,6 +194,10 @@ try {
     await page.waitForTimeout(120);
     assert.equal(await page.evaluate(() => scrollY), scrollBefore, "tree boundary does not scroll page");
     await dialog.getByRole("searchbox", { name: "查找目录" }).fill("空目录");
+    assert.deepEqual(await dialog.getByRole('searchbox', { name: '查找目录' }).evaluate(input => {
+      const style = getComputedStyle(input), field = getComputedStyle(input.parentElement);
+      return [style.outlineStyle, style.boxShadow, field.boxShadow];
+    }), ['none', 'none', 'none'], 'directory search has no nested focus frame or glow');
     await treeRow("空目录", dialog).waitFor();
     await act(treeRow("空目录", dialog));
     await noOverflow();
@@ -205,7 +209,7 @@ try {
     assert.equal(new URL(page.url()).searchParams.get("path"), "旅行/城市/夜景");
     await noOverflow();
     await page.screenshot({ path: join(output, `local-${width}.png`) });
-    const beforeSingleReads = calls.filter(call => /^\/api\/images\/[^/]+$/.test(call.path)).length;
+    const beforeSingleReads = calls.filter(call => /^\/api\/images\/[a-f0-9]{32}$/.test(call.path)).length;
     await act(page.locator(".local-entry-open").first());
     const viewer = page.locator(".image-viewer");
     await viewer.waitFor();
@@ -216,7 +220,7 @@ try {
     await page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.imageName === "photo-101.jpg");
     await act(page.getByRole("button", { name: "上一张图片", exact: true }));
     await page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.imageName === "photo-100.jpg");
-    assert.equal(calls.filter(call => /^\/api\/images\/[^/]+$/.test(call.path)).length, beforeSingleReads, "directory listing supplies viewer metadata without one request per image");
+    assert.equal(calls.filter(call => /^\/api\/images\/[a-f0-9]{32}$/.test(call.path)).length, beforeSingleReads, "directory listing supplies viewer metadata without one request per image");
     assert(calls.some(call => call.path === "/api/management/directories" && call.query.offset === "4"), "viewer skips a page containing only documents");
     await act(page.getByRole("button", { name: "关闭查看器", exact: true }));
     await viewer.waitFor({ state: "detached" });
@@ -227,7 +231,7 @@ try {
     assert.equal(await page.getByRole("menuitem", { name: "移动到", exact: true }).count(), 1);
     await act(page.getByRole("menuitem", { name: "复制到", exact: true }));
     await treeRow("目标", dialog).waitFor();
-    assert.equal(calls.filter(call => /^\/api\/images\/[^/]+$/.test(call.path)).length, beforeSingleReads, "file actions reuse the directory's image metadata");
+    assert.equal(calls.filter(call => /^\/api\/images\/[a-f0-9]{32}$/.test(call.path)).length, beforeSingleReads, "file actions reuse the directory's image metadata");
     await act(dialog.getByRole("button", { name: "取消", exact: true }));
     await page.locator(".local-directory-footer").click({ button: "right", position: { x: 5, y: 5 } });
     await page.getByRole("menu", { name: "目录管理" }).waitFor();

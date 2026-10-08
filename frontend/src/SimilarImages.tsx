@@ -6,6 +6,7 @@ import { ImageIcon, LoaderCircle } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
 import { SelectionMenu, type MenuPoint, type SelectionActions } from "./SelectionMenu";
 import { MediaPreview } from "./MediaPreview";
+import { isLiveImage } from "./mediaUrls";
 import { VideoBadge } from "./VideoBadge";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
 import type { GalleryMetrics } from "./galleryMetrics";
@@ -77,9 +78,9 @@ const SimilarImageCard = memo(function SimilarImageCard({
           <ImageIcon size={24} />
         </span>
       )}
-      {loaded && (image.motion || image.video) && <MediaPreview image={image} />}
+      {loaded && (isLiveImage(image) || image.video) && <MediaPreview image={image} />}
       {image.video && <VideoBadge video={image.video} />}
-      <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放相似视频" : "查看相似图片"} ${image.name}${image.motion ? "，live 照片" : ""}`} aria-haspopup="dialog" />
+      <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放相似视频" : "查看相似图片"} ${image.name}${isLiveImage(image) ? "，live 动态" : ""}`} aria-haspopup="dialog" />
       <ImageCardActions image={image} selected={selectedIds?.has(image.id)} onAction={handleAction} onSelect={onSelect ? () => onSelect(image) : undefined} selectionDisabled={selectionActions?.disabled} selectionActions={selectionActions} />
     </figure>
   );

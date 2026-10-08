@@ -28,6 +28,7 @@
     "viewer-interaction-check": "node scripts/viewer-interaction-check.mjs",
     "viewer-keyboard-check": "node scripts/viewer-keyboard-check.mjs",
     "slideshow-check": "node scripts/slideshow-check.mjs",
+    "gif-preview-check": "node scripts/gif-preview-check.mjs",
     "viewer-preload-check": "node scripts/viewer-preload-check.mjs",
     "live-photo-check": "node scripts/live-photo-app-check.mjs",
     "live-photo-interaction-check": "node scripts/live-photo-interaction-check.mjs",

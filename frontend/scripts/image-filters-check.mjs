@@ -61,15 +61,12 @@ async function fixture(width, ready = true, touch = width <= 720) {
   await page.goto("https://pixhelf.test/");
   await page.locator('.image-card[data-loaded="true"]').first().waitFor();
   const idle = () => page.waitForFunction(() => document.querySelector('.content').getAttribute('aria-busy') === 'false');
-  const open = async (expand = true) => {
+  const open = async () => {
     if (await page.locator('.search-toggle').getAttribute('aria-expanded') !== 'true') {
       await page.locator('.search-toggle').focus();
       await page.locator('.search-toggle').click();
     }
     await page.getByRole('group', { name: '搜索与筛选', exact: true }).waitFor();
-    if (expand && await page.locator('.gallery-filter-toggle').getAttribute('aria-expanded') !== 'true') {
-      await page.getByRole('button', { name: '展开筛选', exact: true }).click();
-    }
   };
   const request = (key, value) => page.waitForResponse(response => {
     const url = new URL(response.url());
@@ -87,112 +84,107 @@ async function checkSearchDisclosure(f, width) {
   const { page } = f;
   const input = page.locator('.gallery-search-input input');
   const panel = page.locator('.gallery-search-panel');
-  await f.open(false);
+  await f.open();
   await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
   await page.keyboard.press('Escape');
   await panel.waitFor({ state: 'hidden' });
-  assert(await input.isVisible(), 'the topbar must expose a directly editable search field');
+  assert(await input.isVisible(), 'search is directly editable');
   const inputBox = await input.boundingBox();
-  assert(inputBox.x < (width <= 720 ? 100 : 300), 'search belongs on the left of the topbar');
-  const closed = async () => {
-    await panel.waitFor({ state: 'hidden' });
-    assert.equal(await input.evaluate(element => element === document.activeElement), false, 'closing search leaves the keyboard focused');
-    assert.equal(await page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false, 'closing search leaves scrolling locked');
-  };
-  await f.open();
-  await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
+  assert(inputBox.x < (width <= 720 ? 100 : 300), 'search stays on the left');
+  const closed = () => panel.waitFor({ state: 'hidden' });
   const query = f.request('search', '输入法测试');
   await input.fill('输入法测试');
   await query; await f.idle();
-  await input.dispatchEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229 });
-  assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'true', 'IME confirmation must not dismiss the panel');
-  await input.press('Enter');
   await closed();
-  assert.equal(await input.inputValue(), '输入法测试', 'dismissing search must preserve its query');
+  await input.dispatchEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229 });
+  assert(await input.evaluate(element => element === document.activeElement), 'IME confirmation must keep focus');
+  await input.press('Enter');
+  assert.equal(await input.evaluate(element => element === document.activeElement), false);
+  assert.equal(await input.inputValue(), '输入法测试');
+  const focusStyle = await input.evaluate(element => {
+    element.focus();
+    const style = getComputedStyle(element);
+    return { outline: style.outlineStyle, shadow: style.boxShadow, border: style.borderWidth };
+  });
+  assert.equal(focusStyle.outline, 'none', 'no inner focus box');
+  assert.equal(focusStyle.shadow, 'none', 'no input focus glow');
+  assert.equal(focusStyle.border, '0px', 'the search field has only one border');
+  await closed();
+  await page.screenshot({ path: `${output}/search-focused-${width}.png` });
 
   const before = await page.locator('.content').boundingBox();
-  await f.open(false);
-  assert.deepEqual(await page.locator('.content').boundingBox(), before, 'opening search moves the gallery');
-  assert((await panel.boundingBox()).height < 110, 'collapsed search stays compact on narrow screens');
-  assert.equal(await page.locator('.gallery-filter-toggle').getAttribute('aria-expanded'), 'false');
-  assert.equal(await page.locator('.gallery-filter-controls').count(), 0, 'detailed controls are hidden by default');
-  await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
-  await page.screenshot({ path: `${output}/search-collapsed-${width}.png` });
-  await page.getByRole('button', { name: '展开筛选', exact: true }).click();
-  assert((await panel.boundingBox()).height > 250, 'the disclosure did not expand');
-  await page.getByLabel('媒体类型', { exact: true }).selectOption('photo');
-  await f.idle();
-  await page.getByRole('button', { name: '收起筛选', exact: true }).click();
-  assert((await panel.boundingBox()).height < 110, 'collapse must reclaim the space');
-  assert.equal(await input.inputValue(), '输入法测试');
-  assert.equal(await page.locator('.gallery-filter-count').textContent(), '1');
-  await page.getByRole('button', { name: '展开筛选', exact: true }).click();
-  assert.equal(await page.getByLabel('媒体类型', { exact: true }).inputValue(), 'photo', 'folding lost the selected filter');
+  await f.open();
+  assert.deepEqual(await page.locator('.content').boundingBox(), before, 'filters do not move the gallery');
+  assert(await page.getByLabel('媒体类型', { exact: true }).isVisible(), 'one click exposes all filters');
+  assert.equal(await page.locator('.gallery-filter-toggle, .gallery-search-heading').count(), 0, 'no intermediate disclosure or heading');
+  await f.change('媒体类型', 'photo', 'kind');
   await page.locator('.search-toggle').click();
   await closed();
-
-  await f.open(false);
+  await f.open();
+  assert.equal(await page.getByLabel('媒体类型', { exact: true }).inputValue(), 'photo');
+  assert.equal(await input.inputValue(), '输入法测试');
+  assert.equal(await page.locator('.gallery-filter-count').textContent(), '1');
+  await page.screenshot({ path: `${output}/search-filters-${width}.png` });
   await input.focus();
   await input.press('Shift+Tab');
   await closed();
   assert(await page.evaluate(() => document.activeElement !== document.body && !document.activeElement.closest('.topbar-search')),
-    'dismissing search must preserve keyboard focus on the next control');
+    'closing preserves focus on the next control');
 
   await f.open();
   assert.equal(await page.locator('.toolbar-popover-backdrop').count(), 0);
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false, 'search must not lock page scrolling');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false);
   const scroll = await page.evaluate(() => scrollY);
   await page.mouse.move(width / 2, 760);
   await page.mouse.wheel(0, 400);
   await closed();
   await page.waitForFunction(before => scrollY > before, scroll);
-  assert.equal(await input.inputValue(), '输入法测试', 'scrolling must keep the search query');
-
-  // Filtering may scroll new results into view; that must not dismiss an active input.
-  await f.open();
+  await input.focus();
   const scrolledQuery = f.request('search', '继续输入');
   await input.fill('继续输入');
   await scrolledQuery; await f.idle();
   await page.waitForFunction(() => scrollY === 0);
-  assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'true');
-  await page.locator('.search-toggle').click();
-
-  await f.open(false);
-  if (width <= 720) await page.locator('.image-card').first().tap();
-  else await page.locator('.image-card').first().click();
+  await closed();
+  assert.equal(await input.inputValue(), '继续输入');
+  await f.open();
+  const exposedId = await page.locator('.image-card').evaluateAll(cards => cards.find(card => {
+    const rect = card.getBoundingClientRect();
+    return card.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+  })?.dataset.imageId);
+  assert(exposedId, 'some results remain accessible outside the filters');
+  const exposed = page.locator(`.image-card[data-image-id="${exposedId}"]`);
+  if (width <= 720) await exposed.tap();
+  else await exposed.click();
   await page.locator('.image-viewer').waitFor();
-  await panel.waitFor({ state: 'hidden' });
+  await closed();
   assert.equal(await input.evaluate(element => element === document.activeElement), false);
-  assert.equal(await input.inputValue(), '继续输入', 'opening a result must keep the search query');
   await page.locator('.viewer-close').click();
   await page.locator('.image-viewer').waitFor({ state: 'detached' });
-  await closed();
 
   if (width <= 720) {
     await f.open();
-    assert.equal(await input.evaluate(element => element === document.activeElement), false, 'opening mobile filters should not force the keyboard open');
+    assert.equal(await input.evaluate(element => element === document.activeElement), false, 'filters should not force the keyboard open');
     await input.focus();
     await page.evaluate(() => {
-      Object.defineProperty(visualViewport, 'height', { configurable: true, value: 320 });
+      Object.defineProperty(visualViewport, 'height', { configurable: true, value: 260 });
       Object.defineProperty(visualViewport, 'offsetTop', { configurable: true, value: 24 });
       visualViewport.dispatchEvent(new Event('resize'));
     });
-    await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--visual-viewport-height') === '320px');
+    await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--visual-viewport-height') === '260px');
     await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
     const keyboard = await panel.evaluate(element => {
       const rect = element.getBoundingClientRect();
-      return { bottom: rect.bottom, controlsScroll: element.querySelector('.gallery-filter-controls').scrollHeight > element.querySelector('.gallery-filter-controls').clientHeight,
-        actionsReachable: [...element.querySelectorAll('.gallery-filter-toggle, .gallery-search-reset')].every(button => {
-          const box = button.getBoundingClientRect();
-          return box.top >= rect.top && box.bottom <= rect.bottom && button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
-        }) };
+      const controls = element.querySelector('.gallery-filter-controls');
+      const reset = element.querySelector('.gallery-search-reset').getBoundingClientRect();
+      return { bottom: rect.bottom, controlsScroll: controls.scrollHeight > controls.clientHeight,
+        resetVisible: reset.top >= rect.top && reset.bottom <= rect.bottom };
     });
-    assert(keyboard.bottom <= 344 && keyboard.controlsScroll && keyboard.actionsReachable, JSON.stringify(keyboard));
+    assert(keyboard.bottom <= 284 && keyboard.controlsScroll && keyboard.resetVisible, JSON.stringify(keyboard));
     await page.locator('.gallery-filter-controls').hover();
     await page.mouse.wheel(0, 100);
-    assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'true', 'scrolling inside filters must keep the panel open');
+    assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'true');
     await page.screenshot({ path: `${output}/search-keyboard-${width}.png` });
-    await page.locator('.search-toggle').click();
+    await page.keyboard.press('Escape');
     await closed();
     await page.evaluate(() => { delete visualViewport.height; delete visualViewport.offsetTop; visualViewport.dispatchEvent(new Event('resize')); });
   }
@@ -203,8 +195,7 @@ async function checkSearchDisclosure(f, width) {
     }
   });
   await closed();
-  assert.equal(await page.locator('.toolbar-popover-backdrop').count(), 0);
-  console.log(`${width}px: compact non-modal search, direct result clicks, outside scroll/focus, filter persistence, IME and mobile keyboard passed`);
+  console.log(`${width}px: inline search without popups, single-level filters, neutral focus, IME, persistence and keyboard viewport passed`);
 }
 
 try {

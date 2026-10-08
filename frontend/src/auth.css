@@ -85,7 +85,7 @@ html[data-auth-redirect="true"] #root { visibility: hidden; }
 }
 .login-card input::placeholder { color: #8c9890; font-size: 13px; }
 .login-card input:hover { border-color: #b5c8ba; }
-.login-card input:focus-visible { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px #24786f14; }
+.login-card input:focus { border-color: var(--focus-border); background: #fff; }
 .login-password-field { position: relative; }
 .login-password-field input { padding-right: 60px; }
 .login-show-password { position: absolute; inset: 3px 3px 3px auto; min-width: 46px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--accent); font-size: 12px; }

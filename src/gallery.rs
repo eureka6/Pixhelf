@@ -33,6 +33,15 @@ pub struct ImageRecord {
 }
 
 impl ImageRecord {
+    pub(crate) fn is_live(&self) -> bool {
+        self.motion.is_some()
+            || self
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"))
+    }
+
     pub(crate) fn belongs_to_album(&self, album: &str) -> bool {
         self.album == album
     }

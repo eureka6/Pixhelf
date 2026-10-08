@@ -233,6 +233,13 @@ try {
           await page.keyboard.press("Tab");
           assert(await page.evaluate(() => document.activeElement.closest(".settings-dialog") !== null), "focus stays in modal");
           if (cycle === 0) {
+            for (const input of await page.locator('.settings-dialog input:not([type="checkbox"])').all()) {
+              await input.focus();
+              assert.deepEqual(await input.evaluate(element => {
+                const style = getComputedStyle(element);
+                return [style.outlineStyle, style.boxShadow];
+              }), ['none', 'none'], 'settings inputs have no focus frame or glow');
+            }
             const input = await page.locator("#settings-username").boundingBox();
             await page.mouse.move(input.x + 10, input.y + 10); await page.mouse.down();
             await page.mouse.move(2, 2); await page.mouse.up();
@@ -246,6 +253,13 @@ try {
         await page.goto("https://pixhelf.test/login");
         await page.locator("#login-username").waitFor();
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "login has no horizontal overflow");
+        for (const input of await page.locator('.login-card input').all()) {
+          await input.focus();
+          assert.deepEqual(await input.evaluate(element => {
+            const style = getComputedStyle(element);
+            return [style.outlineStyle, style.boxShadow];
+          }), ['none', 'none'], 'login inputs have no focus frame or glow');
+        }
         await page.screenshot({ path: `${output}/login-${width}.png` });
       } finally { await f.close(); }
     });

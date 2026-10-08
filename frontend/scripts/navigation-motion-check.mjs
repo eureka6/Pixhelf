@@ -166,7 +166,6 @@ try {
     assert.equal(await page.locator(".image-viewer").count(), 0);
     await page.locator(".search-toggle").click();
     await page.locator(".gallery-search-input input").fill("navigation-check");
-    await page.getByRole("button", { name: "展开筛选", exact: true }).click();
     await page.getByLabel("媒体类型", { exact: true }).selectOption("photo");
     const filtered = page.waitForResponse(response => {
       const url = new URL(response.url());

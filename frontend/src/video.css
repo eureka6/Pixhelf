@@ -52,7 +52,7 @@
   -webkit-tap-highlight-color: transparent; box-shadow: none; transition: color 140ms, background 140ms;
 }
 .video-viewer-stage .video-control:disabled { opacity: .3; cursor: default; }
-.video-viewer-stage :is(button, a, input):focus-visible { outline: 2px solid var(--video-accent); outline-offset: 2px; }
+.video-viewer-stage :is(button, a, input[type="range"]):focus-visible { outline: 2px solid #b8bfbc; outline-offset: 2px; }
 .video-viewer-stage .video-control[aria-expanded="true"] { color: #fff; background: #ffffff18; box-shadow: none; }
 .video-viewer-stage .video-viewer-header .video-return { width: 60px; height: 60px; color: #f7faf8; background: transparent; border-radius: 0; }
 .video-viewer-stage .video-viewer-header .video-return:focus-visible { color: #b9f4e9; background: transparent; outline: none; }
@@ -95,7 +95,7 @@
 }
 .video-time-panel label { display: block; margin-bottom: 12px; color: #e4ece7; font-size: 12px; font-weight: 500; }
 .video-time-entry { display: flex; gap: 8px; align-items: center; padding: 4px; border: 1px solid #ffffff26; border-radius: 8px; background: #0002; }
-.video-time-entry:focus-within { border-color: #bdd7c8aa; box-shadow: 0 0 0 2px #bdd7c810; }
+.video-time-entry:focus-within { border-color: #a0a9a4; }
 .video-time-entry input { min-width: 0; width: 100%; height: 34px; padding: 0 8px; color: #f0f6f2; background: none; border: 0; border-radius: 4px; font: inherit; font-size: 16px; font-variant-numeric: tabular-nums; }
 .video-time-entry input:focus-visible { outline: none; }
 .video-time-entry button { display: grid; flex: none; place-items: center; width: 36px; height: 34px; padding: 0; border: 0; border-radius: 5px; background: #d6e5e1; color: #1a2720; cursor: pointer; }

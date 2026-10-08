@@ -210,10 +210,9 @@ try {
   assert.equal((await context.request.post(`${origin}/api/storage/config`, { headers: writeHeaders, data: { ...storageInput, rootPath: `${remoteRoot}/missing` } })).status(), 404);
   assert.equal(await readFile(persistedPath, "utf8"), persisted, "a failed save overwrote the existing connection");
   await page.getByRole("button", { name: "加载更多", exact: true }).click(); await waitEntries(page, 65);
-  await page.getByRole("button", { name: "打开搜索", exact: true }).click();
   await page.getByRole("searchbox", { name: "筛选已加载文件", exact: true }).fill("文档-58"); await waitEntries(page, 1);
+  assert.equal(await page.locator('.search-toggle, .gallery-search-panel').count(), 0, 'file search has no extra disclosure');
   await page.getByRole("button", { name: "清空搜索", exact: true }).click(); await waitEntries(page, 65);
-  await page.getByRole("button", { name: "收起搜索", exact: true }).click();
   await page.getByRole("button", { name: "打开文件夹 项目 & 2026", exact: true }).click(); await waitEntries(page, 1);
   assert.equal(new URL(page.url()).searchParams.get("path"), "/项目 & 2026");
   await page.reload(); await waitEntries(page, 1);

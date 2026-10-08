@@ -2,6 +2,7 @@ import type { RefObject } from "preact";
 import { useLayoutEffect, useState } from "preact/hooks";
 
 import type { GalleryImage } from "./types";
+import { isAnimatedImage } from "./mediaUrls";
 import { getViewerOriginalStatus } from "./viewerAssets";
 
 const MAX_NATIVE_IMAGE_EDGE = 12_288;
@@ -134,7 +135,7 @@ export function selectViewerSourceStrategy(
   viewportBitmapsSupported: boolean,
 ): ViewerSourceStrategy {
   // Canvas bitmaps only retain the first frame of animated images.
-  if (/\.gif$/i.test(image.name)) return "direct-original";
+  if (isAnimatedImage(image)) return "direct-original";
   const sourceFitsViewport = image.width <= renderSize.width
     && image.height <= renderSize.height;
   if (viewportBitmapsSupported && !sourceFitsViewport) return "viewport-upgrade";

@@ -259,8 +259,8 @@ impl ImageRequest {
     fn matches_filters(&self, record: &ImageRecord) -> bool {
         let kind = match self.kind {
             ImageKind::All => true,
-            ImageKind::Photo => record.video.is_none() && record.motion.is_none(),
-            ImageKind::Live => record.motion.is_some(),
+            ImageKind::Photo => record.video.is_none() && !record.is_live(),
+            ImageKind::Live => record.is_live(),
             ImageKind::Video => record.video.is_some(),
         };
         let orientation = match self.orientation {

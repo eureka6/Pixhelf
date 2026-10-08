@@ -90,6 +90,25 @@ async fn animated_gifs_scan_generate_thumbnails_and_serve_original_frames() {
         index: Arc::new(RwLock::new(Arc::new(index))),
         thumbnails: Arc::clone(&thumbnails),
     });
+    for (kind, count) in [("all", 1), ("live", 1), ("photo", 0), ("video", 0)] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/images?kind={kind}&album=Live"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let page: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page["total"], count, "{kind}");
+        assert_eq!(page["items"].as_array().unwrap().len(), count as usize);
+    }
     for path in [
         format!("/api/images/{}.gif", record.id),
         format!("/api/images/{}/original", record.id),

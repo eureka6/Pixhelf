@@ -219,14 +219,14 @@ try {
     await checkAlbumMotion(page, width);
     const requestsBeforeCatalog = imageRequests.length;
 
-    await page.locator(".search-toggle").click();
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("同名");
+    assert.equal(await page.locator('.search-toggle, .gallery-search-panel').count(), 0, 'album search needs no filter layer');
+    assert.equal(await page.getByRole('searchbox', { name: '搜索相册', exact: true }).evaluate(input => getComputedStyle(input).outlineStyle), 'none');
     await waitCount(page, ".album-card", 2);
     assert.deepEqual((await page.locator(".album-path > span").allTextContents()).sort(), ["收藏/同名", "项目 & 2026/同名"].sort());
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("不存在的相册");
     await page.getByText("没有找到相册", { exact: true }).waitFor();
     await page.locator(".clear-search").click();
-    await page.locator(".search-toggle").click();
     await waitCount(page, ".album-card", 7);
     assert.equal(imageRequests.length, requestsBeforeCatalog, "catalog search fetched images");
 
@@ -274,7 +274,6 @@ try {
       const request = page.waitForRequest(request => { const url = new URL(request.url()); return url.pathname === "/api/images" && url.searchParams.get("sort") === "explore"; });
       if (round === 0) {
         await page.locator('.search-toggle').click();
-        await page.getByRole('button', { name: '展开筛选', exact: true }).click();
         await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
         await page.keyboard.press('Escape');
       } else await page.getByRole('button', { name: '换一组', exact: true }).click();
@@ -321,7 +320,6 @@ try {
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
     await page.locator(`${width <= 720 ? '.mobile-sidebar' : '.desktop-sidebar'} .brand`).click();
     await page.locator('.search-toggle').click();
-    await page.getByRole('button', { name: '展开筛选', exact: true }).click();
     await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
     await page.keyboard.press('Escape');
     await page.locator(".image-card").nth(24).waitFor();

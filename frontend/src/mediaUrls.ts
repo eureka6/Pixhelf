@@ -1,5 +1,13 @@
 import type { GalleryImage } from "./types";
 
+export function isAnimatedImage(image: GalleryImage): boolean {
+  return /\.gif$/i.test(image.name);
+}
+
+export function isLiveImage(image: GalleryImage): boolean {
+  return Boolean(image.motion) || isAnimatedImage(image);
+}
+
 export function viewerThumbnailUrl(image: GalleryImage): string {
   return `/api/images/${encodeURIComponent(image.id)}/thumbnail`;
 }

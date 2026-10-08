@@ -4,7 +4,7 @@ html:has(dialog[open]), body:has(dialog[open]) { overflow: hidden; }
 .directory-search { display: flex; align-items: center; gap: 9px; padding: 0 11px; min-height: 40px; margin-bottom: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 8px; background: #f5f8f5; }
 .directory-search > svg { flex: none; }
 .directory-search input { min-width: 0; width: 100%; padding: 10px 0; border: 0; outline: none; color: var(--ink); background: transparent; font-size: 13px; }
-.directory-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.directory-search:focus-within { border-color: var(--focus-border); }
 .directory-tree-scroll { height: clamp(140px, 35dvh, 320px); overflow: auto; overflow-x: hidden; padding: 4px; border: 1px solid var(--border); border-radius: 8px; overscroll-behavior: contain; scrollbar-gutter: stable; touch-action: pan-y; }
 .directory-tree-row { display: flex; align-items: center; gap: 7px; min-height: 39px; padding: 3px 8px 3px calc(4px + var(--tree-depth, 0) * 16px); border-radius: 5px; color: var(--ink); font-size: 13px; cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; }
 .directory-tree-row > svg { flex: none; color: #6c8b7b; }
