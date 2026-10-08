@@ -85,6 +85,106 @@ async function check(name, run) {
 }
 
 try {
+  for (const width of [1440, 390, 320]) await check(`${width}: scrolling hides and restores the topbar independently of navigation`, async () => {
+    const f = await fixture(width);
+    const { page } = f;
+    const bar = page.locator('.topbar');
+    const toggle = page.locator('.gallery-sidebar-toggle');
+    const scroll = async top => {
+      await page.evaluate(top => { document.activeElement?.blur(); scrollTo({ top, behavior: 'instant' }); }, top);
+      await page.waitForTimeout(250);
+    };
+    const hidden = async expected => assert.equal(await bar.getAttribute('data-hidden'), String(expected));
+    try {
+      const sidebarBounds = await page.locator('.desktop-sidebar').boundingBox();
+      const galleryTop = await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY);
+      await scroll(320); await hidden(true);
+      assert((await page.locator('.topbar .brand').boundingBox()).y < 0);
+      assert.equal(await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY), galleryTop, 'hiding the bar must not shift the gallery');
+      if (width > 720) {
+        assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+        assert.deepEqual(await page.locator('.desktop-sidebar').boundingBox(), sidebarBounds, 'hiding the topbar must leave the expanded sidebar in place');
+        await scroll(280); await hidden(false);
+        await toggle.click();
+        await page.waitForTimeout(300);
+        await scroll(600); await hidden(true);
+      }
+      assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+      assert(await toggle.evaluate(button => {
+        const box = button.getBoundingClientRect();
+        return box.top >= 0 && button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      }), 'the collapsed sidebar retains a reachable expand button');
+      await page.screenshot({ path: `${output}/topbar-hidden-${width}.png` });
+      await toggle.click(); await hidden(false);
+      await page.locator(f.sidebar).waitFor();
+      if (width <= 720) await toggle.click();
+      await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
+      await page.locator('.justified-gallery[data-resizing="true"]').waitFor({ state: 'detached' });
+      const top = await page.evaluate(() => scrollY);
+      await scroll(top + 160); await hidden(true);
+      await scroll(top + 156); await hidden(true);
+      await scroll(top + 120); await hidden(false);
+      await page.locator('.search-toggle').click();
+      await scroll(top + 300); await hidden(false);
+      await page.keyboard.press('Escape');
+      await scroll(top + 500); await hidden(true);
+      await page.locator('.search-toggle').focus();
+      await page.keyboard.press('Enter');
+      const searchFits = await page.evaluate(async () => {
+        const start = performance.now();
+        while (performance.now() - start < 250) {
+          await new Promise(requestAnimationFrame);
+          const box = document.querySelector('.search-popover-panel').getBoundingClientRect();
+          if (box.left < 0 || box.right > innerWidth) return false;
+        }
+        return true;
+      });
+      assert(searchFits, 'opening search while the bar returns must keep the panel on screen');
+      await page.keyboard.press('Escape');
+      await page.locator('.topbar .brand').focus();
+      await page.waitForTimeout(250); await hidden(false);
+      await scroll(top + 700); await hidden(true);
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await scroll(0); await hidden(false);
+      assert((await page.locator('.topbar .brand').boundingBox()).y >= 0);
+    } finally { await f.close(); }
+  });
+
+  for (const width of [1440, 390]) await check(`${width}: gallery and related cards open fullscreen and copy a generic link`, async () => {
+    const f = await fixture(width);
+    const { page } = f;
+    try {
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+      const card = page.locator('.image-card').first();
+      await card.click({ button: 'right' });
+      const menu = page.locator('.photo-card-menu:popover-open');
+      await menu.getByRole('menuitem', { name: '复制链接', exact: true }).click();
+      await menu.getByRole('menuitem', { name: '已复制链接', exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `https://pixhelf.test/api/images/${images[0].id}.jpg`);
+      await menu.getByRole('menuitem', { name: '全屏查看', exact: true }).click();
+      await page.waitForFunction(id => document.fullscreenElement?.classList.contains('image-viewer')
+        && document.fullscreenElement.dataset.imageId === id, images[0].id);
+      await page.route('**/similar?*', route => route.fulfill({ json: { items: images.slice(1, 4), total: 3, offset: 0, limit: 30, nextOffset: null } }));
+      await page.keyboard.press('PageDown');
+      const related = page.locator('.viewer-similar-card').first();
+      await related.click({ button: 'right' });
+      await menu.getByRole('menuitem', { name: '全屏查看', exact: true }).click();
+      await page.waitForFunction(id => document.fullscreenElement?.dataset.imageId === id, images[1].id);
+      await page.locator('.viewer-media:not(.viewer-swipe-outgoing)').click({ button: 'right' });
+      await menu.getByRole('menuitem', { name: '退出全屏', exact: true }).click();
+      await page.waitForFunction(() => !document.fullscreenElement);
+      await page.goto('https://pixhelf.test/?check=fullscreen-fallback');
+      await page.locator('.image-card').first().waitFor();
+      await page.evaluate(() => { HTMLElement.prototype.requestFullscreen = () => Promise.reject(new Error('denied')); });
+      await page.locator('.image-card').first().click({ button: 'right' });
+      await menu.getByRole('menuitem', { name: '全屏查看', exact: true }).click();
+      await page.locator('.image-viewer').waitFor();
+      assert.equal(await page.evaluate(() => document.fullscreenElement), null);
+      await page.getByRole('button', { name: '关闭查看器', exact: true }).click();
+      await page.locator('.image-viewer').waitFor({ state: 'detached' });
+    } finally { await f.close(); }
+  });
+
   await check("fast scroll reversal does not consume a stale pagination notification", async () => {
     const f = await fixture(390);
     try {

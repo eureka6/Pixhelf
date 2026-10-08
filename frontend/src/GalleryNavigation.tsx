@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import { VersionLink } from "./VersionLink";
 import logoMark from "./assets/pixhelf-mark.svg?inline";
@@ -24,6 +24,8 @@ import { useManagement } from "./management";
 import type { ContentCategory, GallerySection, GallerySummary, ImageFilters } from "./types";
 
 export function Header({
+  hidden,
+  onReveal,
   search,
   searchOpen,
   onSearchOpenChange,
@@ -45,6 +47,8 @@ export function Header({
   categoriesHint,
   onConfigureCategories,
 }: {
+  hidden: boolean;
+  onReveal: () => void;
   search: string;
   searchOpen: boolean;
   onSearchOpenChange: (open: boolean) => void;
@@ -77,17 +81,14 @@ export function Header({
     ? "描述想找的图片"
     : "搜索文件名";
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!searchOpen) {
       setFiltersExpanded(false);
       searchInputRef.current?.blur();
       return;
     }
     if (compactLayout || window.matchMedia("(pointer: coarse)").matches) return;
-    const frame = window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
+    searchInputRef.current?.focus({ preventScroll: true });
   }, [searchOpen, compactLayout]);
 
   useEffect(() => {
@@ -107,12 +108,12 @@ export function Header({
     onHome();
   };
   return (
-    <header className="topbar" data-search-open={searchOpen}>
+    <header className="topbar" data-hidden={hidden} data-search-open={searchOpen} onFocus={onReveal}>
       <div className="topbar-leading">
         <SidebarToggleButton
           className="gallery-sidebar-toggle"
           expanded={navigationOpen}
-          onClick={onToggleNavigation}
+          onClick={() => { onReveal(); onToggleNavigation(); }}
           controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
         />
         <Brand onHome={handleHome} />

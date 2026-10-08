@@ -14,6 +14,7 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
+import { useAutoHideTopbar } from "./useAutoHideTopbar";
 import { DEFAULT_IMAGE_FILTERS, imageFilterLabels } from "./GalleryFilters";
 import { contentCategory } from "./contentCategories";
 import { AlbumBackLink, AlbumGrid, AlbumsView } from "./AlbumsView";
@@ -403,6 +404,8 @@ function App() {
     mobileNavOpen,
     MOBILE_NAV_EXIT_MS,
   );
+  const topbar = useAutoHideTopbar(Boolean(searchOpen || mobileNavMounted || viewerImageId
+    || viewerReturnRequest || settingsSection || infoImage), location, sidebarCollapsed);
   const textSearchReady = Boolean(
     status?.backgroundComplete
     && status.textSearch.enabled
@@ -1478,11 +1481,14 @@ function App() {
       data-gallery-section={section}
       data-sidebar-collapsed={sidebarCollapsed}
       data-mobile-navigation-open={mobileNavOpen}
+      data-topbar-hidden={topbar.hidden}
       data-viewer-returning={Boolean(viewerReturnRequest)}
       data-viewer-return-image-id={viewerReturnRequest?.imageId}
     >
       <div className="topbar-surface" aria-hidden="true" />
       <Header
+        hidden={topbar.hidden}
+        onReveal={topbar.reveal}
         search={search}
         searchOpen={searchOpen}
         onSearchOpenChange={setSearchOpen}

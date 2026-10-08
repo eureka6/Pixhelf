@@ -34,7 +34,7 @@ function galleryViewportBounds(scrollRoot?: HTMLElement) {
   const top = bounds ? Math.max(visual.top, bounds.top) : visual.top;
   const bottom = bounds ? Math.min(visual.bottom, bounds.bottom) : visual.bottom;
   const viewport = { top, bottom, height: Math.max(1, bottom - top) };
-  const toolbar = scrollRoot ? scrollRoot.querySelector(".viewer-details-toolbar, .video-details-header") : document.querySelector(".topbar");
+  const toolbar = scrollRoot ? scrollRoot.querySelector(".viewer-details-toolbar, .video-details-header") : document.querySelector('.topbar:not([data-hidden="true"])');
   const toolbarBounds = toolbar?.getBoundingClientRect();
   const topbarBottom = toolbarBounds && (!scrollRoot || toolbarBounds.top < viewport.bottom) ? toolbarBounds.bottom : viewport.top;
   const safeTop = Math.min(viewport.bottom, Math.max(viewport.top, topbarBottom + 8));

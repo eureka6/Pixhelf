@@ -254,6 +254,21 @@ try {
       assert.equal(await page.locator(".video-viewer .media-player-surface").evaluate(video => video.paused), true, "returning to video similarity keeps playback paused");
       assert.equal(frameSearches, 1, "returning to a video waterfall reuses its captured frame and results");
       await closeVideo();
+      // Fullscreen is also available directly from video and Live Photo cards.
+      for (const id of [0, 1]) {
+        await card(id).click({ button: 'right' });
+        const menu = page.locator('.photo-card-menu:popover-open');
+        assert.equal(await menu.getByRole('menuitem', { name: '复制链接', exact: true }).count(), 1);
+        await menu.getByRole('menuitem', { name: '全屏查看', exact: true }).click();
+        await page.waitForFunction(video => document.fullscreenElement?.classList.contains(video ? 'video-viewer-stage' : 'image-viewer'), id === 0);
+        const media = page.locator(id === 0 ? '.video-viewer-stage' : '.viewer-media:not(.viewer-swipe-outgoing)');
+        await media.click({ button: 'right' });
+        await menu.getByRole('menuitem', { name: '退出全屏', exact: true }).click();
+        await page.waitForFunction(() => !document.fullscreenElement);
+        if (id === 0) await closeVideo();
+        else await closeViewer(page);
+        await page.waitForFunction(() => document.querySelector('.app-shell')?.dataset.viewerReturning === 'false');
+      }
       assert.deepEqual(errors, []);
       assert.equal(requests.some(r => r.type === "image"), false, "original videos must never use the image loader");
       console.log(`${engine.name()}: ${width}px video hover/touch, live-photo handoff, cleanup, similar results and fallback passed`);

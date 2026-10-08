@@ -1,6 +1,6 @@
 import { copyText } from "./clipboard";
 import type { JSX } from "preact";
-import { memo } from "preact/compat";
+import { flushSync, memo } from "preact/compat";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import { Check, Copy, Download, ImageIcon, Info, Maximize2, Minimize2, Play, ScanSearch } from "./icons";
 import { CARD_MENU_EVENT, CARD_SELECTOR } from "./cardInteraction";
@@ -28,6 +28,8 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
   const open = request !== null;
   const [copyState, setCopyState] = useState<{ target: "link" | "name"; status: "pending" | "done" | "failed" } | null>(null);
   const originalUrl = originalImageUrl(image);
+  const viewing = controlsRef.current?.closest(".viewer-media, .video-viewer-stage");
+  const isFullscreen = fullscreen || Boolean(viewing && document.fullscreenElement?.contains(viewing));
 
   useLayoutEffect(() => { onMenuChange?.(open); }, [open, onMenuChange]);
 
@@ -141,6 +143,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
     document.addEventListener("pointermove", move, { ...capture, passive: true });
     document.addEventListener("pointerout", leaveWindow, capture);
     document.addEventListener("wheel", wheel, { ...capture, passive: true });
+    document.addEventListener("fullscreenchange", dismiss, { signal });
     window.addEventListener("blur", dismiss, { signal });
     document.addEventListener("scroll", scroll, capture);
     window.addEventListener("resize", position, { signal });
@@ -157,6 +160,21 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
   const choose = (action: ImageCardAction) => {
     closeMenu(true);
     onAction(action);
+  };
+
+  const viewFullscreen = async () => {
+    closeMenu();
+    if (onToggleFullscreen) { onToggleFullscreen(); return; }
+    // Mount the requested viewer during the click, preserving browser user activation.
+    if (!viewing) flushSync(() => onAction("view"));
+    const viewer = document.querySelector<HTMLElement>(".image-viewer");
+    const target = viewer?.querySelector<HTMLElement>(".video-viewer-stage") ?? viewer;
+    try {
+      if (viewing && target && document.fullscreenElement === target) await document.exitFullscreen();
+      else if (target !== document.fullscreenElement) await target?.requestFullscreen?.();
+    } catch {
+      // The regular viewer remains usable when the browser denies fullscreen.
+    }
   };
 
   const copy = async (target: "link" | "name") => {
@@ -218,13 +236,13 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
           {selectionActions && <><SelectionMenuItems actions={selectionActions} showBatch={selected} onChoose={action => { closeMenu(true); action(); }} /><div className="photo-card-menu-divider" role="separator" /></>}
           <button type="button" role="menuitem" onClick={() => choose("details")}><Info size={17} /><span>{image.video ? "视频信息" : "图片信息"}</span></button>
           <button type="button" role="menuitem" aria-disabled={similarDisabled} disabled={similarDisabled} onClick={() => choose("similar")}><ScanSearch size={17} /><span>{image.video ? "查找相似画面" : "查找相似图片"}</span></button>
-          {onToggleFullscreen && <button type="button" role="menuitem" onClick={() => { closeMenu(); onToggleFullscreen(); }}>
-            {fullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}<span>{fullscreen ? "退出全屏" : "全屏查看"}</span>
-          </button>}
+          <button type="button" role="menuitem" onClick={() => void viewFullscreen()}>
+            {isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}<span>{isFullscreen ? "退出全屏" : "全屏查看"}</span>
+          </button>
           <div className="photo-card-menu-divider" role="separator" />
           <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>{image.video ? "下载原视频" : "下载原图"}</span></a>
           {(["link", "name"] as const).map(target => {
-            const label = target === "name" ? "文件名" : image.video ? "视频链接" : "图片链接";
+            const label = target === "name" ? "文件名" : "链接";
             const state = copyState?.target === target ? copyState.status : "idle";
             return <button key={target} type="button" role="menuitem" aria-disabled={copyState?.status === "pending"} onClick={() => void copy(target)}>
               {state === "done" ? <Check size={17} /> : <Copy size={17} />}

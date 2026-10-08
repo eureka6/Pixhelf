@@ -324,8 +324,8 @@ try {
     await openMenu(card);
     menu = await expectMenu(page);
     const pageCount = context.pages().length;
-    await clickVisible(menu.getByRole("menuitem", { name: "复制图片链接", exact: true }));
-    await menu.getByRole("menuitem", { name: "已复制图片链接", exact: true }).waitFor();
+    await clickVisible(menu.getByRole("menuitem", { name: "复制链接", exact: true }));
+    await menu.getByRole("menuitem", { name: "已复制链接", exact: true }).waitFor();
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(copied, new URL(originalPath, baseUrl).href);
     assert.equal(context.pages().length, pageCount, "copying a link must not open a tab");

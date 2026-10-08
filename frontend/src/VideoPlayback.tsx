@@ -123,6 +123,7 @@ export function VideoPlayback({ source, name, poster, durationHint = 0, prepared
       if (document.hidden && (!floatingVideo || floatingVideo !== containerRef.current?.querySelector("video"))) videoRef.current?.pause();
     };
     const onFullscreen = () => setFullscreen(document.fullscreenElement === stageRef.current);
+    onFullscreen();
     document.addEventListener("visibilitychange", pauseHidden);
     document.addEventListener("fullscreenchange", onFullscreen);
     return () => {

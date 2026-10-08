@@ -119,8 +119,17 @@ try {
     const brandBeforeScroll = await page.locator(".topbar .brand").boundingBox();
     // Put real, clickable cards behind the header, including its left edge.
     await page.evaluate(() => window.scrollTo(0, 320));
+    await page.waitForFunction(() => document.querySelector('.topbar').dataset.hidden === 'true');
     await page.waitForTimeout(250);
-    assert.deepEqual(await page.locator(".topbar .brand").boundingBox(), brandBeforeScroll, "scrolling moved the logo");
+    assert((await page.locator('.topbar .brand').boundingBox()).y < 0, 'scrolling down hides the brand');
+    assert(await page.locator('.gallery-sidebar-toggle').evaluate(button => {
+      const box = button.getBoundingClientRect();
+      return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+    }), 'collapsed navigation remains accessible while the topbar is hidden');
+    await page.evaluate(() => window.scrollTo(0, 280));
+    await page.waitForFunction(() => document.querySelector('.topbar').dataset.hidden === 'false');
+    await page.waitForTimeout(250);
+    assert.deepEqual(await page.locator(".topbar .brand").boundingBox(), brandBeforeScroll, "scrolling up restores the logo");
     const opened = await traceNavigation(page, [0]);
     checkTrace(opened);
     assert.equal(opened.open, "true");
@@ -172,7 +181,10 @@ try {
     assert.equal(reduced.drawerMounted || reduced.bodyLocked, false);
     assert.equal(reduced.partialFrames, 0, "reduced motion still animates the sidebar");
     if (width === 390) {
-      await page.evaluate(() => window.scrollTo(0, 320));
+      await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 320); });
+      await page.waitForFunction(() => document.querySelector('.topbar').dataset.hidden === 'true');
+      await page.evaluate(() => window.scrollTo(0, 280));
+      await page.waitForFunction(() => document.querySelector('.topbar').dataset.hidden === 'false');
       await page.waitForTimeout(200);
       // Simulate the viewport itself so scroll events cannot overwrite a CSS-only offset.
       await page.evaluate(() => {

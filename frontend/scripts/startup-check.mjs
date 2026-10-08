@@ -114,8 +114,8 @@ raise SystemExit(1)
     if (mode === "login") {
       await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw new Error("clipboard denied"); }; });
     }
-    await menu.getByRole("menuitem", { name: "复制图片链接", exact: true }).click();
-    await menu.getByRole("menuitem", { name: "已复制图片链接", exact: true }).waitFor();
+    await menu.getByRole("menuitem", { name: "复制链接", exact: true }).click();
+    await menu.getByRole("menuitem", { name: "已复制链接", exact: true }).waitFor();
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     const id = await card.getAttribute("data-image-id");
     assert.equal(copied, `${origin}/api/images/${id}.jpg`);

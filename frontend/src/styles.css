@@ -204,6 +204,32 @@
   background: rgba(231, 241, 238, .74);
 }
 
+.topbar .brand-lockup,
+.topbar .toolbar-popover-trigger,
+.topbar .gallery-sidebar-toggle,
+.topbar-surface {
+  transition: translate var(--motion-medium) var(--ease-standard),
+    color var(--motion-fast) ease, background var(--motion-fast) ease,
+    border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease,
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.app-shell[data-topbar-hidden="true"] .topbar .brand-lockup,
+.app-shell[data-topbar-hidden="true"] .topbar .toolbar-popover-trigger,
+.app-shell[data-topbar-hidden="true"] .gallery-sidebar-toggle[aria-expanded="true"],
+.app-shell[data-topbar-hidden="true"] .topbar-surface,
+.app-shell[data-topbar-hidden="true"] .request-progress {
+  translate: 0 calc(-1 * var(--topbar-height));
+}
+
+.app-shell[data-topbar-hidden="true"] .topbar-actions { pointer-events: none; }
+
+.app-shell[data-topbar-hidden="true"] .gallery-sidebar-toggle[aria-expanded="false"] {
+  background: rgba(252, 253, 252, .96);
+  border-color: var(--border);
+  box-shadow: 0 3px 12px rgba(24, 34, 30, .14);
+}
+
 @keyframes request-progress {
   0% { transform: translateX(-72%) scaleX(.28); }
   48% { transform: translateX(-8%) scaleX(.72); }

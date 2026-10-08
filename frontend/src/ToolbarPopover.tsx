@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
+import { useLayoutEffect, useRef } from "preact/hooks";
 
 type ToolbarPopoverProps = {
   children: ComponentChildren;
@@ -44,7 +44,7 @@ export function ToolbarPopover({
     }
   }, [open]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
 
     const closeFromOutside = (event: Event) => {
