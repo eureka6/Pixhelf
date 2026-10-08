@@ -1462,10 +1462,16 @@ async fn frontend(ReadState(state): ReadState, request: Request) -> Response {
     let summary = summary_from_index(&index);
     let images = image_page(&index, &ImageRequest::default());
 
-    let preload = images.items.first().map_or_else(String::new, |image| {
+    let mut preload = images.items.first().map_or_else(String::new, |image| {
         let url = format!("/api/images/{}/thumbnail", image.id);
         format!(r#"<link rel="preload" as="image" href="{url}" fetchpriority="high" />"#)
     });
+    if !index.initializing {
+        // Start the authenticated gallery assets with the document, before its entry module runs.
+        preload.push_str(&format!(
+            r#"<link rel="modulepreload" crossorigin href="/assets/{ASSET_VERSION}/GalleryApp.js" /><link rel="stylesheet" crossorigin href="/assets/{ASSET_VERSION}/GalleryApp.css" />"#
+        ));
+    }
     let bootstrap = BootstrapResponse {
         summary,
         status,
@@ -1495,6 +1501,8 @@ async fn frontend(ReadState(state): ReadState, request: Request) -> Response {
 }
 
 pub(crate) fn authentication_html(authentication: &AuthView) -> Response {
+    // Keep login independent of a potentially large browser cache purge. Protected
+    // media revalidates authentication, and explicit logout still clears caches.
     let title = if authentication.setup_required {
         "<title>欢迎使用 · Pixhelf</title>"
     } else {
@@ -1506,10 +1514,6 @@ pub(crate) fn authentication_html(authentication: &AuthView) -> Response {
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
-            (
-                header::HeaderName::from_static("clear-site-data"),
-                "\"cache\"",
-            ),
         ],
         html,
     )

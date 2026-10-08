@@ -972,6 +972,15 @@ async fn login_rotates_existing_session_and_unknown_cookie_cannot_fixate_it() {
     assert_eq!(login_page.status(), StatusCode::SEE_OTHER);
     assert_eq!(login_page.headers()[header::LOCATION], "/");
     let (_other_temp, restarted, _) = fixture().await;
+    let login = call(
+        &restarted,
+        request(Method::GET, "/login", Some(&new_cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    assert_eq!(login.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(!login.headers().contains_key("clear-site-data"));
     assert_eq!(
         call(
             &restarted,

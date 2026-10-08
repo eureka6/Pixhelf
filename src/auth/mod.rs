@@ -495,14 +495,7 @@ async fn login_page(State(auth): State<AuthState>, session: Session) -> Response
     }
     match auth.account(&session).await {
         Ok(Some(_)) => Redirect::to("/").into_response(),
-        Ok(None) => {
-            let mut response = crate::web::authentication_html(&auth.anonymous_view());
-            // Also discard browser image caches left by an earlier public deployment.
-            response
-                .headers_mut()
-                .insert("clear-site-data", HeaderValue::from_static("\"cache\""));
-            response
-        }
+        Ok(None) => crate::web::authentication_html(&auth.anonymous_view()),
         Err(status) => error(status, "暂时无法验证登录状态"),
     }
 }

@@ -1,8 +1,4 @@
 import { chromium } from "playwright-core";
-import { readFileSync } from "node:fs";
-
-const appVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
-
 const executablePath =
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ??
   "/root/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
@@ -21,18 +17,22 @@ const results = [];
 async function closeNavigation(page) {
   const motion = await page.evaluate(async () => {
     const menu = document.querySelector(".gallery-sidebar-toggle");
-    const brand = document.querySelector(".topbar .brand-lockup");
-    const home = document.querySelector(".topbar .brand");
+    const sidebar = document.querySelector(innerWidth <= 720 ? '.mobile-sidebar' : '.desktop-sidebar');
+    const brand = sidebar.querySelector('.brand');
+    const home = brand;
     const homeBounds = home.getBoundingClientRect();
+    const sidebarBounds = sidebar.getBoundingClientRect();
     const result = { samples: 0, minimumBrandMenuGap: null, homeStable: true };
     menu.click();
     const start = performance.now();
     while (performance.now() - start < 380) {
       await new Promise(requestAnimationFrame);
+      if (!home.isConnected) continue;
       const homeRect = home.getBoundingClientRect();
+      const sidebarRect = sidebar.getBoundingClientRect();
       const homeStyle = getComputedStyle(home);
       result.homeStable &&= homeStyle.visibility === "visible" && homeStyle.opacity === "1"
-        && homeRect.x === homeBounds.x && homeRect.y === homeBounds.y
+        && Math.abs(homeRect.x - sidebarRect.x - homeBounds.x + sidebarBounds.x) < 1 && homeRect.y === homeBounds.y
         && homeRect.width === homeBounds.width && homeRect.height === homeBounds.height
         && home.getAnimations({ subtree: true }).length === 0;
       const rect = brand.getBoundingClientRect();
@@ -40,7 +40,7 @@ async function closeNavigation(page) {
       if (
         !brand.isConnected || style.visibility !== "visible" || Number(style.opacity) < .02
       ) continue;
-      const gap = rect.left - menu.getBoundingClientRect().right;
+      const gap = rect.left - sidebarRect.left - menu.getBoundingClientRect().right;
       result.samples++;
       result.minimumBrandMenuGap = Math.min(result.minimumBrandMenuGap ?? gap, gap);
     }
@@ -53,12 +53,14 @@ async function closeNavigation(page) {
 }
 
 async function checkHomeNavigation(page, target, selector) {
+  const toggle = page.locator('.gallery-sidebar-toggle');
+  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   const shell = await page.locator(".app-shell").elementHandle();
   const homeRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return url.pathname === "/api/images" && url.searchParams.get("offset") === "0";
   });
-  await page.locator(`.topbar ${selector}`).click();
+  await page.locator(`${target.name === 'mobile' ? '.mobile-sidebar' : '.desktop-sidebar'} ${selector}`).click();
   const request = await homeRequest;
   const response = await request.response();
   const url = new URL(request.url());
@@ -136,7 +138,7 @@ try {
       const topbar = document.querySelector(".topbar");
       const sidebarFooter = document.querySelector(".desktop-sidebar .sidebar-footer");
       const searchRect = search?.getBoundingClientRect();
-      const home = document.querySelector(".topbar .brand");
+      const home = document.querySelector('.desktop-sidebar .brand');
       const homeRect = home?.getBoundingClientRect();
       const topbarRect = topbar?.getBoundingClientRect();
       const footerRect = sidebarFooter?.getBoundingClientRect();
@@ -174,9 +176,7 @@ try {
         brandLabel: document.querySelector(".brand")?.getAttribute("aria-label"),
         brandName: document.querySelector(".brand-name")?.textContent,
         brandNameHref: document.querySelector(".brand-name")?.closest("a")?.getAttribute("href"),
-        brandVersion: document.querySelector(".brand-version")?.textContent,
-        brandVersionSize: Number.parseFloat(getComputedStyle(document.querySelector(".brand-version")).fontSize),
-        brandRepository: document.querySelector(".brand-version")?.getAttribute("href"),
+        brandVersions: document.querySelectorAll('.brand-version').length,
         sidebarBrands: document.querySelectorAll(".sidebar .brand-lockup").length,
         topbarBrands: document.querySelectorAll(".topbar .brand-lockup").length,
         brandDisplayed: Boolean(brandRect?.width),
@@ -1310,7 +1310,7 @@ try {
     const searchToggleOpen = await page.locator(".search-toggle").boundingBox();
     const searchPanelOpen = await page.locator("#gallery-search-field").boundingBox();
     const searchDisclosure = await page.evaluate(() => {
-      const leading = document.querySelector(".topbar-leading")?.getBoundingClientRect();
+      const leading = document.querySelector('.gallery-sidebar-toggle')?.getBoundingClientRect();
       const panel = document.querySelector("#gallery-search-field")?.getBoundingClientRect();
       const topbar = document.querySelector(".topbar")?.getBoundingClientRect();
       return {
@@ -1494,8 +1494,8 @@ try {
         inlineToggles: document.querySelectorAll(".desktop-sidebar-inline-toggle").length,
         galleryToggles: document.querySelectorAll(".gallery-sidebar-toggle").length,
         topbarSurfaceLeft: document.querySelector(".topbar-surface")?.getBoundingClientRect().left ?? -1,
-        brandVisibility: getComputedStyle(document.querySelector(".topbar .brand-lockup")).visibility,
-        brandInert: Boolean(document.querySelector(".topbar .brand")?.closest("[inert]")),
+        brandVisibility: getComputedStyle(document.querySelector('.desktop-sidebar .brand')).visibility,
+        brandInert: Boolean(document.querySelector('.desktop-sidebar .brand')?.closest('[inert]')),
       }));
       desktopSidebar.collapseMotion = collapseMotion;
       desktopSidebar.contentBefore = contentBefore?.x ?? -1;
@@ -1559,7 +1559,7 @@ try {
         : -1;
       desktopSidebar.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
-      desktopSidebar.restoredBrandRight = await page.locator(".topbar .brand-lockup")
+      desktopSidebar.restoredBrandRight = await page.locator('.desktop-sidebar .brand')
         .evaluate((brand) => brand.getBoundingClientRect().right);
     } else {
       await page.evaluate(() => window.scrollTo({ top: 320, behavior: "auto" }));
@@ -1580,7 +1580,7 @@ try {
       const topbar = await page.locator(".topbar").boundingBox();
       mobileNavigation = {
         opened: await page.locator(".mobile-nav-layer").count(),
-        brandVisible: await page.locator(".topbar .brand").isVisible(),
+        brandVisible: await page.locator('.mobile-sidebar .brand').isVisible(),
         fixedTop: fixedTop?.y ?? -1,
         expanded: await page.locator(".gallery-sidebar-toggle").getAttribute("aria-expanded"),
         internalToggles: await page.locator(".mobile-sidebar .sidebar-toggle-button").count(),
@@ -1636,7 +1636,7 @@ try {
         const dimensions = await page.evaluate(() => {
           const drawer = document.querySelector(".mobile-sidebar").getBoundingClientRect();
           const tools = document.querySelector(".topbar-actions").getBoundingClientRect();
-          const brand = document.querySelector(".topbar .brand-lockup").getBoundingClientRect();
+          const brand = document.querySelector('.mobile-sidebar .brand').getBoundingClientRect();
           return {
             width: innerWidth,
             drawerWidth: drawer.width,
@@ -1649,7 +1649,7 @@ try {
               const rect = button.getBoundingClientRect();
               return button.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
             }),
-            brandClickable: [...document.querySelectorAll(".topbar .brand-mark, .topbar .brand-name, .topbar .brand-version")].every((element) => {
+            brandClickable: [...document.querySelectorAll('.mobile-sidebar .brand-mark, .mobile-sidebar .brand-name')].every((element) => {
               const link = element.closest("a");
               const rect = element.getBoundingClientRect();
               return link.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
@@ -1672,7 +1672,7 @@ try {
       mobileNavigation.closed = await page.locator(".mobile-nav-layer").count();
       mobileNavigation.restored = await page.locator(".gallery-sidebar-toggle")
         .getAttribute("aria-expanded");
-      mobileNavigation.closedBrandVisible = await page.locator(".topbar .brand").isVisible();
+      mobileNavigation.closedBrandVisible = await page.locator('.sidebar .brand:visible').count() > 0;
     }
 
     const result = {
@@ -1868,19 +1868,17 @@ try {
       layout.brandLabel !== "主页" ||
       layout.brandName?.trim() !== "Pixhelf" ||
       layout.brandNameHref !== "/" ||
-      layout.brandVersion !== `v${appVersion}` ||
-      layout.brandVersionSize !== 11 ||
-      layout.brandRepository !== "https://github.com/eureka6/Pixhelf" ||
-      layout.sidebarBrands !== 0 ||
-      layout.topbarBrands !== 1 ||
-      !layout.brandDisplayed ||
+      layout.brandVersions !== 0 ||
+      layout.sidebarBrands !== 1 ||
+      layout.topbarBrands !== 0 ||
+      layout.brandDisplayed !== (target.name === 'desktop') ||
       layout.topbarHomeButtons !== 0 ||
       layout.leadingHomeButtons !== 0 ||
       layout.homeLabel !== "主页" ||
-      layout.homeSearchGap < 12 ||
+      (target.name === 'desktop' && layout.homeSearchGap < 12) ||
       !layout.homeStatic ||
       !layout.brandLoaded ||
-      layout.brandMenuGap < 8 || layout.brandMenuGap > 12 ||
+      (target.name === 'desktop' && (layout.brandMenuGap < 8 || layout.brandMenuGap > 12)) ||
       layout.sidebarControlSlots !== 0 ||
       layout.gallerySidebarToggles !== 1 ||
       layout.galleryToggleOpacity !== 1 ||
@@ -1910,7 +1908,7 @@ try {
         !desktopSidebar ||
         desktopSidebar.expanded !== "false" ||
         desktopSidebar.brandVisibility !== "visible" ||
-        desktopSidebar.brandInert ||
+        !desktopSidebar.brandInert ||
         desktopSidebar.restoredBrandRight <= 0 ||
         desktopSidebar.visibility !== "visible" ||
         desktopSidebar.navigationVisibility !== "hidden" ||
@@ -1918,7 +1916,7 @@ try {
         desktopSidebar.ariaHidden !== "true" ||
         desktopSidebar.stored !== "true" ||
         desktopSidebar.galleryLayout !== "justified" ||
-        desktopSidebar.redundantHeadings !== 0 ||
+        desktopSidebar.redundantHeadings !== 1 ||
         desktopSidebar.pathDetails !== 0 ||
         desktopSidebar.progressPanels !== 0 ||
         desktopSidebar.inlineToggles !== 0 ||
@@ -1959,7 +1957,7 @@ try {
         Math.abs(mobileNavigation.fixedTop) > 1 ||
         mobileNavigation.expanded !== "true" ||
         !mobileNavigation.brandVisible ||
-        !mobileNavigation.closedBrandVisible ||
+        mobileNavigation.closedBrandVisible ||
         mobileNavigation.internalToggles !== 0 ||
         mobileNavigation.metaRows !== 0 ||
         Math.abs(mobileNavigation.layerTopGap) > 1 ||

@@ -1464,6 +1464,7 @@ function App() {
     changeSearch("");
   };
   const goHome = () => {
+    setSearchOpen(false);
     navigateTo("library");
     setReloadToken((value) => value + 1);
   };
@@ -1498,7 +1499,6 @@ function App() {
         localSearch={browsingLocal}
         similarSearch={browsingSimilar}
         onSearchChange={changeSearch}
-        onHome={goHome}
         onToggleNavigation={() => {
           if (compactLayout) {
             setMobileNavOpen((open) => !open);
@@ -1528,6 +1528,7 @@ function App() {
         <span key={reloadToken} />
       </div>
       <Sidebar
+        onHome={goHome}
         summary={summary}
         activeSection={section}
         onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}

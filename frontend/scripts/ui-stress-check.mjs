@@ -97,13 +97,19 @@ try {
     const hidden = async expected => assert.equal(await bar.getAttribute('data-hidden'), String(expected));
     try {
       const sidebarBounds = await page.locator('.desktop-sidebar').boundingBox();
+      const brandBounds = width > 720 ? await page.locator('.desktop-sidebar .brand').boundingBox() : null;
+      const toggleBounds = await toggle.boundingBox();
+      assert.equal(await page.locator('.topbar .brand, .brand-version').count(), 0);
       const galleryTop = await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY);
       await scroll(320); await hidden(true);
-      assert((await page.locator('.topbar .brand').boundingBox()).y < 0);
+      assert((await page.locator('.search-toggle').boundingBox()).y < 0);
+      assert.deepEqual(await toggle.boundingBox(), toggleBounds, 'the sidebar button must remain in place');
       assert.equal(await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY), galleryTop, 'hiding the bar must not shift the gallery');
       if (width > 720) {
         assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
         assert.deepEqual(await page.locator('.desktop-sidebar').boundingBox(), sidebarBounds, 'hiding the topbar must leave the expanded sidebar in place');
+        assert.deepEqual(await page.locator('.desktop-sidebar .brand').boundingBox(), brandBounds, 'the logo stays with the sidebar');
+        await page.screenshot({ path: `${output}/sidebar-brand-${width}.png` });
         await scroll(280); await hidden(false);
         await toggle.click();
         await page.waitForTimeout(300);
@@ -117,6 +123,16 @@ try {
       await page.screenshot({ path: `${output}/topbar-hidden-${width}.png` });
       await toggle.click(); await hidden(false);
       await page.locator(f.sidebar).waitFor();
+      await page.locator(`${f.sidebar} .brand-name`).waitFor();
+      await page.waitForTimeout(250);
+      assert(await page.locator(`${f.sidebar} .brand`).evaluate(brand => {
+        const box = brand.getBoundingClientRect();
+        const icon = brand.querySelector('img').getBoundingClientRect();
+        const text = brand.querySelector('.brand-name').getBoundingClientRect();
+        return brand.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+          && Math.abs(icon.y + icon.height / 2 - text.y - text.height / 2) < 1;
+      }), 'sidebar logo and text form one aligned, clickable link');
+      await page.screenshot({ path: `${output}/sidebar-brand-open-${width}.png` });
       if (width <= 720) await toggle.click();
       await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
       await page.locator('.justified-gallery[data-resizing="true"]').waitFor({ state: 'detached' });
@@ -141,12 +157,12 @@ try {
       });
       assert(searchFits, 'opening search while the bar returns must keep the panel on screen');
       await page.keyboard.press('Escape');
-      await page.locator('.topbar .brand').focus();
+      await toggle.focus();
       await page.waitForTimeout(250); await hidden(false);
       await scroll(top + 700); await hidden(true);
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await scroll(0); await hidden(false);
-      assert((await page.locator('.topbar .brand').boundingBox()).y >= 0);
+      assert((await page.locator('.search-toggle').boundingBox()).y >= 0);
     } finally { await f.close(); }
   });
 

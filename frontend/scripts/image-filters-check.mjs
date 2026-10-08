@@ -271,7 +271,7 @@ try {
       if (width <= 720) {
         await page.locator('.gallery-sidebar-toggle').click();
         assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'false');
-        assert(await page.locator('.topbar .brand-name').isVisible());
+        assert(await page.locator('.mobile-sidebar .brand-name').isVisible());
       }
       await checkSearchDisclosure(f, width);
       console.log(`${width}px: combined filters, sorting, content search, reset, focus and exploration passed`);
@@ -292,7 +292,7 @@ try {
     const bounds = await panel.boundingBox();
     assert(bounds.y + bounds.height <= 390, 'landscape search runs below the screen');
     await landscape.page.screenshot({ path: `${output}/search-landscape.png` });
-    await landscape.page.locator('.topbar .brand').tap();
+    await landscape.page.locator('.gallery-sidebar-toggle').tap();
     await panel.waitFor({ state: 'hidden' });
     assert.equal(await landscape.page.locator('.image-viewer').count(), 0);
     assert.equal(await landscape.page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false);

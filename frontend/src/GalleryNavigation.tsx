@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
-import { VersionLink } from "./VersionLink";
 import logoMark from "./assets/pixhelf-mark.svg?inline";
 import { formatCount } from "./format";
 import {
@@ -35,7 +34,6 @@ export function Header({
   localSearch = false,
   similarSearch,
   onSearchChange,
-  onHome,
   onToggleNavigation,
   navigationOpen,
   compactLayout,
@@ -58,7 +56,6 @@ export function Header({
   localSearch?: boolean;
   similarSearch: boolean;
   onSearchChange: (value: string) => void;
-  onHome: () => void;
   onToggleNavigation: () => void;
   navigationOpen: boolean;
   compactLayout: boolean;
@@ -102,22 +99,14 @@ export function Header({
     if (open && mobileNavigationOpen) onToggleNavigation();
     onSearchOpenChange(open);
   };
-  const handleHome = () => {
-    onSearchOpenChange(false);
-    searchInputRef.current?.blur();
-    onHome();
-  };
   return (
     <header className="topbar" data-hidden={hidden} data-search-open={searchOpen} onFocus={onReveal}>
-      <div className="topbar-leading">
-        <SidebarToggleButton
-          className="gallery-sidebar-toggle"
-          expanded={navigationOpen}
-          onClick={() => { onReveal(); onToggleNavigation(); }}
-          controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
-        />
-        <Brand onHome={handleHome} />
-      </div>
+      <SidebarToggleButton
+        className="gallery-sidebar-toggle"
+        expanded={navigationOpen}
+        onClick={() => { onReveal(); onToggleNavigation(); }}
+        controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"}
+      />
       <div className="topbar-actions" role="toolbar" aria-label="图库工具">
         <ToolbarPopover
           id="gallery-search-field"
@@ -217,33 +206,20 @@ function SidebarToggleButton({
 
 function Brand({ onHome }: { onHome: () => void }) {
   return (
-    <div className="brand-lockup">
-      <a
-        className="brand"
-        href="/"
-        aria-label="主页"
-        title="主页"
-        onClick={(event) => {
-          if (
-            event.button !== 0
-            || event.metaKey
-            || event.ctrlKey
-            || event.shiftKey
-            || event.altKey
-          ) return;
-          event.preventDefault();
-          onHome();
-        }}
-      >
-        <span className="brand-symbol">
-          <img className="brand-mark" src={logoMark} width="32" height="32" alt="" />
-        </span>
-        <span className="brand-name">
-          Pixhelf
-        </span>
-      </a>
-      <VersionLink className="brand-version" />
-    </div>
+    <a
+      className="brand brand-lockup"
+      href="/"
+      aria-label="主页"
+      title="主页"
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        onHome();
+      }}
+    >
+      <img className="brand-mark" src={logoMark} width="32" height="32" alt="" />
+      <span className="brand-name">Pixhelf</span>
+    </a>
   );
 }
 
@@ -257,6 +233,7 @@ export function Sidebar({
   onClose,
   desktopCollapsed,
   onSettings,
+  onHome,
 }: {
   summary: GallerySummary | null;
   activeSection: GallerySection;
@@ -267,10 +244,12 @@ export function Sidebar({
   onClose: () => void;
   desktopCollapsed: boolean;
   onSettings: () => void;
+  onHome: () => void;
 }) {
   const management = useManagement();
   const navigation = (
     <>
+      <div className="sidebar-heading"><Brand onHome={onHome} /></div>
       <nav className="album-nav" aria-label="主导航">
         <NavigationButton
           label="图片与视频"

@@ -185,6 +185,7 @@ try {
     assert.equal(backend.exitCode, null, backendLog);
     try { return (await fetch(`${origin}/api/health`)).ok; } catch { return false; }
   }, "backend startup");
+  await eventually(async () => !(await (await fetch(`${origin}/api/gallery`)).json()).initializing, "initial gallery scan");
   const summary = await (await fetch(`${origin}/api/gallery`)).json();
   assert.equal(summary.total, imageIndex);
   assert.equal(summary.albums.length, 7);
@@ -197,7 +198,7 @@ try {
   assert(!summary.albums.some(album => ["项目 & 2026", "收藏", "空相册"].includes(album.path)));
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ?? "/root/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 
-  for (const width of process.argv.includes("--mobile") ? [390, 320] : [1440, 390, 320]) {
+  for (const width of process.argv.includes("--navigation-only") ? [] : process.argv.includes("--mobile") ? [390, 320] : [1440, 390, 320]) {
     const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: width <= 720 });
     const errors = [], imageRequests = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -316,7 +317,9 @@ try {
     }
     await navigate(page, "相册");
     assert.equal(await page.locator('.topbar .explore-toggle').count(), 0);
-    await page.locator('.topbar .brand').click();
+    const toggle = page.locator('.gallery-sidebar-toggle');
+    if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+    await page.locator(`${width <= 720 ? '.mobile-sidebar' : '.desktop-sidebar'} .brand`).click();
     await page.locator('.search-toggle').click();
     await page.getByRole('button', { name: '展开筛选', exact: true }).click();
     await page.getByLabel('排序方式', { exact: true }).selectOption('explore');

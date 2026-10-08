@@ -1,5 +1,5 @@
 import type { ComponentType } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useLayoutEffect, useState } from "preact/hooks";
 import { getGallery } from "./api";
 import { LoaderCircle } from "./icons";
 
@@ -15,7 +15,7 @@ export function GalleryEntry() {
   const [initializing, setInitializing] = useState(galleryIsInitializing);
   const [error, setError] = useState(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const controller = new AbortController();
     let timer = 0;
     const open = async () => {
@@ -48,13 +48,14 @@ export function GalleryEntry() {
   }, []);
 
   if (Gallery) return <Gallery />;
+  if (!initializing && !error) return null;
   const hint = error
     ? (initializing ? "正在自动重试，请检查网络连接。" : "请重新加载页面后重试。")
-    : (initializing ? "完成后将自动显示照片。" : "请稍候。");
+    : "完成后将自动显示照片。";
   return <main className="startup-page">
     <div role="status" aria-live="polite">
       {!error && <LoaderCircle className="startup-spinner" size={26} />}
-      <h1>{error ? "暂时无法打开图库" : initializing ? "正在准备图库…" : "正在打开图库…"}</h1>
+      <h1>{error ? "暂时无法打开图库" : "正在准备图库…"}</h1>
       <p>{hint}</p>
     </div>
     {error && <button type="button" onClick={() => window.location.reload()}>重新加载</button>}

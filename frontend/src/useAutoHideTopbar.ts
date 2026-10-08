@@ -18,7 +18,8 @@ export function useAutoHideTopbar(pinned: boolean, location: unknown, sidebarCol
       const top = scrollTop();
       const delta = top - previous;
       previous = top;
-      if (top <= 80 || document.querySelector('.justified-gallery[data-resizing="true"]')) {
+      if (top <= 80 || document.querySelector('.justified-gallery[data-resizing="true"]')
+        || document.querySelector('.desktop-sidebar')?.getAnimations().length) {
         distance = 0; reveal(); return;
       }
       if (!delta) return;

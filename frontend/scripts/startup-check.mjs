@@ -58,11 +58,18 @@ raise SystemExit(1)
   }
   browser = await launchBrowser();
   const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+  await context.addInitScript(() => {
+    window.openingGalleryScreens = 0;
+    new MutationObserver(() => {
+      if (document.querySelector('.startup-page h1')?.textContent === '正在打开图库…') window.openingGalleryScreens++;
+    }).observe(document, { childList: true, subtree: true });
+  });
   const page = await context.newPage();
   page.setDefaultTimeout(8000);
   const errors = [], requests = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("request", request => requests.push(new URL(request.url()).pathname));
+  let retainedCookie;
 
   for (const mode of ["setup", "login"]) {
     await rm(gate, { force: true });
@@ -79,10 +86,12 @@ raise SystemExit(1)
       catch { return false; }
     });
     requests.length = 0;
+    if (retainedCookie) await context.addCookies([retainedCookie]);
     const opened = performance.now();
-    await page.goto(origin);
+    const loginDocument = await page.goto(origin);
     await page.locator(`#${mode}-password`).waitFor();
     const loginReadyMs = Math.round(performance.now() - opened);
+    assert.equal(loginDocument.headers()['clear-site-data'], undefined, 'login must not block on clearing a warm browser cache');
     assert.equal(new URL(page.url()).pathname, `/${mode}`);
     assert(!requests.some(path => path.includes("GalleryApp")), "login must not load gallery code or styles");
     assert.equal((await context.request.get(`${origin}/api/images`)).status(), 401);
@@ -107,6 +116,7 @@ raise SystemExit(1)
     const card = page.locator(".image-card").first();
     await card.waitFor();
     await page.locator(".startup-page").waitFor({ state: "detached" });
+    assert.equal(await page.evaluate(() => window.openingGalleryScreens), 0);
     assert(requests.some(path => path.endsWith("/GalleryApp.js")));
     assert(requests.some(path => path.endsWith("/GalleryApp.css")));
     await card.click({ button: "right" });
@@ -126,7 +136,25 @@ raise SystemExit(1)
     await menu.getByRole("menuitem", { name: "已复制文件名", exact: true }).waitFor();
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "photo.JPG");
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ mode, loginReadyMs, authenticatedDuringScan: true, automaticGalleryEntry: true, copyImageLink: true, clipboardFallback: mode === "login", reloadAfterAssetFailure: mode === "setup" }));
+    retainedCookie = (await context.cookies()).find(cookie => cookie.name === 'pixhelf-session');
+    assert(retainedCookie);
+    if (mode === 'setup') {
+      await page.evaluate(async () => {
+        const asset = performance.getEntriesByType('resource').find(entry => entry.name.endsWith('/app.js')).name;
+        await Promise.all(Array.from({ length: 128 }, (_, index) => fetch(`${asset}?cache-check=${index}`).then(response => response.arrayBuffer())));
+      });
+    } else {
+      await context.clearCookies();
+      await page.goto(`${origin}/login`);
+      await page.locator('#login-username').fill('admin');
+      await page.locator('#login-password').fill(password);
+      await page.locator('.login-submit').click();
+      await page.locator('.image-card').first().waitFor();
+      assert.equal(await page.locator('.startup-page').count(), 0);
+      assert.equal(await page.evaluate(() => window.openingGalleryScreens), 0, 'ready galleries open without an intermediate screen');
+      assert(await page.locator('link[rel="modulepreload"][href$="/GalleryApp.js"]').count());
+    }
+    console.log(JSON.stringify({ mode, loginReadyMs, retainedExpiredSession: mode === 'login', authenticatedDuringScan: true, directGalleryEntry: true, copyImageLink: true, clipboardFallback: mode === "login", reloadAfterAssetFailure: mode === "setup" }));
     await stop();
   }
   await context.close();
