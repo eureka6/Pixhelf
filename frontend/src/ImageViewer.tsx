@@ -810,30 +810,40 @@ function PhotoViewer({
     const visualViewport = window.visualViewport;
     let frame = 0;
     const update = () => {
+      window.cancelAnimationFrame(frame);
       frame = 0;
+      // Keep the gesture's coordinate system fixed until the contact ends.
       if (pointersRef.current.size) return;
-      const visibleHeight = Math.min(
-        stage.clientHeight,
-        visualViewport?.height ?? viewer.clientHeight,
-      );
-      const offset = Math.max(0, (visibleHeight - surface.clientHeight) / 2);
-      surface.style.transition = viewer.style.getPropertyValue("--viewer-frame-offset")
-        ? ""
-        : "none";
+      // Measure the visible part of the image page without following its scroll.
+      const stageTop = stage.getBoundingClientRect().top + viewer.scrollTop;
+      const viewportTop = (visualViewport?.offsetTop ?? 0) - stageTop;
+      const visibleTop = Math.max(0, viewportTop);
+      const visibleBottom = Math.min(stage.clientHeight,
+        viewportTop + (visualViewport?.height ?? viewer.clientHeight));
+      const offset = (visibleTop + visibleBottom - surface.clientHeight) / 2;
       viewer.style.setProperty("--viewer-frame-offset", `${offset}px`);
     };
     const schedule = () => {
       if (!frame) frame = window.requestAnimationFrame(update);
     };
     update();
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    observer.observe(surface);
+    observer.observe(viewer);
     window.addEventListener("resize", schedule);
     visualViewport?.addEventListener("resize", schedule);
+    visualViewport?.addEventListener("scroll", schedule);
+    document.addEventListener("fullscreenchange", schedule);
     return () => {
       window.cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", schedule);
       visualViewport?.removeEventListener("resize", schedule);
+      visualViewport?.removeEventListener("scroll", schedule);
+      document.removeEventListener("fullscreenchange", schedule);
     };
-  }, [contactActive, viewport.width, viewport.height]);
+  }, [contactActive]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -1333,9 +1343,6 @@ function PhotoViewer({
       const surface = surfaceRef.current;
       const media = mediaRef.current;
       if (surface && media) {
-        const offset = new DOMMatrix(getComputedStyle(surface).transform).f;
-        surface.style.transition = "none";
-        dialogRef.current?.style.setProperty("--viewer-frame-offset", `${offset}px`);
         gestureGeometryRef.current = {
           surfaceWidth: surface.clientWidth,
           surfaceHeight: surface.clientHeight,

@@ -1730,7 +1730,6 @@
     bottom: auto;
     height: 100vh;
     height: 100svh;
-    transition: transform 180ms var(--ease-standard);
   }
 }
 

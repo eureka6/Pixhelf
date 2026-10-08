@@ -134,6 +134,127 @@ try {
       }
     };
 
+    await check("toolbar changes center the image on the next frame", async () => {
+      // Headless browsers have no toolbar: keep the small viewport fixed while
+      // the visible viewport changes, including a height below the image frame.
+      const style = await page.addStyleTag({ content: `
+        @media (hover: none) and (pointer: coarse) {
+          .viewer-image-frame { height: calc(100svh - 64px); }
+        }
+      ` });
+      try {
+        await page.waitForTimeout(240);
+        const samples = await page.evaluate(async () => {
+          const viewport = visualViewport;
+          const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+          const viewer = document.querySelector(".image-viewer");
+          const media = document.querySelector(".viewer-media");
+          const canvas = document.querySelector(".viewer-original-canvas");
+          const source = canvas?.dataset.renderedSource;
+          const dimensions = canvas && [canvas.width, canvas.height];
+          const fullHeight = viewport.height;
+          let height = fullHeight, top = 0;
+          Object.defineProperties(viewport, {
+            height: { configurable: true, get: () => height },
+            offsetTop: { configurable: true, get: () => top },
+          });
+          const samples = [];
+          try {
+            for (const hidden of [16, 48, 64, 96, 128, 96, 64, 32, 0]) {
+              height = fullHeight - hidden;
+              viewport.dispatchEvent(new Event("resize"));
+              await frame();
+              const bounds = media.getBoundingClientRect();
+              samples.push({ event: "resize", height, error: (bounds.top + bounds.bottom) / 2 - height / 2 });
+            }
+            height = fullHeight - 128;
+            viewport.dispatchEvent(new Event("resize"));
+            await frame();
+            for (top of [24, 48, 0]) {
+              viewport.dispatchEvent(new Event("scroll"));
+              await frame();
+              const bounds = media.getBoundingClientRect();
+              samples.push({ event: "scroll", top, error: (bounds.top + bounds.bottom) / 2 - (top + height / 2) });
+            }
+            if (canvas && (canvas !== document.querySelector(".viewer-original-canvas")
+              || canvas.dataset.renderedSource !== source
+              || canvas.width !== dimensions[0] || canvas.height !== dimensions[1])) {
+              throw new Error("toolbar changes replaced or resized the bitmap");
+            }
+            if (viewer.scrollTop !== 0) throw new Error("toolbar changes scrolled into details");
+            return samples;
+          } finally {
+            delete viewport.height;
+            delete viewport.offsetTop;
+            viewport.dispatchEvent(new Event("resize"));
+            await frame();
+          }
+        });
+        for (const sample of samples) assert(Math.abs(sample.error) < 1, JSON.stringify(sample));
+      } finally {
+        await style.evaluate(element => element.remove());
+      }
+    });
+
+    await check("rotation and fullscreen changes keep the image centered", async () => {
+      const initialViewport = page.viewportSize();
+      const style = await page.addStyleTag({ content: `
+        @media (hover: none) and (pointer: coarse) {
+          .viewer-image-frame { height: calc(100svh - 64px); }
+        }
+      ` });
+      const centered = async () => {
+        const error = await page.evaluate(async () => {
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const bounds = document.querySelector(".viewer-media").getBoundingClientRect();
+          return (bounds.top + bounds.bottom) / 2 - (visualViewport.offsetTop + visualViewport.height / 2);
+        });
+        assert(Math.abs(error) < 1, `image center is off by ${error}px`);
+      };
+      try {
+        for (const viewport of [{ width: 844, height: 390 }, { width: 390, height: 844 }]) {
+          await page.setViewportSize(viewport);
+          await centered();
+          await page.locator(".image-viewer").evaluate(viewer => viewer.requestFullscreen());
+          await centered();
+          await page.evaluate(() => document.exitFullscreen());
+          await centered();
+        }
+      } finally {
+        await page.evaluate(async () => { if (document.fullscreenElement) await document.exitFullscreen(); });
+        await style.evaluate(element => element.remove());
+        await page.setViewportSize(initialViewport);
+      }
+    });
+
+    await check("viewport changes during contact recenter immediately on release", async () => {
+      const before = await page.locator(".viewer-media").boundingBox();
+      try {
+        await begin();
+        await page.evaluate(async () => {
+          const height = visualViewport.height - 100;
+          Object.defineProperty(visualViewport, "height", { configurable: true, get: () => height });
+          visualViewport.dispatchEvent(new Event("resize"));
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        });
+        const held = await page.locator(".viewer-media").boundingBox();
+        assert.equal(held.y, before.y, "viewport changes must not move the image under the pointer");
+        await end();
+        const error = await page.evaluate(async () => {
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const bounds = document.querySelector(".viewer-media").getBoundingClientRect();
+          return (bounds.top + bounds.bottom) / 2 - visualViewport.height / 2;
+        });
+        assert(Math.abs(error) < 1, `image did not recenter on release: ${error}px`);
+      } finally {
+        await end();
+        await page.evaluate(() => {
+          delete visualViewport.height;
+          visualViewport.dispatchEvent(new Event("resize"));
+        });
+      }
+    });
+
     await check("double zoom keeps controls steady", async () => {
       await page.keyboard.press("="); await page.waitForTimeout(240);
       await watch();

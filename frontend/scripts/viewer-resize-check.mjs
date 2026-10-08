@@ -62,6 +62,8 @@ try {
     assert.equal(coverage.scrollTop, 0);
     assert.ok(coverage.detailsTop >= coverage.viewportHeight - 1, "image details leaked into the first screen");
     assert.ok(coverage.imageTop >= -1 && coverage.imageBottom <= coverage.viewportHeight + 1);
+    assert.ok(Math.abs((coverage.imageTop + coverage.imageBottom - coverage.viewportHeight) / 2) < 1,
+      "the image must stay centered in the visible viewport");
     return coverage;
   };
   await page.locator(".image-card").first().click();
