@@ -107,7 +107,7 @@ async function homeThroughBrand(page, selector, keyboard = false) {
     && document.querySelector(".app-shell").dataset.gallerySection === "library");
   assert.equal(await shell.evaluate(element => element.isConnected), true, "the logo reloaded the whole application");
   await shell.dispose();
-  assert.equal(await page.locator(".search-popover-panel input").inputValue(), "");
+  assert.equal(await page.locator(".gallery-search-input input").inputValue(), "");
   assert.equal(await page.locator(".search-toggle").getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator(".gallery-filter-summary").count(), 0);
   await page.locator(".mobile-nav-layer").waitFor({ state: "detached" });
@@ -165,7 +165,7 @@ try {
     await page.mouse.click(blankHeaderX, 25);
     assert.equal(await page.locator(".image-viewer").count(), 0);
     await page.locator(".search-toggle").click();
-    await page.locator(".search-popover-panel input").fill("navigation-check");
+    await page.locator(".gallery-search-input input").fill("navigation-check");
     await page.getByRole("button", { name: "展开筛选", exact: true }).click();
     await page.getByLabel("媒体类型", { exact: true }).selectOption("photo");
     const filtered = page.waitForResponse(response => {

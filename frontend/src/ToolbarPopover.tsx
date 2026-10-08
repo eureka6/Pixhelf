@@ -15,6 +15,7 @@ type ToolbarPopoverProps = {
   panelLabel: string;
   rootClassName?: string;
   triggerClassName?: string;
+  field?: ComponentChildren;
 };
 
 export function ToolbarPopover({
@@ -31,6 +32,7 @@ export function ToolbarPopover({
   panelLabel,
   rootClassName = "",
   triggerClassName = "",
+  field,
 }: ToolbarPopoverProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -96,6 +98,7 @@ export function ToolbarPopover({
       ref={rootRef}
       className={`toolbar-popover ${open ? "is-open" : ""} ${rootClassName}`}
     >
+      {field}
       <button
         ref={triggerRef}
         type="button"

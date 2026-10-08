@@ -404,6 +404,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const galleryLayoutRef = useRef<SelectableGalleryHandle>(null);
   const [viewerImageId, setViewerImageId] = useState<string | null>(null);
+  const [slideshowRequest, setSlideshowRequest] = useState(0);
   const [viewerDiscoveredImages, setViewerDiscoveredImages] = useState<GalleryImage[]>([]);
   const [viewerBranch, setViewerBranch] = useState<ViewerBranch | null>(null);
   const viewerBranchRef = useRef<ViewerBranch | null>(null);
@@ -747,6 +748,7 @@ function App() {
     setImageFilters(DEFAULT_IMAGE_FILTERS);
     setMobileNavOpen(false);
     setInfoImage(null);
+    setSlideshowRequest(0);
     viewerImageIdRef.current = null;
     setViewerImageId(null);
     setViewerDiscoveredImages([]);
@@ -970,6 +972,7 @@ function App() {
   }, [loadMore, recordViewerHistory, updateViewerBranch]);
 
   const closeViewerState = useCallback(() => {
+    setSlideshowRequest(0);
     const currentImageId = viewerImageIdRef.current;
     if (!currentImageId) return;
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
@@ -996,6 +999,7 @@ function App() {
   }, [resetSimilarSearch, updateViewerBranch]);
 
   const restoreViewerFromHistory = useCallback((requested: ViewerHistoryEntry, returning = false) => {
+    setSlideshowRequest(0);
     const child = viewerBranchRef.current;
     const currentImageId = viewerImageIdRef.current;
     let entry = requested;
@@ -1036,6 +1040,7 @@ function App() {
     if (!snapshot) return;
     if (action === "details") { setInfoImage(snapshot); return; }
     if (action === "similar") { openSimilarSearch(snapshot); return; }
+    setSlideshowRequest(current => action === "slideshow" ? current + 1 : 0);
     if (!viewerImageIdRef.current) {
       if (!authentication.guest) ensureSelectionHistory();
       recordViewerHistory(snapshot, null);
@@ -1055,6 +1060,7 @@ function App() {
   }, [recordViewerHistory, images, openSimilarSearch, resetSimilarSearch, updateViewerBranch]);
 
   const closeViewer = useCallback(() => {
+    setSlideshowRequest(0);
     if (!viewerImageIdRef.current || viewerHistoryClosingRef.current) return;
     const entry = readViewerHistoryEntry(window.history.state);
     if (viewerHistoryActiveRef.current && entry && !entry.detached && entry.depth < window.history.length) {
@@ -1366,6 +1372,7 @@ function App() {
 
   const showViewerImage = useCallback((candidate: GalleryImage, branch: ViewerBranch | null) => {
     if (viewerHistoryClosingRef.current) return;
+    if (candidate.video) setSlideshowRequest(0);
     recordViewerHistory(candidate, branch, true);
     updateViewerBranch(branch);
     setViewerDiscoveredImages(current => appendUniqueImages(current, [candidate]));
@@ -1381,6 +1388,7 @@ function App() {
   const openViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view") => {
     if (action === "details") { setInfoImage(candidate); return; }
     if (action === "similar") { openSimilarSearch(candidate); return; }
+    if (action === "slideshow") setSlideshowRequest(current => current + 1);
     if (candidate.id === viewerImageIdRef.current) return;
     const branch = viewerBranchRef.current;
     const index = branch?.images.findIndex(image => image === candidate) ?? -1;
@@ -1388,12 +1396,13 @@ function App() {
   }, [openSimilarSearch, showViewerImage]);
 
   const openRelatedViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view", pointerY?: number) => {
-    if (action !== "view") { openViewerImage(candidate, action); return; }
+    if (action !== "view" && action !== "slideshow") { openViewerImage(candidate, action); return; }
     if (!viewerImage || candidate.id === viewerImage.id) return;
     const index = similarPage.images.findIndex(image => image.id === candidate.id);
     const viewer = document.querySelector<HTMLElement>(".image-viewer");
     const card = imageCardById(candidate.id, viewer?.querySelector(".viewer-similar-gallery") ?? null);
     if (index < 0 || !viewer || !card) return;
+    setSlideshowRequest(current => action === "slideshow" ? current + 1 : 0);
     const returnAnchor = { ...captureViewerAnchor(card, pointerY, viewer), imageId: candidate.id };
     const parent = recordViewerHistory(viewerImage, viewerBranch, true, similarPage, returnAnchor);
     const branch: ViewerBranch = { ...similarPage, source: viewerImage, index, parent };
@@ -1681,6 +1690,8 @@ function App() {
           onNavigate={navigateViewer}
           onLoadMoreImages={loadMoreViewer}
           onClose={closeViewer}
+          slideshowRequest={slideshowRequest}
+          onStopSlideshow={() => setSlideshowRequest(0)}
           onSelectImage={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImage}
           selectedIds={selectedIds}
           onSelectImages={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImages}

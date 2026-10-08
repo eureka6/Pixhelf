@@ -35,7 +35,7 @@ export interface VideoMetadata {
   container: string;
 }
 
-export type ImageCardAction = "view" | "details" | "similar";
+export type ImageCardAction = "view" | "details" | "similar" | "slideshow";
 
 export interface ImagesPage {
   items: GalleryImage[];

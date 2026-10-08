@@ -10,6 +10,7 @@ import {
 import { PhotoInformation } from "./PhotoInformation";
 import { VideoViewer } from "./VideoViewer";
 import { ViewerNavigationButton } from "./ViewerNavigationButton";
+import { ViewerSlideshow } from "./ViewerSlideshow";
 import { useViewerNavigation } from "./useViewerNavigation";
 import { useViewerPreloads } from "./useViewerPreloads";
 import type { VideoFrame } from "./videoFrame";
@@ -163,6 +164,8 @@ export type ImageViewerProps = {
   onNavigate: (direction: -1 | 1, signal?: AbortSignal) => void;
   onLoadMoreImages: () => Promise<GalleryImage[]>;
   onClose: () => void;
+  slideshowRequest?: number;
+  onStopSlideshow?: () => void;
   onSelectImage?: (image: GalleryImage) => void;
   onSelectImages?: (images: GalleryImage[]) => void;
   onClearSelection?: () => void;
@@ -195,6 +198,8 @@ function PhotoViewer({
   onNavigate,
   onLoadMoreImages,
   onClose,
+  slideshowRequest = 0,
+  onStopSlideshow,
   onSelectImage,
   onSelectImages,
   onClearSelection,
@@ -269,6 +274,7 @@ function PhotoViewer({
   const swipeOutgoingRef = useRef<HTMLElement | null>(null);
   const preparedSwipeSnapshotRef = useRef<PreparedSwipeSnapshot | null>(null);
   const [contactActive, setContactActive] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [scrollPage, setScrollPage] = useState<ViewerPage>("image");
   const [detailsToolbarInRange, setDetailsToolbarInRange] = useState(false);
@@ -822,6 +828,7 @@ function PhotoViewer({
         viewportTop + (visualViewport?.height ?? viewer.clientHeight));
       const offset = (visibleTop + visibleBottom - surface.clientHeight) / 2;
       viewer.style.setProperty("--viewer-frame-offset", `${offset}px`);
+      viewer.style.setProperty("--viewer-visible-bottom", `${visibleBottom}px`);
     };
     const schedule = () => {
       if (!frame) frame = window.requestAnimationFrame(update);
@@ -2002,6 +2009,7 @@ function PhotoViewer({
               )}
               {image.motion && <MediaPreview image={image} autoPlay />}
               <ImageCardActions image={image} selected={selectedIds?.has(image.id)} selectionDisabled={selectionDisabled} onSelect={onSelectImage ? () => onSelectImage(image) : undefined}
+                onMenuChange={setMenuOpen}
                 fullscreen={fullscreen} onToggleFullscreen={fullscreenAvailable ? () => void toggleFullscreen() : undefined} onAction={action => {
                 if (action === "view") {
                   commitTransform(DEFAULT_TRANSFORM);
@@ -2017,6 +2025,11 @@ function PhotoViewer({
       </div>
       <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
       <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
+      {slideshowRequest > 0 && onStopSlideshow && <ViewerSlideshow key={slideshowRequest} viewerRef={dialogRef}
+        images={images} activeIndex={activeIndex} hasMore={hasMore} onLoadMore={onLoadMoreImages}
+        ready={currentLoadState.loaded || currentLoadState.failed}
+        blocked={contactActive || dragging || menuOpen || scrollPage !== "image" || transform.scale > MIN_SCALE}
+        onOpen={onOpenImage} onStop={onStopSlideshow} />}
 
       {currentLoadState.failed && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>

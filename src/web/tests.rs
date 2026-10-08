@@ -65,6 +65,65 @@ fn image_view_keeps_the_payload_compact() {
 }
 
 #[tokio::test]
+async fn animated_gifs_scan_generate_thumbnails_and_serve_original_frames() {
+    use image::AnimationDecoder;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("gallery");
+    std::fs::create_dir_all(root.join("Live")).unwrap();
+    let gif = include_bytes!("../../frontend/scripts/fixtures/animated.gif");
+    std::fs::write(root.join("Live/animated.GIF"), gif).unwrap();
+    std::fs::write(root.join("broken.gif"), b"not an image").unwrap();
+    let index = crate::gallery::scan_gallery(&root, None).unwrap();
+    assert_eq!(index.images.len(), 1);
+    let record = Arc::clone(&index.images[0]);
+    assert_eq!((record.width, record.height), (960, 720));
+    assert_eq!(record.album, "Live");
+    assert!(record.video.is_none());
+    let rescanned = crate::gallery::scan_gallery(&root, Some(&index)).unwrap();
+    assert!(Arc::ptr_eq(&record, &rescanned.images[0]));
+
+    let thumbnails = ThumbnailManager::new(temp.path().join("cache")).unwrap();
+    thumbnails.reconcile(&index.images);
+    thumbnails.start_workers(1);
+    let app = router(AppState {
+        index: Arc::new(RwLock::new(Arc::new(index))),
+        thumbnails: Arc::clone(&thumbnails),
+    });
+    for path in [
+        format!("/api/images/{}.gif", record.id),
+        format!("/api/images/{}/original", record.id),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/gif");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), gif);
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_ne!(
+            frames[0].buffer().get_pixel(0, 0),
+            frames[1].buffer().get_pixel(0, 0)
+        );
+    }
+    let thumbnail = thumbnails.ensure_ready(&record.id).await.unwrap();
+    let decoded = image::open(thumbnail).unwrap().to_rgb8();
+    assert!(decoded.width() <= 960 && decoded.height() <= 720);
+    assert!(
+        decoded.get_pixel(0, 0)[0] > 180,
+        "thumbnail uses the red first frame"
+    );
+    assert!(crate::similarity::signature_for_upload(gif).is_ok());
+}
+
+#[tokio::test]
 async fn heif_live_photos_serve_full_images_and_preserve_both_originals() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("gallery");

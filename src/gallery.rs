@@ -456,7 +456,7 @@ fn is_supported_image(path: &Path) -> bool {
         .map(|extension| {
             matches!(
                 extension.to_ascii_lowercase().as_str(),
-                "jpg" | "jpeg" | "png" | "webp" | "heic" | "heif"
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "heic" | "heif"
             )
         })
         .unwrap_or(false)

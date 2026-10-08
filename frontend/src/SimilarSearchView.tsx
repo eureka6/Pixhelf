@@ -34,8 +34,8 @@ export function SimilarSearchView({ source, results, filter, onUpload, onClear, 
     if (!file) return;
     if (!file.size) { setFileError("图片文件为空，请重新选择"); return; }
     if (file.size > 20 * 1024 * 1024) { setFileError("图片不能超过 20 MB"); return; }
-    if (!/\.(jpe?g|png|webp)$/i.test(file.name) && !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      setFileError("请选择 JPG、PNG 或 WebP 图片"); return;
+    if (!/\.(jpe?g|png|webp|gif)$/i.test(file.name) && !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
+      setFileError("请选择 JPG、PNG、WebP 或 GIF 图片"); return;
     }
     setFileError("");
     onUpload(file);
@@ -43,7 +43,7 @@ export function SimilarSearchView({ source, results, filter, onUpload, onClear, 
   return (
     <section className="similar-search-page" aria-labelledby="similar-search-title">
       <header className="similar-search-heading"><h1 id="similar-search-title"><ScanSearch size={22} />相似图片</h1><span>以图搜图</span></header>
-      <input ref={inputRef} type="file" hidden accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" aria-label="上传查询图片"
+      <input ref={inputRef} type="file" hidden accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif" aria-label="上传查询图片"
         onChange={event => { choose(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
       <div className={`similar-upload ${source ? "has-source" : ""}`} data-dragging={dragging}
         onDragOver={event => { event.preventDefault(); setDragging(true); }}

@@ -12,6 +12,7 @@ import {
   Trash2,
   Menu,
   Search,
+  SlidersHorizontal,
   ScanSearch,
   X,
 } from "./icons";
@@ -77,6 +78,11 @@ export function Header({
   const searchPlaceholder = localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
     ? "描述想找的图片"
     : "搜索文件名";
+  const searchHint = semanticSearch ? "用一句话描述画面，发现想找的图片。"
+    : searchIndexing ? "先按文件名查找，内容搜索准备中。"
+    : localSearch ? "按文件名查找当前目录。"
+    : similarSearch || storageSearch ? "按名称筛选已加载的结果。"
+    : albumSearch ? "按名称或路径查找相册。" : "输入文件名，结果随输入更新。";
 
   useLayoutEffect(() => {
     if (!searchOpen) {
@@ -116,24 +122,19 @@ export function Header({
           openLabel={filters ? "搜索与筛选" : "打开搜索"}
           closeLabel={filters ? "收起搜索与筛选" : "收起搜索"}
           panelLabel={localSearch ? "搜索本地目录" : similarSearch ? "筛选相似图片" : storageSearch ? "筛选外部文件" : albumSearch ? "搜索相册" : "搜索与筛选"}
-          icon={
-            <>
-              {searchOpen ? <X className="search-toggle-icon" size={18} /> : <Search className="search-toggle-icon" size={18} />}
-              <span className="toolbar-state-dot" aria-hidden="true" />
-            </>
-          }
-          rootClassName={`topbar-search ${search || filtersActive ? "has-query" : ""} ${filters ? "gallery-search" : ""} ${semanticSearch ? "is-semantic" : ""}`}
+          icon={<SlidersHorizontal size={17} />}
+          rootClassName="topbar-search"
           triggerClassName="search-toggle"
           panelClassName="search-popover-panel gallery-search-panel"
-        >
-          <div className="gallery-search-top">
+          field={
             <div className="gallery-search-input">
               <Search className="search-popover-icon" aria-hidden="true" size={17} />
               <input
                 ref={searchInputRef}
                 type="search"
                 value={search}
-                onInput={(event) => onSearchChange(event.currentTarget.value)}
+                onFocus={() => handleSearchOpenChange(true)}
+                onInput={(event) => { handleSearchOpenChange(true); onSearchChange(event.currentTarget.value); }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
                     event.preventDefault();
@@ -144,7 +145,6 @@ export function Header({
                 aria-label={localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : "搜索文件名"}
                 enterKeyHint="search"
                 autoComplete="off"
-                tabIndex={searchOpen ? 0 : -1}
               />
               {search && (
                 <button
@@ -153,11 +153,17 @@ export function Header({
                   onClick={() => { onSearchChange(""); searchInputRef.current?.focus({ preventScroll: true }); }}
                   aria-label="清空搜索"
                   title="清空搜索"
-                  tabIndex={searchOpen ? 0 : -1}
                 >
                   <X size={15} />
                 </button>
               )}
+            </div>
+          }
+        >
+          <div className="gallery-search-top">
+            <div className="gallery-search-heading">
+              <strong>{albumSearch ? "搜索相册" : similarSearch || storageSearch ? "筛选结果" : "搜索图库"}</strong>
+              <p>{searchHint}</p>
             </div>
             {filters && <button type="button" className="gallery-filter-toggle" aria-expanded={filtersExpanded}
               aria-label={filtersExpanded ? "收起筛选" : "展开筛选"} title={filterLabels.join(" · ") || "分类、类型、画幅与排序"}

@@ -133,6 +133,8 @@ export function selectViewerSourceStrategy(
   renderSize: ViewportSize,
   viewportBitmapsSupported: boolean,
 ): ViewerSourceStrategy {
+  // Canvas bitmaps only retain the first frame of animated images.
+  if (/\.gif$/i.test(image.name)) return "direct-original";
   const sourceFitsViewport = image.width <= renderSize.width
     && image.height <= renderSize.height;
   if (viewportBitmapsSupported && !sourceFitsViewport) return "viewport-upgrade";

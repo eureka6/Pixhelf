@@ -55,6 +55,8 @@ async function openMenu(card) {
 async function dismissTouchMenu(page) {
   await page.touchscreen.tap(100, 5);
   await page.locator(".photo-card-menu").waitFor({ state: "detached" });
+  // Touch hit expansion may focus the search field beside this header point.
+  if (await page.locator('.search-toggle').getAttribute('aria-expanded') === 'true') await page.keyboard.press('Escape');
 }
 
 async function checkTouchMenu(page, selector) {
@@ -134,7 +136,7 @@ async function expectMenu(page) {
   await menu.waitFor();
   const waterfall = await menu.evaluate(element => Boolean(element.closest(".image-card, .viewer-similar-card")));
   const fullscreen = await menu.getByRole("menuitem", { name: /^(全屏查看|退出全屏)$/ }).count();
-  assert.equal(await menu.getByRole("menuitem").count(), (waterfall ? 8 : 6) + fullscreen);
+  assert.equal(await menu.getByRole("menuitem").count(), (waterfall ? 8 : 6) + fullscreen + await menu.getByRole("menuitem", { name: "幻灯片播放", exact: true }).count());
   const bounds = await menu.boundingBox();
   const viewport = page.viewportSize();
   assert(bounds && bounds.x >= 10 && bounds.y >= 10);

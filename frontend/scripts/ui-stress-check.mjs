@@ -150,8 +150,10 @@ try {
         const start = performance.now();
         while (performance.now() - start < 250) {
           await new Promise(requestAnimationFrame);
-          const box = document.querySelector('.search-popover-panel').getBoundingClientRect();
+          const panel = document.querySelector('.search-popover-panel');
+          const box = panel.getBoundingClientRect();
           if (box.left < 0 || box.right > innerWidth) return false;
+          if (innerWidth <= 720 && (Math.abs(box.left - 8) > 1 || Math.abs(panel.offsetWidth - (innerWidth - 16)) > 1)) return false;
         }
         return true;
       });

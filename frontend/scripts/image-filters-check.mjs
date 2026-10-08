@@ -62,7 +62,10 @@ async function fixture(width, ready = true, touch = width <= 720) {
   await page.locator('.image-card[data-loaded="true"]').first().waitFor();
   const idle = () => page.waitForFunction(() => document.querySelector('.content').getAttribute('aria-busy') === 'false');
   const open = async (expand = true) => {
-    if (await page.locator('.search-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('.search-toggle').click();
+    if (await page.locator('.search-toggle').getAttribute('aria-expanded') !== 'true') {
+      await page.locator('.search-toggle').focus();
+      await page.locator('.search-toggle').click();
+    }
     await page.getByRole('group', { name: '搜索与筛选', exact: true }).waitFor();
     if (expand && await page.locator('.gallery-filter-toggle').getAttribute('aria-expanded') !== 'true') {
       await page.getByRole('button', { name: '展开筛选', exact: true }).click();
@@ -82,8 +85,15 @@ async function fixture(width, ready = true, touch = width <= 720) {
 
 async function checkSearchDisclosure(f, width) {
   const { page } = f;
-  const input = page.locator('.search-popover-panel input');
+  const input = page.locator('.gallery-search-input input');
   const panel = page.locator('.gallery-search-panel');
+  await f.open(false);
+  await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'hidden' });
+  assert(await input.isVisible(), 'the topbar must expose a directly editable search field');
+  const inputBox = await input.boundingBox();
+  assert(inputBox.x < (width <= 720 ? 100 : 300), 'search belongs on the left of the topbar');
   const closed = async () => {
     await panel.waitFor({ state: 'hidden' });
     assert.equal(await input.evaluate(element => element === document.activeElement), false, 'closing search leaves the keyboard focused');
@@ -103,7 +113,7 @@ async function checkSearchDisclosure(f, width) {
   const before = await page.locator('.content').boundingBox();
   await f.open(false);
   assert.deepEqual(await page.locator('.content').boundingBox(), before, 'opening search moves the gallery');
-  assert((await panel.boundingBox()).height < 80, 'collapsed search must fit in one compact row');
+  assert((await panel.boundingBox()).height < 110, 'collapsed search stays compact on narrow screens');
   assert.equal(await page.locator('.gallery-filter-toggle').getAttribute('aria-expanded'), 'false');
   assert.equal(await page.locator('.gallery-filter-controls').count(), 0, 'detailed controls are hidden by default');
   await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
@@ -113,7 +123,7 @@ async function checkSearchDisclosure(f, width) {
   await page.getByLabel('媒体类型', { exact: true }).selectOption('photo');
   await f.idle();
   await page.getByRole('button', { name: '收起筛选', exact: true }).click();
-  assert((await panel.boundingBox()).height < 80, 'collapse must reclaim the space');
+  assert((await panel.boundingBox()).height < 110, 'collapse must reclaim the space');
   assert.equal(await input.inputValue(), '输入法测试');
   assert.equal(await page.locator('.gallery-filter-count').textContent(), '1');
   await page.getByRole('button', { name: '展开筛选', exact: true }).click();
@@ -124,7 +134,6 @@ async function checkSearchDisclosure(f, width) {
   await f.open(false);
   await input.focus();
   await input.press('Shift+Tab');
-  await page.keyboard.press('Shift+Tab');
   await closed();
   assert(await page.evaluate(() => document.activeElement !== document.body && !document.activeElement.closest('.topbar-search')),
     'dismissing search must preserve keyboard focus on the next control');
@@ -229,8 +238,8 @@ try {
       assert.equal(f.requests.at(-1).get('orientation'), 'portrait');
       await page.screenshot({ path: `${output}/filters-${width}.png` });
       assert.equal(await page.locator('.filter-toggle').count(), 0, 'search and filtering share one entry');
-      assert.equal(await page.locator('.search-popover-panel input').inputValue(), '自然风景');
-      assert(await page.locator('.search-popover-panel input').isVisible());
+      assert.equal(await page.locator('.gallery-search-input input').inputValue(), '自然风景');
+      assert(await page.locator('.gallery-search-input input').isVisible());
       await page.keyboard.press('Escape');
       assert(await page.locator('.search-toggle').evaluate(button => document.activeElement === button));
       await f.open();
@@ -242,7 +251,7 @@ try {
       await f.change('媒体类型', 'live', 'kind');
       assert.equal(f.requests.at(-1).get('seed'), seed, 'changing filters keeps the random order');
       const updatedSearch = f.request('search', '海边的日落');
-      await page.locator('.search-popover-panel input').fill('海边的日落');
+      await page.locator('.gallery-search-input input').fill('海边的日落');
       await updatedSearch; await f.idle();
       assert.equal(f.requests.at(-1).get('sort'), 'explore', 'searching does not silently change the chosen sort');
       assert.equal(f.requests.at(-1).get('seed'), seed);
@@ -282,7 +291,7 @@ try {
   try {
     await landscape.page.setViewportSize({ width: 844, height: 390 });
     await landscape.open();
-    const input = landscape.page.locator('.search-popover-panel input');
+    const input = landscape.page.locator('.gallery-search-input input');
     assert.equal(await input.evaluate(element => document.activeElement === element), false, 'landscape touch search forces the keyboard open');
     assert.equal(await input.evaluate(element => getComputedStyle(element).fontSize), '16px');
     assert.equal(await landscape.page.locator('.toolbar-popover-backdrop').count(), 0);
@@ -318,7 +327,7 @@ try {
     assert(await f.page.locator('.image-card').evaluateAll(cards => cards.every(card => card.dataset.imageName.startsWith('video-'))), 'stale response must not replace the newest filter');
     await f.open();
     const empty = f.request('search', 'missing-file');
-    await f.page.locator('.search-popover-panel input').fill('missing-file');
+    await f.page.locator('.gallery-search-input input').fill('missing-file');
     await empty; await f.idle();
     await f.page.getByText('没有符合筛选条件的内容', { exact: true }).waitFor();
     assert.equal(await f.page.locator('.image-card').count(), 0);
@@ -350,7 +359,7 @@ try {
     const request = custom.request('search', '海边的日落');
     await page.getByRole('button', { name: '旅行', exact: true }).click();
     await request; await custom.idle();
-    assert.equal(await page.locator('.search-popover-panel input').inputValue(), '海边的日落');
+    assert.equal(await page.locator('.gallery-search-input input').inputValue(), '海边的日落');
     await page.reload();
     await custom.open();
     await page.getByRole('button', { name: '旅行', exact: true }).waitFor();
@@ -386,7 +395,7 @@ try {
     await unavailable.change('媒体类型', 'live', 'kind');
     await unavailable.page.locator('.gallery-filter-summary').getByText('90 项', { exact: true }).waitFor();
     const searched = unavailable.request('search', defaults[0].query);
-    await unavailable.page.locator('.search-popover-panel input').fill(defaults[0].query);
+    await unavailable.page.locator('.gallery-search-input input').fill(defaults[0].query);
     await searched; await unavailable.idle();
     assert.equal(await unavailable.page.locator('.gallery-filter-count').textContent(), '1', 'filename searches must not count unavailable content categories');
     console.log('metadata filters work when semantic search is unavailable');

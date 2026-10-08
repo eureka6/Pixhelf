@@ -197,6 +197,7 @@ try {
         ).length,
         contentSearches: document.querySelectorAll(".content .search-field").length,
         topbarSearchRightGap: searchRect && topbarRect ? topbarRect.right - searchRect.right : -1,
+        topbarSearchLeft: searchRect?.left ?? -1,
         topbarExploreButtons: document.querySelectorAll(".topbar-actions > .explore-toggle").length,
         sidebarExploreButtons: document.querySelectorAll(".desktop-sidebar .album-nav > .explore-toggle").length,
         sidebarStatuses: document.querySelectorAll(".sidebar-status").length,
@@ -1317,7 +1318,7 @@ try {
       const topbar = document.querySelector(".topbar")?.getBoundingClientRect();
       return {
         expanded: document.querySelector(".search-toggle")?.getAttribute("aria-expanded"),
-        focused: document.activeElement?.matches("#gallery-search-field input") ?? false,
+        focused: document.activeElement?.matches(".gallery-search-input input") ?? false,
         panelRole: document.querySelector("#gallery-search-field")?.getAttribute("role"),
         panelInert: document.querySelector("#gallery-search-field")?.inert ?? true,
         leadingGap: leading && panel ? panel.left - leading.right : -1,
@@ -1333,16 +1334,12 @@ try {
         searchToggleBefore.y - searchToggleOpen.y,
       )
       : -1;
-    await page.locator("#gallery-search-field input").fill("x");
-    await page.waitForFunction(() =>
-      document.querySelector(".topbar-search")?.classList.contains("has-query")
-    );
-    searchDisclosure.hasQueryClass = true;
-    await page.locator("#gallery-search-field input").fill("");
-    await page.waitForFunction(() =>
-      !document.querySelector(".topbar-search")?.classList.contains("has-query")
-    );
-    searchDisclosure.queryClassCleared = true;
+    await page.locator(".gallery-search-input input").fill("x");
+    await page.locator('.topbar-search .clear-search').waitFor();
+    searchDisclosure.canClearQuery = true;
+    await page.locator(".gallery-search-input input").fill("");
+    await page.locator('.topbar-search .clear-search').waitFor({ state: 'detached' });
+    searchDisclosure.clearHiddenWhenEmpty = true;
     if (target.name === "mobile") {
       await page.evaluate(() => {
         document.documentElement.style.setProperty("--visual-viewport-top", "24px");
@@ -1415,12 +1412,12 @@ try {
     await page.waitForFunction(() =>
       !document.querySelector(".gallery-reshuffle") &&
       document.querySelector(".desktop-sidebar .album-link")?.classList.contains("active") &&
-      document.querySelector("#gallery-search-field input")?.value === ""
+      document.querySelector(".gallery-search-input input")?.value === ""
     , undefined, { timeout: 60_000 });
     const homeNavigation = await page.evaluate(() => ({
       allImagesActive: document.querySelector(".desktop-sidebar .album-link")
         ?.classList.contains("active") ?? false,
-      searchValue: document.querySelector("#gallery-search-field input")?.value,
+      searchValue: document.querySelector(".gallery-search-input input")?.value,
     }));
     homeNavigation.fromExplore = fromExplore;
     homeNavigation.repeatedAtHome = [];
@@ -1851,8 +1848,8 @@ try {
       searchDisclosure.stationaryToggleDelta > 0.5 ||
       searchDisclosure.restored !== "false" ||
       !searchDisclosure.panelInertClosed ||
-      !searchDisclosure.hasQueryClass ||
-      !searchDisclosure.queryClassCleared ||
+      !searchDisclosure.canClearQuery ||
+      !searchDisclosure.clearHiddenWhenEmpty ||
       searchDisclosure.panelTop - searchDisclosure.topbarBottom < 6 ||
       exploration.firstSeed.length !== 32 ||
       exploration.secondSeed.length !== 32 ||
@@ -1889,7 +1886,8 @@ try {
       layout.contentInfoRows !== 0 ||
       layout.sortControls !== 0 ||
       layout.topbarSearchRightGap < 0 ||
-      layout.topbarSearchRightGap > 20 ||
+      (target.name === "mobile" && layout.topbarSearchRightGap > 20) ||
+      (target.name === "desktop" && layout.topbarSearchLeft > 300) ||
       layout.topbarExploreButtons !== 0 ||
       layout.sidebarExploreButtons !== 0 ||
       layout.sidebarStatuses !== 0 ||

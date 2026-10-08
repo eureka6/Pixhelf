@@ -43,7 +43,7 @@ pub async fn run(state: AppState, config: Config) {
             .map(|record| record.id.clone())
             .collect::<Vec<_>>();
         if index.images.is_empty() {
-            warn!(gallery = %config.gallery_dir.display(), "图库为空，添加 JPEG、PNG、WebP 图片或视频后会自动更新");
+            warn!(gallery = %config.gallery_dir.display(), "图库为空，添加 JPEG、PNG、WebP、GIF、HEIC 图片或视频后会自动更新");
         }
         info!(
             images = index.images.len(),

@@ -572,7 +572,7 @@ async fn uploaded_similar_images(
             let signature = signature_for_upload(&bytes).map_err(|_| {
                 (
                     StatusCode::BAD_REQUEST,
-                    "图片无法读取或尺寸过大，请选择 JPG、PNG 或 WebP 图片",
+                    "图片无法读取或尺寸过大，请选择 JPG、PNG、WebP 或 GIF 图片",
                 )
             })?;
             rank_similar_signature(&signature, candidates).map_err(|error| {
