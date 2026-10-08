@@ -31,6 +31,7 @@ import {
   imageCardById,
   scrollTopForAnchor,
   scrollWindowImmediately,
+  visualViewportBounds,
 } from "./galleryViewport";
 import type { ViewerAnchor } from "./galleryViewport";
 import { ImageViewer } from "./ImageViewer";
@@ -65,7 +66,6 @@ import type {
   ThumbnailStatus,
 } from "./types";
 import {
-  getDecodedViewerOriginal,
   prepareViewerImages,
   releaseViewerAssets,
   releaseViewerMedia,
@@ -85,7 +85,7 @@ const GALLERY_POLL_INTERVAL_MS = 10_000;
 const MOBILE_NAV_EXIT_MS = 240;
 const VIEWER_RETURN_SETTLE_MS = 32;
 const VIEWER_RETURN_TIMEOUT_MS = 480;
-const VIEWER_RETURN_ANIMATION_MS = 260;
+const VIEWER_RETURN_ANIMATION_MS = 280;
 const INITIAL_BOOTSTRAP = takeInitialBootstrap();
 
 type ImagePageState = {
@@ -104,6 +104,8 @@ type ViewerReturnFlight = {
   layer: HTMLDivElement;
   backdrop: HTMLDivElement;
   media: HTMLElement;
+  source: DOMRect;
+  visible: boolean;
   animations: Animation[];
 };
 
@@ -123,20 +125,26 @@ const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
 function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
   if (!flight) return;
   for (const animation of flight.animations) animation.cancel();
-  releaseViewerMedia(flight.media);
+  releaseViewerMedia(flight.layer);
   flight.layer.remove();
 }
 
 function createViewerReturnFlight(): ViewerReturnFlight | null {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
   const viewer = document.querySelector<HTMLElement>(".image-viewer");
   const media = viewer?.querySelector<HTMLElement>(".viewer-media");
   if (!viewer || !media) return null;
 
   const sourceRect = media.getBoundingClientRect();
   if (sourceRect.width <= 0 || sourceRect.height <= 0) return null;
+  const viewport = visualViewportBounds();
+  const visible = Math.min(sourceRect.bottom, viewport.bottom) - Math.max(sourceRect.top, viewport.top) > 2;
+  const mediaStyle = getComputedStyle(media);
 
   const layer = document.createElement("div");
   layer.className = "viewer-return-layer";
+  layer.setAttribute("aria-hidden", "true");
+  layer.inert = true;
   layer.dataset.phase = "settling";
   layer.dataset.imageId = viewer.dataset.imageId ?? "";
   layer.dataset.createdAt = String(performance.now());
@@ -158,50 +166,64 @@ function createViewerReturnFlight(): ViewerReturnFlight | null {
     transition: "none",
     animation: "none",
     opacity: "1",
-    borderRadius: "6px",
-    boxShadow: "0 12px 38px rgba(0, 0, 0, .28)",
+    borderRadius: mediaStyle.borderRadius,
+    boxShadow: mediaStyle.boxShadow,
   });
 
-  const thumbnailSource = media.querySelector<HTMLImageElement>(".viewer-thumbnail");
-  const originalSource = media.querySelector<HTMLElement>(".viewer-original");
-  const originalUrl = originalSource instanceof HTMLImageElement
-    ? originalSource.currentSrc || originalSource.src
-    : originalSource?.dataset.originalUrl ?? "";
-  const decodedOriginal = originalUrl ? getDecodedViewerOriginal(originalUrl) : null;
-  const thumbnail = thumbnailSource?.cloneNode(false) as HTMLImageElement | undefined;
-  const original = viewer.dataset.fullLoaded === "true"
-    ? (decodedOriginal
-      ?? (originalSource instanceof HTMLImageElement && originalSource.complete
-        ? originalSource
-        : null))?.cloneNode(false) as HTMLImageElement | undefined
-    : undefined;
-  const visualLayers = [thumbnail, original].filter(
-    (visual): visual is HTMLImageElement => Boolean(visual),
-  );
-  clone.replaceChildren(...visualLayers);
-  visualLayers.forEach((visual, index) => {
-    visual.className = index === visualLayers.length - 1 && original
-      ? "viewer-return-visual viewer-return-original"
-      : "viewer-return-visual viewer-return-thumbnail";
-    visual.alt = "";
-    visual.setAttribute("aria-hidden", "true");
+  // Preserve the layers actually on screen, including mobile bitmaps and an
+  // in-flight original-image fade. Copy canvas pixels only once.
+  const sources = visible
+    ? media.querySelectorAll<HTMLImageElement | HTMLCanvasElement>(":scope > img, :scope > canvas") : [];
+  for (const source of sources) {
+    const style = getComputedStyle(source);
+    if (Number(style.opacity) <= 0) continue;
+    let visual: HTMLImageElement | HTMLCanvasElement;
+    if (source instanceof HTMLCanvasElement) {
+      if (!source.width || !source.height) continue;
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 1440 / Math.max(source.width, source.height));
+      canvas.width = Math.max(1, Math.round(source.width * scale));
+      canvas.height = Math.max(1, Math.round(source.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) continue;
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
+      visual = canvas;
+    } else {
+      if (!source.complete || !source.naturalWidth) continue;
+      visual = source.cloneNode(false) as HTMLImageElement;
+      visual.alt = "";
+    }
+    visual.className = "viewer-return-visual";
     visual.draggable = false;
     Object.assign(visual.style, {
       position: "absolute",
       inset: "0",
       width: "100%",
       height: "100%",
-      objectFit: "contain",
-      opacity: "1",
+      objectFit: style.objectFit,
+      opacity: style.opacity,
       filter: "none",
       transform: "none",
       transition: "none",
     });
-  });
+    clone.append(visual);
+  }
+  // Fade any visible details with the backdrop, including a partially scrolled page.
+  if (!visible) clone.style.display = "none";
+  const details = viewer.querySelector<HTMLElement>(".viewer-details-page");
+  if (details) {
+    const bounds = details.getBoundingClientRect();
+    if (bounds.top < viewport.bottom && bounds.bottom > viewport.top) {
+      const snapshot = details.cloneNode(true) as HTMLElement;
+      Object.assign(snapshot.style, { position: "absolute", left: `${bounds.left}px`,
+        top: `${bounds.top}px`, width: `${bounds.width}px` });
+      backdrop.append(snapshot);
+    }
+  }
 
   layer.append(backdrop, clone);
   document.body.append(layer);
-  return { layer, backdrop, media: clone, animations: [] };
+  return { layer, backdrop, media: clone, source: sourceRect, visible, animations: [] };
 }
 
 function initialSidebarCollapsed(): boolean {
@@ -1114,8 +1136,8 @@ function App() {
     let stopped = false;
     let animating = false;
     let finished = false;
-    let animationGeneration = 0;
     let animationTarget: HTMLElement | null = null;
+    let animationEndpoint = "";
     let observedCard: HTMLElement | null = null;
     let observedGallery: HTMLElement | null = null;
     let resizeObserver: ResizeObserver | null = null;
@@ -1192,37 +1214,46 @@ function App() {
       }
     };
 
-    const pauseAnimationForLayout = () => {
+    const transformFrame = ([x, y, scaleX, scaleY]: number[]) => ({
+      transform: `translate3d(${x}px, ${y}px, 0) scale(${scaleX}, ${scaleY})`,
+    });
+    const targetTransform = (card: HTMLElement, flight: ViewerReturnFlight) => {
+      const target = card.getBoundingClientRect();
+      return [target.left - flight.source.left, target.top - flight.source.top - scrollTranslation,
+        target.width / flight.source.width, target.height / flight.source.height];
+    };
+    const retargetAnimation = (card: HTMLElement | null) => {
       const flight = requestFlight;
-      if (!animating || !flight) return;
-      const mediaRect = flight.media.getBoundingClientRect();
-      const backdropOpacity = window.getComputedStyle(flight.backdrop).opacity;
-      animationGeneration += 1;
-      for (const animation of flight.animations) animation.cancel();
-      flight.animations.length = 0;
-      Object.assign(flight.media.style, {
-        left: `${mediaRect.left}px`,
-        top: `${mediaRect.top}px`,
-        width: `${mediaRect.width}px`,
-        height: `${mediaRect.height}px`,
-        transform: "none",
-        translate: "none",
-      });
-      scrollTranslation = 0;
-      flight.backdrop.style.opacity = backdropOpacity;
-      if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
-      animationTarget = null;
-      animating = false;
-      flight.layer.dataset.phase = "settling";
+      const effect = flight?.animations[0]?.effect;
+      if (flight?.layer.dataset.phase !== "flying" || !card || !(effect instanceof KeyframeEffect)) return;
+      if (animationTarget !== card) {
+        if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
+        card.dataset.viewerReturnTarget = "true";
+        animationTarget = card;
+      }
+      const target = targetTransform(card, flight);
+      const endpoint = transformFrame(target);
+      if (endpoint.transform === animationEndpoint) return;
+      const progress = effect.getComputedTiming().progress ?? 0;
+      const current = new DOMMatrix(getComputedStyle(flight.media).transform);
+      // Solve the start frame at the current eased progress: the rendered pose
+      // and original deadline stay unchanged while the destination moves.
+      const start = 1 - progress > .00001
+        ? [current.e, current.f, current.a, current.d].map((value, index) =>
+          (value - target[index] * progress) / (1 - progress))
+        : target;
+      effect.setKeyframes([transformFrame(start), endpoint]);
+      animationEndpoint = endpoint.transform;
       flight.layer.dataset.retargets = String(
         Number.parseInt(flight.layer.dataset.retargets ?? "0", 10) + 1,
       );
     };
 
     const complete = () => {
-      if (stopped || animating) return;
+      if (stopped) return;
       const card = alignToCard();
       if (finished) { if (!informationLoading()) settleReturn(); return; }
+      if (animating) { retargetAnimation(card); return; }
       if (!card) {
         setScroll(scrollTopForAnchor(null, request, scrollRoot));
       }
@@ -1235,26 +1266,21 @@ function App() {
       }
 
       animating = true;
-      const generation = ++animationGeneration;
-      flight.layer.dataset.phase = card ? "flying" : "fading";
+      const flying = card && flight.visible;
+      flight.layer.dataset.phase = flying ? "flying" : "fading";
       flight.layer.dataset.flyingAt = String(performance.now());
-      flight.layer.dataset.duration = String(VIEWER_RETURN_ANIMATION_MS);
+      flight.layer.dataset.duration = String(flying ? VIEWER_RETURN_ANIMATION_MS : 150);
       const animations: Animation[] = [];
-      if (card) {
-        const sourceRect = flight.media.getBoundingClientRect();
-        const targetRect = card.getBoundingClientRect();
-        const scaleX = targetRect.width / Math.max(1, sourceRect.width);
-        const scaleY = targetRect.height / Math.max(1, sourceRect.height);
+      if (flying) {
+        const endpoint = transformFrame(targetTransform(card, flight));
+        animationEndpoint = endpoint.transform;
         card.dataset.viewerReturnTarget = "true";
         animationTarget = card;
         animations.push(flight.media.animate([
-          { transform: "translate3d(0, 0, 0) scale(1, 1)" },
-          {
-            transform: `translate3d(${targetRect.left - sourceRect.left}px, ${targetRect.top - sourceRect.top}px, 0) scale(${scaleX}, ${scaleY})`,
-          },
+          transformFrame([0, 0, 1, 1]), endpoint,
         ], {
           duration: VIEWER_RETURN_ANIMATION_MS,
-          easing: "cubic-bezier(.22, 1, .36, 1)",
+          easing: "cubic-bezier(.2, .7, .2, 1)",
           fill: "forwards",
         }));
       } else {
@@ -1262,7 +1288,7 @@ function App() {
           { opacity: 1, transform: "scale(1)" },
           { opacity: 0, transform: "scale(.98)" },
         ], {
-          duration: 120,
+          duration: 150,
           easing: "ease-out",
           fill: "forwards",
         }));
@@ -1271,31 +1297,23 @@ function App() {
         { opacity: Number.parseFloat(window.getComputedStyle(flight.backdrop).opacity) || 0 },
         { opacity: 0 },
       ], {
-        duration: card ? 165 : 120,
+        duration: flying ? 200 : 150,
         easing: "cubic-bezier(.2, .8, .2, 1)",
         fill: "forwards",
       }));
       flight.animations.push(...animations);
       void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
-        if (
-          viewerReturnFlightRef.current !== flight ||
-          generation !== animationGeneration
-        ) return;
-        if (card) delete card.dataset.viewerReturnTarget;
-        finalize(card);
+        if (stopped || viewerReturnFlightRef.current !== flight) return;
+        if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
+        finalize(animationTarget ?? card);
       });
     };
 
     const schedule = () => {
-      if (stopped) return;
-      if (animating) pauseAnimationForLayout();
-      if (frame) return;
+      if (stopped || frame) return;
       frame = window.requestAnimationFrame(() => {
         frame = 0;
-        alignToCard();
-        if (finished) { if (!informationLoading()) settleReturn(); return; }
-        window.clearTimeout(settleTimer);
-        settleTimer = window.setTimeout(complete, VIEWER_RETURN_SETTLE_MS);
+        complete();
       });
     };
 

@@ -1100,7 +1100,9 @@ try {
       maxCanvasEdge: Math.max(0, ...[...layer.querySelectorAll("canvas")]
         .flatMap((canvas) => [canvas.width, canvas.height])),
       visualReady: [...layer.querySelectorAll(".viewer-return-visual")]
-        .some((visual) => visual.complete && visual.naturalWidth > 0),
+        .some((visual) => visual instanceof HTMLCanvasElement
+          ? visual.width > 0 && visual.height > 0
+          : visual.complete && visual.naturalWidth > 0),
     }));
     await page.waitForSelector(".image-viewer", { state: "detached" });
     await page.waitForFunction(() =>

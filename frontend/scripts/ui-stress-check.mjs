@@ -326,6 +326,164 @@ try {
     } finally { await f.close(); }
   });
 
+  for (const width of [1440, 390]) await check(`${width}: viewer return handles zoom, fullscreen, navigation and details`, async () => {
+    const f = await fixture(width);
+    const { page } = f;
+    try {
+      for (const mode of ['zoom', 'fullscreen', 'navigation', ...(width <= 720 ? ['gesture'] : []), 'details']) {
+        let gesture;
+        await page.locator('.photo-card-open').first().click();
+        await page.locator('.image-viewer[data-full-loaded="true"]').waitFor();
+        if (mode === 'zoom') {
+          await page.keyboard.press('='); await page.keyboard.press('=');
+          await page.waitForTimeout(260);
+        } else if (mode === 'fullscreen') {
+          await page.locator('.image-viewer').evaluate(viewer => viewer.requestFullscreen());
+          await page.waitForTimeout(100);
+        } else if (mode === 'navigation') {
+          await page.keyboard.press('ArrowRight');
+          await page.locator(`.image-viewer[data-image-id="${images[1].id}"][data-full-loaded="true"]`).waitFor();
+        } else if (mode === 'gesture') {
+          gesture = await page.context().newCDPSession(page);
+          await gesture.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ id: 1, x: width / 2, y: 400 }] });
+          for (const y of [425, 480, 550]) {
+            await gesture.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ id: 1, x: width / 2, y }] });
+          }
+          await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+        } else {
+          await page.keyboard.press('PageDown');
+          await page.waitForFunction(() => document.querySelector('.image-viewer').scrollTop
+            >= document.querySelector('.viewer-stage').clientHeight - 2);
+        }
+        const source = await page.evaluate(() => {
+          window.returnStart = null;
+          const observer = new MutationObserver(() => {
+            const layer = document.querySelector('.viewer-return-layer');
+            if (!layer) return;
+            const media = layer.querySelector('.viewer-return-media');
+            window.returnStart = { bounds: media.getBoundingClientRect().toJSON(), imageId: layer.dataset.imageId,
+              details: Boolean(layer.querySelector('.viewer-details-page')), display: getComputedStyle(media).display };
+            observer.disconnect();
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+          return { bounds: document.querySelector('.image-viewer .viewer-media').getBoundingClientRect().toJSON(),
+            imageId: document.querySelector('.image-viewer').dataset.imageId };
+        });
+        // The close button also exits native fullscreen; Escape belongs to the browser there.
+        if (gesture) { await gesture.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); await gesture.detach(); }
+        else if (mode === 'details') await page.keyboard.press('Escape');
+        else await page.getByRole('button', { name: '关闭查看器', exact: true }).click();
+        await page.waitForFunction(() => window.returnStart);
+        const start = await page.evaluate(() => window.returnStart);
+        assert.equal(start.imageId, source.imageId, `${mode}: returns the active image`);
+        if (mode === 'details') {
+          assert(start.details && start.display === 'none', 'details close with a page fade instead of an off-screen flight');
+        } else {
+          const jump = Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(start.bounds[key] - source.bounds[key])));
+          assert(jump < 1, `${mode}: the initial image jumped ${jump}px`);
+        }
+        await page.waitForFunction(() => !document.querySelector('.image-viewer, .viewer-return-layer, [data-viewer-return-target="true"], #root[inert]'));
+        assert.equal(await page.evaluate(() => document.fullscreenElement), null);
+      }
+    } finally { await f.close(); }
+  });
+
+  await check("390: viewer return while the original is loading keeps a visible thumbnail", async () => {
+    const pending = Promise.withResolvers();
+    const f = await fixture(390, {
+      [`/api/images/${images[0].id}.jpg`]: async route => {
+        await pending.promise;
+        await route.fulfill({ contentType: 'image/jpeg', body: photo }).catch(() => {});
+      },
+    });
+    const { page } = f;
+    try {
+      await page.locator('.photo-card-open').first().click();
+      await page.locator('.image-viewer[data-thumbnail-loaded="true"][data-full-loaded="false"]').waitFor();
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => [...document.querySelectorAll('.viewer-return-visual')]
+        .some(image => image.complete && image.naturalWidth > 0 && Number(getComputedStyle(image).opacity) > 0));
+      await page.waitForFunction(() => !document.querySelector('.viewer-return-layer, #root[inert]'));
+    } finally { pending.resolve(); await f.close(); }
+  });
+
+  await check("390: viewer return preserves the displayed bitmap", async () => {
+    const f = await fixture(390);
+    const { page } = f;
+    try {
+      await page.locator('.photo-card-open').first().click();
+      await page.locator('.image-viewer[data-full-loaded="true"]').waitFor();
+      await page.locator('.viewer-original-canvas').evaluate(canvas => {
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#d32754';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      });
+      await page.getByRole('button', { name: '关闭查看器', exact: true }).click();
+      const snapshot = await page.waitForFunction(() => {
+        const layer = document.querySelector('.viewer-return-layer');
+        if (!layer) return null;
+        const canvas = layer.querySelector('canvas');
+        return { pixel: canvas ? [...canvas.getContext('2d').getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data] : null,
+          maxEdge: canvas ? Math.max(canvas.width, canvas.height) : 0 };
+      });
+      const result = await snapshot.jsonValue();
+      assert.deepEqual(result.pixel, [211, 39, 84, 255], 'closing must preserve the rendered bitmap instead of falling back to the thumbnail');
+      assert(result.maxEdge <= 1440, 'the return snapshot must have a bounded pixel buffer');
+    } finally { await f.close(); }
+  });
+
+  for (const width of [1440, 390]) await check(`${width}: viewer return keeps one continuous timeline during layout changes`, async () => {
+    const f = await fixture(width);
+    const { page } = f;
+    try {
+      await page.locator('.photo-card-open').first().click();
+      await page.locator('.image-viewer[data-full-loaded="true"]').waitFor();
+      await page.getByRole('button', { name: '关闭查看器', exact: true }).click();
+      await page.waitForFunction(() => {
+        const media = document.querySelector('.viewer-return-media');
+        const animation = media?.getAnimations()[0];
+        if (!animation) return false;
+        animation.pause(); animation.currentTime = 80;
+        window.returnMotion = { animation, bounds: media.getBoundingClientRect().toJSON(),
+          duration: animation.effect.getTiming().duration };
+        return true;
+      });
+      const continuity = async () => page.evaluate(() => {
+        const media = document.querySelector('.viewer-return-media');
+        const animation = media?.getAnimations()[0], previous = window.returnMotion;
+        const bounds = media?.getBoundingClientRect();
+        return { same: animation === previous.animation, phase: media?.parentElement.dataset.phase,
+          time: animation?.currentTime, duration: animation?.effect.getTiming().duration,
+          jump: bounds ? Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(bounds[key] - previous.bounds[key]))) : Infinity };
+      });
+      await page.evaluate(async () => {
+        for (let i = 0; i < 5; i++) {
+          window.dispatchEvent(new Event('resize'));
+          visualViewport.dispatchEvent(new Event('resize'));
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+      });
+      let motion = await continuity();
+      assert(motion.same && motion.phase === 'flying' && motion.time === 80, JSON.stringify(motion));
+      for (const nextWidth of [width + 40, width - 20, width]) {
+        await page.setViewportSize({ width: nextWidth, height: 844 });
+        await page.waitForTimeout(60);
+        motion = await continuity();
+        assert(motion.same && motion.time === 80 && motion.jump < 1, `layout changes must preserve the current pose and timeline: ${JSON.stringify(motion)}`);
+      }
+      const landing = await page.evaluate(() => {
+        const { animation } = window.returnMotion;
+        animation.currentTime = animation.effect.getTiming().duration - .1;
+        const media = document.querySelector('.viewer-return-media').getBoundingClientRect();
+        const card = document.querySelector('[data-viewer-return-target="true"]').getBoundingClientRect();
+        return Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(media[key] - card[key])));
+      });
+      assert(landing < 1, `returning image missed its target by ${landing}px`);
+      await page.evaluate(() => window.returnMotion.animation.finish());
+      await page.waitForFunction(() => !document.querySelector('.viewer-return-layer, [data-viewer-return-target="true"]'));
+    } finally { await f.close(); }
+  });
+
   for (const width of [1440, 390]) await check(`${width}: viewer return follows scrolling without pulling the page back`, async () => {
     const f = await fixture(width);
     const { page } = f;
