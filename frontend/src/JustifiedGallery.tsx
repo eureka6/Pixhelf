@@ -19,7 +19,7 @@ import { Check, Heart, ImageIcon } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
 import { SelectionMenu, type MenuPoint, type SelectionActions, type SelectionBatchActions } from "./SelectionMenu";
 import { MediaPreview } from "./MediaPreview";
-import { isLiveImage } from "./mediaUrls";
+import { isAnimatedImage, isLiveImage } from "./mediaUrls";
 import { VideoBadge } from "./VideoBadge";
 import { useGalleryMetrics } from "./galleryMetrics";
 import { useCardInteraction } from "./cardInteraction";
@@ -436,9 +436,9 @@ const ImageCard = memo(function ImageCard({
           <ImageIcon size={24} />
         </span>
       ) : null}
-      {loaded && !selecting && (isLiveImage(image) || image.video) && <MediaPreview image={image} />}
+      {loaded && !selecting && (isLiveImage(image) || isAnimatedImage(image) || image.video) && <MediaPreview image={image} />}
       {image.video && <VideoBadge video={image.video} />}
-      <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放" : "查看"} ${image.name}${isLiveImage(image) ? "，live 动态" : ""}`} aria-haspopup="dialog" />
+      <button type="button" className="photo-card-open" aria-label={`${image.video ? "播放" : "查看"} ${image.name}${isAnimatedImage(image) ? "，GIF 动图" : isLiveImage(image) ? "，live 动态" : ""}`} aria-haspopup="dialog" />
       {favorite && <span className="photo-card-favorite" aria-label="已收藏"><Heart size={13} fill="currentColor" /></span>}
       {onSelect && <button type="button" className="photo-card-select" role="checkbox" aria-checked={selected}
         aria-label={`选择 ${image.name}`} title={`${selected ? "取消选择" : "选择"}（按住选择球滑动可多选）`} disabled={selectionDisabled}

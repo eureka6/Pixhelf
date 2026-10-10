@@ -1,9 +1,27 @@
 import { MediaPlayer, type PlayerCallbacks, type PlayerState } from "./mediaPlayer";
 import { motionBlob } from "./mediaSource";
+import { motionVideoCodec } from "./motionCodec";
 
 // Remember native decode failures for this file version, never user-gesture or
 // network failures. A replay can immediately use the compatible decoder.
 const unsupportedSources = new Set<string>();
+
+function rememberUnsupported(source: string) {
+  unsupportedSources.add(source);
+  if (unsupportedSources.size > 32) unsupportedSources.delete(unsupportedSources.values().next().value!);
+}
+
+export async function supportsNativeMotion(source: string, blob: Blob | undefined): Promise<boolean> {
+  if (unsupportedSources.has(source)) return false;
+  if (blob) {
+    const codec = await motionVideoCodec(blob);
+    if (codec && !document.createElement("video").canPlayType(`video/mp4; codecs="${codec}"`)) {
+      rememberUnsupported(source);
+      return false;
+    }
+  }
+  return true;
+}
 
 export class LivePhotoPlayer {
   private surface = document.createElement("div");
@@ -45,7 +63,6 @@ export class LivePhotoPlayer {
   }
 
   private async initialize() {
-    if (unsupportedSources.has(this.source)) { this.useFallback(); return; }
     const { video } = this;
     const on = (event: string, callback: () => void) => video.addEventListener(event, callback, { signal: this.nativeAbort.signal });
     on("loadedmetadata", () => {
@@ -54,10 +71,9 @@ export class LivePhotoPlayer {
     });
     on("loadeddata", () => {
       if (!video.videoWidth || !video.videoHeight) {
-        window.clearTimeout(this.timeout);
-        this.timeout = window.setTimeout(() => {
-          if (!video.videoWidth || !video.videoHeight) this.useFallback(true);
-        }, 1000);
+        // Metadata and decoded data are ready, but no video track is usable.
+        // Audio-only MOV acceptance must not add another second of waiting.
+        this.useFallback(true);
       }
     });
     on("playing", () => this.watchBufferedPlayback());
@@ -73,6 +89,9 @@ export class LivePhotoPlayer {
     });
     const blob = await motionBlob(this.source, this.sourceAbort.signal);
     if (this.disposed) return;
+    const native = await supportsNativeMotion(this.source, blob);
+    if (this.disposed) return;
+    if (!native) { this.useFallback(); return; }
     video.src = blob ? this.objectUrl = URL.createObjectURL(blob) : this.source;
     // Some browsers accept a container but expose only its audio track. A
     // "playing" event alone must not hide the loader or stall the photo forever.
@@ -155,13 +174,10 @@ export class LivePhotoPlayer {
 
   private useFallback(remember = false) {
     if (this.disposed || this.nativeAbort.signal.aborted) return;
-    if (remember) {
-      unsupportedSources.add(this.source);
-      if (unsupportedSources.size > 32) unsupportedSources.delete(unsupportedSources.values().next().value!);
-    }
+    if (remember) rememberUnsupported(this.source);
     this.releaseNative();
     this.fallback = new MediaPlayer(this.host, this.source, "motion.mov", true, this.callbacks, true,
-      { sourceResolution: this.fullSize, retainBytes: true });
+      { sourceResolution: this.fullSize, retainBytes: true, quickStart: true });
     if (this.wantsPlay) this.fallback.play();
   }
 

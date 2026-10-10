@@ -379,6 +379,8 @@ Options:\n  \
   --workers N            Background thumbnail workers (default: 2-4, based on CPU)\n  \
   --scan-interval SEC    Gallery rescan interval (default: 10)\n  \
   --hash-password       Generate an Argon2id hash (hidden prompt or stdin)\n  \
+  --check-media         Verify embedded media tools\n  \
+  --media-licenses      Show embedded media component licenses\n  \
   -h, --help             Show this help\n\n\
 Environment:\n  \
   PIXHELF_GALLERY_DIR, PIXHELF_CACHE_DIR, PIXHELF_TEXT_SEARCH_MODEL,\n  \

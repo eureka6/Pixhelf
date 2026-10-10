@@ -14,6 +14,8 @@ import {
 } from "preact/hooks";
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
+import { useOverlayNavigation } from "./useOverlayNavigation";
+import { UploadDialog } from "./UploadDialog";
 import { useAutoHideTopbar } from "./useAutoHideTopbar";
 import { DEFAULT_IMAGE_FILTERS, imageFilterLabels } from "./GalleryFilters";
 import { contentCategory } from "./contentCategories";
@@ -80,7 +82,6 @@ const PAGE_SIZE = 60;
 const SIMILAR_PAGE_SIZE = 30;
 const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
 const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
-const SIDEBAR_STORAGE_KEY = "pixhelf.sidebar-collapsed";
 const GALLERY_POLL_INTERVAL_MS = 10_000;
 const MOBILE_NAV_EXIT_MS = 240;
 const VIEWER_RETURN_SETTLE_MS = 32;
@@ -224,14 +225,6 @@ function createViewerReturnFlight(): ViewerReturnFlight | null {
   layer.append(backdrop, clone);
   document.body.append(layer);
   return { layer, backdrop, media: clone, source: sourceRect, visible, animations: [] };
-}
-
-function initialSidebarCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true";
-  } catch {
-    return false;
-  }
 }
 
 function useMediaQuery(query: string): boolean {
@@ -386,7 +379,8 @@ function App() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [storageRevision, setStorageRevision] = useState(0);
   const [localMedia, setLocalMedia] = useState<LocalMediaPage | null>(null);
@@ -423,11 +417,13 @@ function App() {
   const [viewerReturnRequest, setViewerReturnRequest] = useState<ViewerReturnRequest | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const compactLayout = useMediaQuery("(max-width: 720px)");
+  const desktopNav = useOverlayNavigation(compactLayout);
+  const sidebarCollapsed = !desktopNav.open;
   const { mounted: mobileNavMounted, finishExit: finishMobileNavExit } = useTransitionPresence(
     mobileNavOpen,
     MOBILE_NAV_EXIT_MS,
   );
-  const topbar = useAutoHideTopbar(Boolean(searchOpen || mobileNavMounted || viewerImageId
+  const topbar = useAutoHideTopbar(Boolean(searchOpen || menuOpen || uploadOpen || desktopNav.open || mobileNavMounted || viewerImageId
     || viewerReturnRequest || settingsSection || infoImage), location, sidebarCollapsed);
   const textSearchReady = Boolean(
     status?.backgroundComplete
@@ -548,14 +544,6 @@ function App() {
   useEffect(() => {
     if (!compactLayout && mobileNavOpen) setMobileNavOpen(false);
   }, [compactLayout, mobileNavOpen]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
-    } catch {
-      // The layout still works when storage is disabled.
-    }
-  }, [sidebarCollapsed]);
 
   useEffect(() => {
     if (reloadToken === 0 && INITIAL_BOOTSTRAP) return;
@@ -1508,6 +1496,7 @@ function App() {
       className="app-shell"
       data-gallery-section={section}
       data-sidebar-collapsed={sidebarCollapsed}
+      data-sidebar-pinned={desktopNav.pinned}
       data-mobile-navigation-open={mobileNavOpen}
       data-topbar-hidden={topbar.hidden}
       data-viewer-returning={Boolean(viewerReturnRequest)}
@@ -1527,15 +1516,18 @@ function App() {
         similarSearch={browsingSimilar}
         onSearchChange={changeSearch}
         onToggleNavigation={() => {
-          if (compactLayout) {
-            setMobileNavOpen((open) => !open);
-          } else {
-            const updateLayout = () => setSidebarCollapsed((collapsed) => !collapsed);
-            if (galleryLayoutRef.current) galleryLayoutRef.current.resize(updateLayout);
-            else updateLayout();
-          }
+          if (compactLayout) setMobileNavOpen(open => !open);
+          else if (galleryLayoutRef.current) galleryLayoutRef.current.resize(desktopNav.toggle);
+          else desktopNav.toggle();
         }}
+        onHoverNavigation={desktopNav.enter}
+        onLeaveNavigation={desktopNav.leave}
+        onHome={goHome}
+        menuOpen={menuOpen}
+        onMenuOpenChange={setMenuOpen}
+        onUpload={() => { desktopNav.close(); setUploadOpen(true); }}
         navigationOpen={compactLayout ? mobileNavOpen : !sidebarCollapsed}
+        navigationPinned={desktopNav.pinned}
         compactLayout={compactLayout}
         filters={filtersAvailable ? imageFilters : null}
         onFiltersChange={changeFilters}
@@ -1555,7 +1547,6 @@ function App() {
         <span key={reloadToken} />
       </div>
       <Sidebar
-        onHome={goHome}
         summary={summary}
         activeSection={section}
         onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}
@@ -1564,7 +1555,9 @@ function App() {
         onMobileExited={finishMobileNavExit}
         onClose={() => setMobileNavOpen(false)}
         desktopCollapsed={sidebarCollapsed}
-        onSettings={() => setSettingsSection("account")}
+        onDesktopEnter={desktopNav.enter}
+        onDesktopLeave={desktopNav.leave}
+        onSettings={() => { desktopNav.close(); setSettingsSection("account"); }}
       />
 
       <main className="content" aria-busy={pageLoading || pageLoadingMore}>
@@ -1670,6 +1663,9 @@ function App() {
       </main>
       <div className="bottom-selection" ref={setSelectionToolbar} />
       {albumSelection.controls(selectionToolbar)}
+      {uploadOpen && !authentication.guest && <UploadDialog albums={summary?.albums ?? []}
+        initialDestination={browsingLocal ? path : album} onClose={() => setUploadOpen(false)}
+        onUploaded={() => window.dispatchEvent(new CustomEvent(MANAGEMENT_CHANGED, { detail: "upload" }))} />}
       {settingsSection && !authentication.guest && (
         <SettingsDialog
           initialSection={settingsSection}
@@ -1691,7 +1687,6 @@ function App() {
           onLoadMoreImages={loadMoreViewer}
           onClose={closeViewer}
           slideshowRequest={slideshowRequest}
-          onStopSlideshow={() => setSlideshowRequest(0)}
           onSelectImage={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImage}
           selectedIds={selectedIds}
           onSelectImages={authentication.guest || browsingAlbums || browsingLocal ? undefined : selectViewerImages}

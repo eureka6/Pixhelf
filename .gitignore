@@ -2,6 +2,8 @@
 /.pixhelf-data/
 /.pixhelf-cache/
 /target/
+/.build-tools/
+/dist/
 /frontend/node_modules/
 /frontend/dist/
 /models/

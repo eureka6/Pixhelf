@@ -50,6 +50,7 @@ fn main() {
 
     let assets_dir = frontend_dir.join("dist/assets");
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    embed_media_runtime(&manifest_dir, &output_dir);
     let packed_dir = output_dir.join("frontend-packed");
     let status = Command::new("node")
         .arg(frontend_dir.join("scripts/pack-assets.mjs"))
@@ -118,6 +119,40 @@ fn main() {
         .expect("write embedded frontend assets");
     let asset_version = asset_version(&frontend_dir, &assets);
     println!("cargo:rustc-env=PIXHELF_ASSET_VERSION={asset_version}");
+}
+
+fn embed_media_runtime(manifest_dir: &std::path::Path, output_dir: &std::path::Path) {
+    for path in [
+        "packaging/build-media-runtime.sh",
+        "packaging/pack-media.mjs",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    for name in [
+        "PIXHELF_MEDIA_CC",
+        "PIXHELF_MEDIA_STRIP",
+        "PIXHELF_MEDIA_JOBS",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let target = env::var("TARGET").unwrap();
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let cache = manifest_dir.join("target/media");
+    let status = Command::new("sh")
+        .arg(manifest_dir.join("packaging/build-media-runtime.sh"))
+        .arg(&target)
+        .arg(&cache)
+        .status()
+        .expect("build embedded media runtime; install the media build toolchain (see README)");
+    assert!(status.success(), "embedded media runtime build failed");
+    let status = Command::new("node")
+        .arg(manifest_dir.join("packaging/pack-media.mjs"))
+        .arg(cache.join(&arch))
+        .arg(output_dir)
+        .arg(&arch)
+        .status()
+        .expect("pack embedded media runtime");
+    assert!(status.success(), "embedded media runtime packing failed");
 }
 
 fn collect_assets(directory: &std::path::Path, assets: &mut Vec<PathBuf>) {

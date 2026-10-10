@@ -10,146 +10,118 @@ import {
   Heart,
   Trash2,
   Menu,
+  SidebarMenu,
   Search,
-  SlidersHorizontal,
+  MoreHorizontal,
+  Upload,
   ScanSearch,
-  X,
 } from "./icons";
 import { ToolbarPopover } from "./ToolbarPopover";
-import { GalleryFilters, imageFilterLabels } from "./GalleryFilters";
+import { imageFilterLabels } from "./GalleryFilters";
+import { SearchDialog, type SearchDialogProps } from "./SearchDialog";
 import { AuthControls } from "./AuthControls";
 import { authentication } from "./auth";
 import { useManagement } from "./management";
-import type { ContentCategory, GallerySection, GallerySummary, ImageFilters } from "./types";
+import type { GallerySection, GallerySummary } from "./types";
 
 export function Header({
-  hidden,
-  onReveal,
-  search,
-  searchOpen,
-  onSearchOpenChange,
-  searchMode,
-  albumSearch,
-  storageSearch,
-  localSearch = false,
-  similarSearch,
-  onSearchChange,
-  onToggleNavigation,
-  navigationOpen,
-  compactLayout,
-  filters,
-  onFiltersChange,
-  onContentChange,
-  onResetFilters,
-  categories,
-  categoriesHint,
-  onConfigureCategories,
-}: {
+  hidden, onReveal, searchOpen, onSearchOpenChange, onToggleNavigation, onHoverNavigation, onLeaveNavigation,
+  onHome, navigationOpen, navigationPinned, compactLayout, menuOpen, onMenuOpenChange, onUpload, ...searchProps
+}: SearchDialogProps & {
   hidden: boolean;
   onReveal: () => void;
-  search: string;
   searchOpen: boolean;
   onSearchOpenChange: (open: boolean) => void;
-  searchMode: "filename" | "indexing" | "semantic";
-  albumSearch: boolean;
-  storageSearch: boolean;
-  localSearch?: boolean;
-  similarSearch: boolean;
-  onSearchChange: (value: string) => void;
   onToggleNavigation: () => void;
+  onHoverNavigation: (event: PointerEvent) => void;
+  onLeaveNavigation: (event: PointerEvent) => void;
+  onHome: () => void;
   navigationOpen: boolean;
+  navigationPinned: boolean;
   compactLayout: boolean;
-  filters: ImageFilters | null;
-  onFiltersChange: (filters: ImageFilters) => void;
-  onContentChange: (query: string) => void;
-  onResetFilters: () => void;
-  categories: ContentCategory[];
-  categoriesHint: string;
-  onConfigureCategories?: () => void;
+  menuOpen: boolean;
+  onMenuOpenChange: (open: boolean) => void;
+  onUpload: () => void;
 }) {
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const mobileNavigationOpen = compactLayout && navigationOpen;
-  const semanticSearch = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "semantic";
-  const searchIndexing = !albumSearch && !storageSearch && !localSearch && !similarSearch && searchMode === "indexing";
-  const filterLabels = filters ? imageFilterLabels(filters, semanticSearch ? search : "", categories) : [];
-  const filtersActive = filterLabels.length > 0;
-  const searchPlaceholder = localSearch ? "搜索当前目录" : similarSearch ? "筛选已加载结果" : storageSearch ? "筛选已加载文件" : albumSearch ? "搜索相册名称或路径" : semanticSearch
-    ? "描述想找的图片"
-    : "搜索文件名";
-  useEffect(() => {
-    if (mobileNavigationOpen) {
-      searchInputRef.current?.blur();
-      onSearchOpenChange(false);
-    }
-  }, [mobileNavigationOpen, onSearchOpenChange]);
-
-  const handleSearchOpenChange = (open: boolean) => {
-    if (open && mobileNavigationOpen) onToggleNavigation();
-    onSearchOpenChange(open);
+  const menuItem = useRef<HTMLButtonElement>(null);
+  const filterCount = searchProps.filters ? imageFilterLabels(searchProps.filters, "", searchProps.categories).length : 0;
+  useEffect(() => { if (menuOpen) menuItem.current?.focus({ preventScroll: true }); }, [menuOpen]);
+  const openSearch = () => {
+    onReveal();
+    onMenuOpenChange(false);
+    if (compactLayout && navigationOpen) onToggleNavigation();
+    onSearchOpenChange(true);
   };
-  const searchField = <div className="gallery-search-input">
-    <Search className="search-popover-icon" size={17} />
-    <input ref={searchInputRef} type="search" value={search} placeholder={searchPlaceholder}
-      aria-label={albumSearch ? "搜索相册" : semanticSearch ? "用自然语言搜索图片" : searchPlaceholder}
-      onInput={event => onSearchChange(event.currentTarget.value)}
-      onKeyDown={event => {
-        if ((event.key === "Enter" || event.key === "Escape") && !event.isComposing && event.keyCode !== 229) {
-          event.preventDefault();
-          onSearchOpenChange(false);
-          event.currentTarget.blur();
-        }
-      }} enterKeyHint="search" autoComplete="off" />
-    {search && <button type="button" className="clear-search" aria-label="清空搜索" title="清空搜索"
-      onClick={() => { onSearchChange(""); searchInputRef.current?.focus({ preventScroll: true }); }}><X size={15} /></button>}
-  </div>;
-
-  return (
+  return <>
     <header className="topbar" data-hidden={hidden} data-search-open={searchOpen} onFocus={onReveal}>
       <SidebarToggleButton className="gallery-sidebar-toggle" expanded={navigationOpen}
-        onClick={() => { onReveal(); onToggleNavigation(); }}
+        pinned={navigationPinned} compact={compactLayout}
+        onPointerEnter={onHoverNavigation} onPointerLeave={onLeaveNavigation}
+        onClick={() => { onReveal(); onMenuOpenChange(false); onToggleNavigation(); }}
         controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"} />
+      <div className="topbar-brand" data-visible={navigationOpen} aria-hidden={!navigationOpen} inert={!navigationOpen}
+        onPointerEnter={onHoverNavigation} onPointerLeave={onLeaveNavigation}>
+        <Brand onHome={onHome} />
+      </div>
       <div className="topbar-actions" role="toolbar" aria-label="图库工具">
-        {filters ? <ToolbarPopover id="gallery-search-field" open={searchOpen} autoDismiss
-          onOpenChange={handleSearchOpenChange} openLabel="筛选图片" closeLabel="收起筛选" panelLabel="搜索与筛选"
-          icon={<><SlidersHorizontal size={17} />{filtersActive && <span className="gallery-filter-count">{filterLabels.length}</span>}</>}
-          rootClassName="topbar-search" triggerClassName="search-toggle"
-          panelClassName="search-popover-panel gallery-search-panel" field={searchField}>
-          <GalleryFilters filters={filters} search={search} categories={categories} categoriesHint={categoriesHint}
-            onChange={onFiltersChange} onContentChange={onContentChange}
-            onConfigureCategories={onConfigureCategories && (() => { onSearchOpenChange(false); onConfigureCategories(); })}
-            contentReady={semanticSearch}
-            contentHint={searchIndexing ? "内容分类准备中，完成后即可使用。" : "在开启自然语言搜索的图库或相册中可用。"} />
-          {(search || filtersActive) && <button type="button" className="gallery-filter-reset gallery-search-reset"
-            onClick={onResetFilters}>重置</button>}
-        </ToolbarPopover> : <div className="topbar-search">{searchField}</div>}
+        <button type="button" className="icon-button search-toggle" aria-label="搜索" title="搜索"
+          aria-haspopup="dialog" aria-expanded={searchOpen} aria-controls="gallery-search-dialog" onClick={openSearch}
+          data-active={Boolean(searchProps.search || filterCount)}>
+          <Search size={21} />
+          {Boolean(searchProps.search || filterCount) && <span className="search-active-dot" />}
+        </button>
+        {!authentication.guest && <ToolbarPopover id="gallery-actions" open={menuOpen} autoDismiss
+          onOpenChange={open => { onReveal(); if (open && compactLayout && navigationOpen) onToggleNavigation(); onMenuOpenChange(open); }}
+          openLabel="更多操作" closeLabel="关闭菜单" panelLabel="图库操作" panelRole="menu" icon={<MoreHorizontal size={22} />}
+          rootClassName="topbar-menu" triggerClassName="gallery-menu-toggle" panelClassName="gallery-menu-panel">
+          <div onKeyDown={event => {
+            if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) { event.preventDefault(); menuItem.current?.focus(); }
+          }}>
+            <button ref={menuItem} type="button" role="menuitem" onClick={() => { onMenuOpenChange(false); onUpload(); }}>
+              <Upload size={18} /><span>上传图片</span>
+            </button>
+          </div>
+        </ToolbarPopover>}
       </div>
     </header>
-  );
+    {searchOpen && <SearchDialog {...searchProps} onClose={() => onSearchOpenChange(false)} />}
+  </>;
 }
 
 function SidebarToggleButton({
   className,
   controls,
   expanded,
+  pinned,
+  compact,
   onClick,
+  onPointerEnter,
+  onPointerLeave,
 }: {
   className: string;
   controls: string;
   expanded: boolean;
+  pinned: boolean;
+  compact: boolean;
   onClick: () => void;
+  onPointerEnter: (event: PointerEvent) => void;
+  onPointerLeave: (event: PointerEvent) => void;
 }) {
-  const label = expanded ? "收起侧栏" : "展开侧栏";
+  const label = compact ? expanded ? "收起侧栏" : "展开侧栏" : pinned ? "收起侧栏" : "固定侧栏";
   return (
     <button
       type="button"
       className={`icon-button sidebar-toggle-button ${className}`}
       onClick={onClick}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
       aria-label={label}
       aria-expanded={expanded}
+      aria-pressed={compact ? undefined : pinned}
       aria-controls={controls}
-      title={label}
+      data-mode={compact ? "mobile" : pinned ? "pinned" : "automatic"}
     >
-      <Menu size={22} />
+      {compact ? <Menu size={22} /> : <SidebarMenu size={22} pinned={pinned} />}
     </button>
   );
 }
@@ -182,8 +154,9 @@ export function Sidebar({
   onMobileExited,
   onClose,
   desktopCollapsed,
+  onDesktopEnter,
+  onDesktopLeave,
   onSettings,
-  onHome,
 }: {
   summary: GallerySummary | null;
   activeSection: GallerySection;
@@ -193,16 +166,17 @@ export function Sidebar({
   onMobileExited: () => void;
   onClose: () => void;
   desktopCollapsed: boolean;
+  onDesktopEnter: (event: PointerEvent) => void;
+  onDesktopLeave: (event: PointerEvent) => void;
   onSettings: () => void;
-  onHome: () => void;
 }) {
   const management = useManagement();
   const navigation = (
     <>
-      <div className="sidebar-heading"><Brand onHome={onHome} /></div>
+      <div className="sidebar-heading" aria-hidden="true" />
       <nav className="album-nav" aria-label="主导航">
         <NavigationButton
-          label="图片与视频"
+          label="照片"
           count={summary?.total ?? 0}
           active={activeSection === "library"}
           onClick={() => onChoose("library")}
@@ -243,6 +217,8 @@ export function Sidebar({
         aria-label="图库导航"
         aria-hidden={desktopCollapsed}
         inert={desktopCollapsed}
+        onPointerEnter={onDesktopEnter}
+        onPointerLeave={onDesktopLeave}
       >
         {navigation}
       </aside>

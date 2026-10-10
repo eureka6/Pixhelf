@@ -13,6 +13,7 @@ type ToolbarPopoverProps = {
   onOpenChange: (open: boolean) => void;
   panelClassName?: string;
   panelLabel: string;
+  panelRole?: "group" | "menu";
   rootClassName?: string;
   triggerClassName?: string;
   field?: ComponentChildren;
@@ -30,6 +31,7 @@ export function ToolbarPopover({
   onOpenChange,
   panelClassName = "",
   panelLabel,
+  panelRole = "group",
   rootClassName = "",
   triggerClassName = "",
   field,
@@ -88,7 +90,7 @@ export function ToolbarPopover({
     id={id}
     className={`toolbar-popover-panel ${panelClassName}`}
     data-open={open}
-    role="group"
+    role={panelRole}
     aria-label={panelLabel}
     aria-hidden={!open}
     inert={!open}
@@ -105,7 +107,14 @@ export function ToolbarPopover({
         disabled={disabled}
         className={`icon-button toolbar-popover-trigger ${triggerClassName}`}
         onClick={() => onOpenChange(!open)}
+        onKeyDown={event => {
+          if (panelRole === "menu" && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+            event.preventDefault();
+            onOpenChange(true);
+          }
+        }}
         aria-label={triggerLabel}
+        aria-haspopup={panelRole === "menu" ? "menu" : undefined}
         aria-expanded={open}
         aria-controls={id}
         title={triggerLabel}

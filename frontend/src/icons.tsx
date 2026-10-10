@@ -231,6 +231,13 @@ export function Menu(props: IconProps) {
   return <Icon {...props}><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /></Icon>;
 }
 
+export function SidebarMenu({ pinned, ...props }: IconProps & { pinned: boolean }) {
+  return <Icon {...props}>
+    <path d="M4 6h16M4 12h16M4 18h16" />
+    <path className="sidebar-toggle-arrow" d={pinned ? "m7 9-3 3 3 3" : "m17 9 3 3-3 3"} />
+  </Icon>;
+}
+
 export function Minimize2(props: IconProps) {
   return (
     <Icon {...props}>
@@ -286,4 +293,8 @@ export function Lock(props: IconProps) {
 }
 export function Share(props: IconProps) {
   return <Icon {...props}><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4" /></Icon>;
+}
+
+export function Upload(props: IconProps) {
+  return <Icon {...props}><path d="M12 16V3m-5 5 5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4" /></Icon>;
 }

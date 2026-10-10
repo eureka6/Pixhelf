@@ -4,6 +4,7 @@ mod directories;
 mod download;
 mod files;
 pub(crate) mod sharing;
+mod upload;
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -58,6 +59,10 @@ pub(crate) fn router(app: AppState) -> Router {
             get(download::serve).head(download::head),
         )
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .route(
+            "/api/management/upload",
+            post(upload::save).layer(DefaultBodyLimit::max(upload::MAX_UPLOAD_BYTES)),
+        )
         .with_state(Arc::new(Management {
             app,
             directory,

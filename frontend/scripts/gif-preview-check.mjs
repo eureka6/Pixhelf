@@ -80,6 +80,9 @@ try {
     };
     try {
       await load();
+      assert.equal(await card(0).locator('.gif-badge').textContent(), 'GIF');
+      assert.equal(await card(0).locator('.live-photo-badge').count(), 0, 'GIF has its own badge');
+      assert.match(await card(0).locator('.photo-card-open').getAttribute('aria-label'), /GIF 动图/);
       assert.equal(await page.locator('.animated-preview-image').count(), 0, 'idle GIF cards use still thumbnails');
       await start(card(0));
       await playing(card(0));
@@ -129,6 +132,8 @@ try {
       await page.keyboard.press('PageDown');
       const similar = page.locator('.viewer-similar-card').first();
       await start(similar);
+      assert.equal(await similar.locator('.gif-badge').textContent(), 'GIF');
+      assert.equal(await similar.locator('.live-photo-badge').count(), 0);
       await playing(similar);
       await movingPixels(similar);
       if (mobile) await similar.locator('.photo-card-open').tap();

@@ -54,12 +54,14 @@ async function navigate(page, title) {
     await page.locator(".gallery-sidebar-toggle").click();
   }
   const panel = page.viewportSize().width <= 720 ? ".mobile-sidebar" : ".desktop-sidebar";
-  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图片与视频", "相册", "收藏", "相似图片", "本地存储", "外部存储", "回收站"]);
+  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["照片", "相册", "收藏", "相似图片", "本地存储", "外部存储", "回收站"]);
   await page.locator(`${panel} .album-link`).getByText(title, { exact: true }).click();
   if (title === "相册") await page.locator(".albums-grid").waitFor();
   else await page.locator(".image-card").nth(24).waitFor();
   if (page.viewportSize().width <= 720) {
     await page.waitForFunction(() => !document.querySelector(".mobile-nav-layer") && document.body.style.overflow !== "hidden");
+  } else {
+    await page.locator(".gallery-sidebar-toggle").click();
   }
 }
 
@@ -219,8 +221,9 @@ try {
     await checkAlbumMotion(page, width);
     const requestsBeforeCatalog = imageRequests.length;
 
+    await page.locator('.search-toggle').click();
     await page.getByRole("searchbox", { name: "搜索相册", exact: true }).fill("同名");
-    assert.equal(await page.locator('.search-toggle, .gallery-search-panel').count(), 0, 'album search needs no filter layer');
+    assert.equal(await page.locator('.search-dialog .gallery-filter-controls').count(), 0, 'album search omits image filters');
     assert.equal(await page.getByRole('searchbox', { name: '搜索相册', exact: true }).evaluate(input => getComputedStyle(input).outlineStyle), 'none');
     await waitCount(page, ".album-card", 2);
     assert.deepEqual((await page.locator(".album-path > span").allTextContents()).sort(), ["收藏/同名", "项目 & 2026/同名"].sort());
@@ -229,6 +232,7 @@ try {
     await page.locator(".clear-search").click();
     await waitCount(page, ".album-card", 7);
     assert.equal(imageRequests.length, requestsBeforeCatalog, "catalog search fetched images");
+    await page.locator('.search-dialog').getByRole('button', { name: '搜索', exact: true }).click();
 
     assert.equal(await page.locator('.album-card[data-album-path="空相册"]').count(), 0);
     await openAlbum(page, "项目 & 2026/同名");
@@ -286,7 +290,7 @@ try {
     }
     const seeds = imageRequests.map(url => new URL(url).searchParams).filter(query => query.get("sort") === "explore").map(query => query.get("seed"));
     assert.notEqual(seeds.at(-1), seeds.at(-2), "exploring again creates a new queue");
-    await navigate(page, "图片与视频");
+    await navigate(page, "照片");
     assert.equal(new URL(page.url()).search, "");
     assert.equal(await page.locator(".album-heading").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -318,7 +322,7 @@ try {
     assert.equal(await page.locator('.topbar .explore-toggle').count(), 0);
     const toggle = page.locator('.gallery-sidebar-toggle');
     if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
-    await page.locator(`${width <= 720 ? '.mobile-sidebar' : '.desktop-sidebar'} .brand`).click();
+    await page.locator('.topbar .brand').click();
     await page.locator('.search-toggle').click();
     await page.getByLabel('排序方式', { exact: true }).selectOption('explore');
     await page.keyboard.press('Escape');
@@ -341,9 +345,11 @@ try {
   await browser.close();
   browser = null;
   const motionUrl = `${origin}/?${new URLSearchParams({ view: "albums", album: "旅行/山野" })}`;
-  const motion = spawn(process.execPath, [join(project, "frontend/scripts/navigation-motion-check.mjs")], { env: { ...process.env, PIXHELF_URL: motionUrl }, stdio: "inherit" });
-  const motionCode = await new Promise((resolve, reject) => { motion.once("error", reject); motion.once("exit", resolve); });
-  assert.equal(motionCode, 0, "navigation motion regression failed");
+  for (const script of ["navigation-motion-check.mjs", "sidebar-resize-check.mjs"]) {
+    const check = spawn(process.execPath, [join(project, "frontend/scripts", script)], { env: { ...process.env, PIXHELF_URL: motionUrl }, stdio: "inherit" });
+    const code = await new Promise((resolve, reject) => { check.once("error", reject); check.once("exit", resolve); });
+    assert.equal(code, 0, `${script} failed`);
+  }
 } finally {
   await browser?.close();
   if (backend && backend.exitCode === null) {

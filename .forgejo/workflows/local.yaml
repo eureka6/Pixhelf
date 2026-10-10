@@ -1,0 +1,53 @@
+name: Build pixhelf-local
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pixhelf-local
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: docker
+    container:
+      image: docker.io/library/node:22-bookworm
+    steps:
+      - name: Check out source
+        uses: https://data.forgejo.org/actions/checkout@v6
+
+      - name: Build and verify release binaries
+        uses: ./.forgejo/actions/build-release
+
+      - name: Stage image inputs
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: local-image-inputs
+          path: |
+            dist/pixhelf-amd64-linux
+            dist/pixhelf-arm64-linux
+            packaging/prepare-image.sh
+            packaging/publish-image.sh
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: forgejo.event_name == 'workflow_dispatch'
+    runs-on: docker
+    container:
+      image: docker.io/library/node:22-alpine3.23
+    steps:
+      - name: Download image inputs
+        uses: https://data.forgejo.org/actions/download-artifact@v3
+        with:
+          name: local-image-inputs
+          path: .
+
+      - name: Prepare image publishing
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+        run: sh packaging/prepare-image.sh local
+
+      - name: Publish pixhelf-local latest
+        run: sh packaging/publish-image.sh

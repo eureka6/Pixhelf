@@ -84,6 +84,7 @@ async function navigate(page, label) {
   const panel = page.viewportSize().width <= 720 ? ".mobile-sidebar" : ".desktop-sidebar";
   await page.locator(`${panel} .album-link`).getByText(label, { exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".mobile-nav-layer"));
+  if (page.viewportSize().width > 720) await toggle.click();
 }
 async function waitEntries(page, count) {
   await page.waitForFunction(count => document.querySelectorAll(".storage-entry").length === count, count);
@@ -210,9 +211,12 @@ try {
   assert.equal((await context.request.post(`${origin}/api/storage/config`, { headers: writeHeaders, data: { ...storageInput, rootPath: `${remoteRoot}/missing` } })).status(), 404);
   assert.equal(await readFile(persistedPath, "utf8"), persisted, "a failed save overwrote the existing connection");
   await page.getByRole("button", { name: "加载更多", exact: true }).click(); await waitEntries(page, 65);
+  await page.locator('.search-toggle').focus();
+  await page.locator('.search-toggle').click();
   await page.getByRole("searchbox", { name: "筛选已加载文件", exact: true }).fill("文档-58"); await waitEntries(page, 1);
-  assert.equal(await page.locator('.search-toggle, .gallery-search-panel').count(), 0, 'file search has no extra disclosure');
+  assert.equal(await page.locator('.search-dialog .gallery-filter-controls').count(), 0, 'file search omits image filters');
   await page.getByRole("button", { name: "清空搜索", exact: true }).click(); await waitEntries(page, 65);
+  await page.locator('.search-dialog').getByRole('button', { name: '搜索', exact: true }).click();
   await page.getByRole("button", { name: "打开文件夹 项目 & 2026", exact: true }).click(); await waitEntries(page, 1);
   assert.equal(new URL(page.url()).searchParams.get("path"), "/项目 & 2026");
   await page.reload(); await waitEntries(page, 1);
@@ -270,7 +274,7 @@ try {
     await page.getByRole("button", { name: "上一张", exact: true }).click();
     assert.equal(await page.locator(".storage-preview img").getAttribute("alt"), "秋日.png");
     await page.keyboard.press("Escape");
-    await navigate(page, "图片与视频"); await page.locator(".image-card").waitFor();
+    await navigate(page, "照片"); await page.locator(".image-card").waitFor();
     await navigate(page, "外部存储"); await waitEntries(page, 60);
     console.log(JSON.stringify({ width, directoryBrowser: true, settingsBackdrop: true, stableBackground: true, preview: true }));
   }

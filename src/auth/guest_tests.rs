@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn gallery_management_requires_admin_origin_and_csrf() {
-    let (_cache, _gallery, app, id, cookie, csrf) = guest_fixture().await;
+    let (_cache, gallery, app, id, cookie, csrf) = guest_fixture().await;
     assert_eq!(
         set_guest(&app, &cookie, &csrf, true).await.status(),
         StatusCode::NO_CONTENT
@@ -28,6 +28,7 @@ async fn gallery_management_requires_admin_origin_and_csrf() {
         "/api/management/directories",
         "/api/management/sharing",
         "/api/management/categories",
+        "/api/management/upload?name=photo.png",
     ] {
         assert_eq!(
             call(&app, write_request(path, None, None), body.clone())
@@ -70,6 +71,23 @@ async fn gallery_management_requires_admin_origin_and_csrf() {
     .await;
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(json_body(response).await["favoriteIds"], json!([id]));
+    let bytes = std::fs::read(gallery.path().join("gallery/private-photo.png")).unwrap();
+    let uploaded = call(
+        &app,
+        write_request(
+            "/api/management/upload?name=uploaded.png",
+            Some(&cookie),
+            Some(&csrf),
+        ),
+        bytes.clone(),
+    )
+    .await;
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    assert_eq!(json_body(uploaded).await["path"], "uploaded.png");
+    assert_eq!(
+        std::fs::read(gallery.path().join("gallery/uploaded.png")).unwrap(),
+        bytes
+    );
 }
 
 async fn guest_fixture() -> (TempDir, TempDir, Router, String, String, String) {

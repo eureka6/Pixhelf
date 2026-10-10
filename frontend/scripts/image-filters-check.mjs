@@ -63,10 +63,11 @@ async function fixture(width, ready = true, touch = width <= 720) {
   const idle = () => page.waitForFunction(() => document.querySelector('.content').getAttribute('aria-busy') === 'false');
   const open = async () => {
     if (await page.locator('.search-toggle').getAttribute('aria-expanded') !== 'true') {
+      await page.locator('.gallery-sidebar-toggle').focus();
       await page.locator('.search-toggle').focus();
       await page.locator('.search-toggle').click();
     }
-    await page.getByRole('group', { name: '搜索与筛选', exact: true }).waitFor();
+    await page.getByRole('dialog', { name: '搜索图库', exact: true }).waitFor();
   };
   const request = (key, value) => page.waitForResponse(response => {
     const url = new URL(response.url());
@@ -82,120 +83,56 @@ async function fixture(width, ready = true, touch = width <= 720) {
 
 async function checkSearchDisclosure(f, width) {
   const { page } = f;
-  const input = page.locator('.gallery-search-input input');
-  const panel = page.locator('.gallery-search-panel');
-  await f.open();
-  await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
   await page.keyboard.press('Escape');
-  await panel.waitFor({ state: 'hidden' });
-  assert(await input.isVisible(), 'search is directly editable');
-  const inputBox = await input.boundingBox();
-  assert(inputBox.x < (width <= 720 ? 100 : 300), 'search stays on the left');
-  const closed = () => panel.waitFor({ state: 'hidden' });
-  const query = f.request('search', '输入法测试');
-  await input.fill('输入法测试');
-  await query; await f.idle();
-  await closed();
-  await input.dispatchEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229 });
-  assert(await input.evaluate(element => element === document.activeElement), 'IME confirmation must keep focus');
-  await input.press('Enter');
-  assert.equal(await input.evaluate(element => element === document.activeElement), false);
-  assert.equal(await input.inputValue(), '输入法测试');
-  const focusStyle = await input.evaluate(element => {
-    element.focus();
-    const style = getComputedStyle(element);
-    return { outline: style.outlineStyle, shadow: style.boxShadow, border: style.borderWidth };
-  });
-  assert.equal(focusStyle.outline, 'none', 'no inner focus box');
-  assert.equal(focusStyle.shadow, 'none', 'no input focus glow');
-  assert.equal(focusStyle.border, '0px', 'the search field has only one border');
-  await closed();
-  await page.screenshot({ path: `${output}/search-focused-${width}.png` });
-
-  const before = await page.locator('.content').boundingBox();
-  await f.open();
-  assert.deepEqual(await page.locator('.content').boundingBox(), before, 'filters do not move the gallery');
-  assert(await page.getByLabel('媒体类型', { exact: true }).isVisible(), 'one click exposes all filters');
-  assert.equal(await page.locator('.gallery-filter-toggle, .gallery-search-heading').count(), 0, 'no intermediate disclosure or heading');
-  await f.change('媒体类型', 'photo', 'kind');
-  await page.locator('.search-toggle').click();
-  await closed();
-  await f.open();
-  assert.equal(await page.getByLabel('媒体类型', { exact: true }).inputValue(), 'photo');
-  assert.equal(await input.inputValue(), '输入法测试');
-  assert.equal(await page.locator('.gallery-filter-count').textContent(), '1');
-  await page.screenshot({ path: `${output}/search-filters-${width}.png` });
-  await input.focus();
-  await input.press('Shift+Tab');
-  await closed();
-  assert(await page.evaluate(() => document.activeElement !== document.body && !document.activeElement.closest('.topbar-search')),
-    'closing preserves focus on the next control');
-
-  await f.open();
-  assert.equal(await page.locator('.toolbar-popover-backdrop').count(), 0);
-  assert.equal(await page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false);
-  const scroll = await page.evaluate(() => scrollY);
-  await page.mouse.move(width / 2, 760);
-  await page.mouse.wheel(0, 400);
-  await closed();
-  await page.waitForFunction(before => scrollY > before, scroll);
-  await input.focus();
-  const scrolledQuery = f.request('search', '继续输入');
-  await input.fill('继续输入');
-  await scrolledQuery; await f.idle();
-  await page.waitForFunction(() => scrollY === 0);
-  await closed();
-  assert.equal(await input.inputValue(), '继续输入');
-  await f.open();
-  const exposedId = await page.locator('.image-card').evaluateAll(cards => cards.find(card => {
-    const rect = card.getBoundingClientRect();
-    return card.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
-  })?.dataset.imageId);
-  assert(exposedId, 'some results remain accessible outside the filters');
-  const exposed = page.locator(`.image-card[data-image-id="${exposedId}"]`);
-  if (width <= 720) await exposed.tap();
-  else await exposed.click();
-  await page.locator('.image-viewer').waitFor();
-  await closed();
-  assert.equal(await input.evaluate(element => element === document.activeElement), false);
-  await page.locator('.viewer-close').click();
-  await page.locator('.image-viewer').waitFor({ state: 'detached' });
-
+  const input = page.locator('.gallery-search-input input'), panel = page.locator('.search-dialog');
+  assert.equal(await input.count(), 0, 'toolbar only contains a search button');
   if (width <= 720) {
+    await page.locator('.gallery-sidebar-toggle').click();
+    assert(await page.locator('.mobile-sidebar').isVisible());
     await f.open();
-    assert.equal(await input.evaluate(element => element === document.activeElement), false, 'filters should not force the keyboard open');
+    await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
+  } else await f.open();
+  assert.equal(await input.evaluate(element => element === document.activeElement), width > 720, 'desktop search focuses the input; touch search leaves the keyboard closed');
+  await input.fill('输入法测试');
+  await input.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, isComposing: true });
+  assert(await panel.isVisible(), 'IME confirmation must not close the dialog');
+  await input.press('Enter');
+  await panel.waitFor({ state: 'detached' });
+  assert(await page.locator('.search-toggle').evaluate(button => button === document.activeElement));
+  await f.open();
+  assert.equal(await input.inputValue(), '输入法测试');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
+  await page.keyboard.press('Shift+Tab');
+  assert(await page.evaluate(() => document.activeElement === document.body || !!document.activeElement.closest('.search-dialog')), 'modal focus never enters the gallery behind it');
+  await page.keyboard.press('Tab');
+  assert(await page.evaluate(() => !!document.activeElement.closest('.search-dialog')));
+  await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
+  await page.screenshot({ path: `${output}/search-dialog-${width}.png` });
+  if (width <= 720) {
     await input.focus();
     await page.evaluate(() => {
-      Object.defineProperty(visualViewport, 'height', { configurable: true, value: 260 });
+      Object.defineProperty(visualViewport, 'height', { configurable: true, value: 300 });
       Object.defineProperty(visualViewport, 'offsetTop', { configurable: true, value: 24 });
       visualViewport.dispatchEvent(new Event('resize'));
     });
-    await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--visual-viewport-height') === '260px');
-    await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
-    const keyboard = await panel.evaluate(element => {
-      const rect = element.getBoundingClientRect();
-      const controls = element.querySelector('.gallery-filter-controls');
-      const reset = element.querySelector('.gallery-search-reset').getBoundingClientRect();
-      return { bottom: rect.bottom, controlsScroll: controls.scrollHeight > controls.clientHeight,
-        resetVisible: reset.top >= rect.top && reset.bottom <= rect.bottom };
+    await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--visual-viewport-height') === '300px');
+    await page.waitForTimeout(200);
+    const viewport = await panel.evaluate(element => {
+      const box = element.getBoundingClientRect(), footer = element.querySelector('footer').getBoundingClientRect();
+      const input = element.querySelector('input').getBoundingClientRect(), header = element.querySelector('header').getBoundingClientRect();
+      const body = element.querySelector('.search-dialog-content');
+      return { top: box.top, bottom: box.bottom, footer: footer.bottom, scrolls: body.scrollHeight > body.clientHeight,
+        inputVisible: input.top >= header.top && input.bottom <= header.bottom && header.bottom <= footer.top,
+        inputTop: input.top, inputBottom: input.bottom, headerBottom: header.bottom, footerTop: footer.top, active: document.activeElement.tagName, scrollTop: body.scrollTop };
     });
-    assert(keyboard.bottom <= 284 && keyboard.controlsScroll && keyboard.resetVisible, JSON.stringify(keyboard));
-    await page.locator('.gallery-filter-controls').hover();
-    await page.mouse.wheel(0, 100);
-    assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'true');
+    assert(viewport.top >= 24 && viewport.bottom <= 324 && viewport.footer <= 324 && viewport.scrolls && viewport.inputVisible, JSON.stringify(viewport));
     await page.screenshot({ path: `${output}/search-keyboard-${width}.png` });
-    await page.keyboard.press('Escape');
-    await closed();
     await page.evaluate(() => { delete visualViewport.height; delete visualViewport.offsetTop; visualViewport.dispatchEvent(new Event('resize')); });
   }
-  await page.evaluate(async () => {
-    for (let index = 0; index < 12; index++) {
-      document.querySelector('.search-toggle').click();
-      await new Promise(requestAnimationFrame);
-    }
-  });
-  await closed();
-  console.log(`${width}px: inline search without popups, single-level filters, neutral focus, IME, persistence and keyboard viewport passed`);
+  await page.keyboard.press('Escape');
+  await panel.waitFor({ state: 'detached' });
+  assert.notEqual(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
+  console.log(`${width}px: modal search, persistence, IME, focus, drawer handoff and keyboard viewport passed`);
 }
 
 try {
@@ -204,12 +141,13 @@ try {
     const { page } = f;
     try {
       await f.open();
-      const bounds = await page.locator('.gallery-search-panel').boundingBox();
+      const bounds = await page.locator('.search-dialog').boundingBox();
       assert(bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= 844, 'filter panel fits the screen');
       await f.change('媒体类型', 'photo', 'kind');
       assert.equal(f.requests.at(-1).get('kind'), 'photo');
       await page.locator('.gallery-filter-summary').getByText('90 项', { exact: true }).waitFor();
       if (width === 1440) {
+        await page.locator('.search-dialog').getByRole('button', { name: '搜索', exact: true }).click();
         const more = page.waitForResponse(response => new URL(response.url()).searchParams.get('offset') === '60');
         await page.locator('.load-sentinel').scrollIntoViewIfNeeded();
         await more; await f.idle();
@@ -248,7 +186,7 @@ try {
       assert.equal(f.requests.at(-1).get('seed'), seed);
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('.topbar-actions .explore-toggle').count(), 0);
-      assert.equal(await page.locator('.topbar-actions > button, .topbar-actions .toolbar-popover-trigger').count(), 1);
+      assert.equal(await page.locator('.topbar-actions > button, .topbar-actions .toolbar-popover-trigger').count(), 2);
       const next = f.request('sort', 'explore');
       await page.getByRole('button', { name: '换一组', exact: true }).click();
       await next; await f.idle();
@@ -256,23 +194,18 @@ try {
       assert.equal(f.requests.at(-1).get('search'), '海边的日落');
       assert.equal(f.requests.at(-1).get('kind'), 'live');
       assert.equal(f.requests.at(-1).get('orientation'), 'portrait');
-      await page.locator('.gallery-search-panel').waitFor({ state: 'hidden' });
+      await page.locator('.search-dialog').waitFor({ state: 'hidden' });
       await page.screenshot({ path: `${output}/random-browsing-${width}.png` });
       await f.open();
       await f.change('排序方式', 'name-asc', 'sort');
       assert.equal(f.requests.at(-1).has('seed'), false);
       assert.equal(await page.getByRole('button', { name: '换一组', exact: true }).count(), 0);
       const reset = f.request('kind', null);
-      await page.getByRole('button', { name: '重置', exact: true }).click();
+      await page.getByRole('button', { name: '重置条件', exact: true }).click();
       await reset; await f.idle();
       assert.equal(f.requests.at(-1).has('orientation'), false);
       assert.equal(f.requests.at(-1).has('search'), false);
       assert.equal(await page.locator('.gallery-filter-summary').count(), 0);
-      if (width <= 720) {
-        await page.locator('.gallery-sidebar-toggle').click();
-        assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'false');
-        assert(await page.locator('.mobile-sidebar .brand-name').isVisible());
-      }
       await checkSearchDisclosure(f, width);
       console.log(`${width}px: combined filters, sorting, content search, reset, focus and exploration passed`);
     } finally { await f.close(); }
@@ -285,18 +218,14 @@ try {
     const input = landscape.page.locator('.gallery-search-input input');
     assert.equal(await input.evaluate(element => document.activeElement === element), false, 'landscape touch search forces the keyboard open');
     assert.equal(await input.evaluate(element => getComputedStyle(element).fontSize), '16px');
-    assert.equal(await landscape.page.locator('.toolbar-popover-backdrop').count(), 0);
-    assert.equal(await landscape.page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false);
-    const panel = landscape.page.locator('.gallery-search-panel');
+    const panel = landscape.page.locator('.search-dialog');
     await panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
     const bounds = await panel.boundingBox();
-    assert(bounds.y + bounds.height <= 390, 'landscape search runs below the screen');
+    assert(bounds.y >= 0 && bounds.y + bounds.height <= 390, 'landscape dialog fits the screen');
     await landscape.page.screenshot({ path: `${output}/search-landscape.png` });
-    await landscape.page.locator('.gallery-sidebar-toggle').tap();
-    await panel.waitFor({ state: 'hidden' });
-    assert.equal(await landscape.page.locator('.image-viewer').count(), 0);
-    assert.equal(await landscape.page.evaluate(() => getComputedStyle(document.body).overflow === 'hidden'), false);
-    console.log('landscape touch search fits the screen, stays non-modal and does not force keyboard focus');
+    await landscape.page.getByRole('button', { name: '关闭搜索', exact: true }).click();
+    await panel.waitFor({ state: 'detached' });
+    console.log('landscape touch search fits the screen and closes cleanly');
   } finally { await landscape.close(); }
 
   const f = await fixture(1440);
@@ -388,7 +317,7 @@ try {
     const searched = unavailable.request('search', defaults[0].query);
     await unavailable.page.locator('.gallery-search-input input').fill(defaults[0].query);
     await searched; await unavailable.idle();
-    assert.equal(await unavailable.page.locator('.gallery-filter-count').textContent(), '1', 'filename searches must not count unavailable content categories');
+    assert.equal(await unavailable.page.locator('.search-toggle').getAttribute('data-active'), 'true');
     console.log('metadata filters work when semantic search is unavailable');
   } finally { await unavailable.close(); }
 } finally { await browser.close(); }

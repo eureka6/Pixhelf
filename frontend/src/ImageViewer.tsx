@@ -165,7 +165,6 @@ export type ImageViewerProps = {
   onLoadMoreImages: () => Promise<GalleryImage[]>;
   onClose: () => void;
   slideshowRequest?: number;
-  onStopSlideshow?: () => void;
   onSelectImage?: (image: GalleryImage) => void;
   onSelectImages?: (images: GalleryImage[]) => void;
   onClearSelection?: () => void;
@@ -199,7 +198,6 @@ function PhotoViewer({
   onLoadMoreImages,
   onClose,
   slideshowRequest = 0,
-  onStopSlideshow,
   onSelectImage,
   onSelectImages,
   onClearSelection,
@@ -2025,11 +2023,11 @@ function PhotoViewer({
       </div>
       <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
       <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
-      {slideshowRequest > 0 && onStopSlideshow && <ViewerSlideshow key={slideshowRequest} viewerRef={dialogRef}
+      {slideshowRequest > 0 && <ViewerSlideshow key={slideshowRequest} viewerRef={dialogRef}
         images={images} activeIndex={activeIndex} hasMore={hasMore} onLoadMore={onLoadMoreImages}
         ready={currentLoadState.loaded || currentLoadState.failed}
         blocked={contactActive || dragging || menuOpen || scrollPage !== "image" || transform.scale > MIN_SCALE}
-        onOpen={onOpenImage} onStop={onStopSlideshow} />}
+        onOpen={onOpenImage} />}
 
       {currentLoadState.failed && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>

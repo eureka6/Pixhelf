@@ -1,0 +1,110 @@
+name: Build release binaries
+description: Build and verify the frontend and standalone Linux amd64 / arm64 binaries.
+runs:
+  using: composite
+  steps:
+    - name: Install Rust and cross-compilation toolchains
+      shell: sh
+      run: |
+        apt-get update
+        apt-get install --yes --no-install-recommends \
+          binutils \
+          binutils-aarch64-linux-gnu \
+          build-essential \
+          ca-certificates \
+          curl \
+          file \
+          ffmpeg \
+          musl-tools \
+          nasm \
+          pkg-config \
+          python3-venv
+        curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+          | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        "$HOME/.cargo/bin/rustup" target add \
+          x86_64-unknown-linux-musl \
+          aarch64-unknown-linux-musl
+        python3 -m venv /opt/cargo-zigbuild
+        /opt/cargo-zigbuild/bin/pip install \
+          --disable-pip-version-check \
+          --no-cache-dir \
+          cargo-zigbuild==0.23.0 \
+          ziglang==0.16.0 \
+          meson==1.10.0 \
+          ninja==1.13.0
+        echo "/opt/cargo-zigbuild/bin" >> "$GITHUB_PATH"
+        "$HOME/.cargo/bin/rustc" --version
+        /opt/cargo-zigbuild/bin/cargo-zigbuild --version
+        /opt/cargo-zigbuild/bin/python -m ziglang version
+
+    - name: Install frontend dependencies
+      working-directory: frontend
+      shell: sh
+      run: npm ci
+
+    - name: Build frontend
+      working-directory: frontend
+      shell: sh
+      run: npm run build
+
+    - name: Test Rust application
+      shell: sh
+      run: |
+        export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
+        export PIXHELF_SKIP_FRONTEND_BUILD=1
+        cargo test --locked
+
+    - name: Build static musl release binaries
+      shell: sh
+      run: |
+        set -eu
+        export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
+        export CARGO_ZIGBUILD_PYTHON_PATH=/opt/cargo-zigbuild/bin/python
+        export PIXHELF_SKIP_FRONTEND_BUILD=1
+        mkdir -p dist
+
+        build_release() {
+          target="$1"
+          asset="$2"
+          machine="$3"
+          binary="target/${target}/release/pixhelf"
+
+          cargo zigbuild --release --locked --target "$target"
+          file "$binary"
+
+          if [ "$(wc -c < "$binary")" -gt 41943040 ]; then
+            echo "${binary} exceeds the 40 MiB self-contained release size budget"
+            exit 1
+          fi
+
+          if ! readelf -h "$binary" | grep -q "Machine:.*${machine}"; then
+            echo "Unexpected architecture for ${binary}"
+            exit 1
+          fi
+          if readelf -l "$binary" | grep -q INTERP; then
+            echo "${binary} unexpectedly requires a dynamic loader"
+            exit 1
+          fi
+          if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
+            echo "${binary} unexpectedly requires a shared library"
+            exit 1
+          fi
+
+          sh packaging/pack-release.sh "$binary" "dist/${asset}"
+        }
+
+        build_release \
+          x86_64-unknown-linux-musl \
+          pixhelf-amd64-linux \
+          'Advanced Micro Devices X86-64'
+        build_release \
+          aarch64-unknown-linux-musl \
+          pixhelf-arm64-linux \
+          AArch64
+
+        dist/pixhelf-amd64-linux --help >/dev/null
+        env PATH=/nonexistent dist/pixhelf-amd64-linux --check-media
+        node packaging/check-standalone.mjs dist/pixhelf-amd64-linux
+        tar -cJf dist/pixhelf-media-sources.tar.xz packaging/build-media-runtime.sh packaging/pack-release.sh \
+          packaging/pack-media.mjs packaging/THIRD_PARTY.md target/media/sources/

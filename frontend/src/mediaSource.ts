@@ -262,7 +262,7 @@ export function createMediaSource(Player: typeof AVPlayer, source: string, filen
 
 // Native Live Photos and the compatibility decoder share the same bounded,
 // versioned byte cache. Large clips retain browser streaming instead of blobs.
-export async function motionBlob(source: string, signal: AbortSignal): Promise<Blob | undefined> {
+async function loadMotionBlob(source: string, signal: AbortSignal): Promise<Blob | undefined> {
   const reader = mediaReader(source, "motion.mov", signal, true);
   try {
     await reader.open();
@@ -281,4 +281,37 @@ export async function motionBlob(source: string, signal: AbortSignal): Promise<B
     if (signal.aborted) throw cancelled();
     return new Blob(parts, { type: "video/mp4" });
   } finally { await reader.stop(); }
+}
+
+type MotionLoad = { abort: AbortController; promise: Promise<Blob | undefined>; consumers: number };
+const motionLoads = new Map<string, MotionLoad>();
+
+// A visible-card preload and its player share one download. Cancelling either
+// owner releases only that owner; leaving both cancels the remaining network IO.
+export function motionBlob(source: string, signal: AbortSignal): Promise<Blob | undefined> {
+  if (signal.aborted) return Promise.reject(cancelled());
+  let load = motionLoads.get(source);
+  if (!load || load.abort.signal.aborted) {
+    const abort = new AbortController();
+    const current: MotionLoad = { abort, consumers: 0, promise: loadMotionBlob(source, abort.signal) };
+    current.promise = current.promise.finally(() => {
+      if (motionLoads.get(source) === current) motionLoads.delete(source);
+    });
+    motionLoads.set(source, current);
+    load = current;
+  }
+  const current = load;
+  current.consumers++;
+  return new Promise((resolve, reject) => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener("abort", abort);
+      if (--current.consumers === 0) current.abort.abort();
+    };
+    const abort = () => { release(); reject(cancelled()); };
+    signal.addEventListener("abort", abort, { once: true });
+    current.promise.then(value => { release(); resolve(value); }, error => { release(); reject(error); });
+  });
 }

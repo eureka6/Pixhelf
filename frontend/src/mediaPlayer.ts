@@ -17,7 +17,7 @@ export type PlayerCallbacks = {
 };
 
 export type VideoPlayer = Pick<MediaPlayer, "play" | "pause" | "seek" | "volume" | "rate" | "captureFrame" | "destroy">;
-type MediaPlayerOptions = { sourceResolution?: boolean; retainBytes?: boolean };
+type MediaPlayerOptions = { sourceResolution?: boolean; retainBytes?: boolean; quickStart?: boolean };
 
 const assetBase = import.meta.env.DEV
   ? new URL("/assets/libmedia/", location.origin).href
@@ -30,6 +30,8 @@ function loadLibrary(): Promise<PlayerModule> {
     throw error;
   });
 }
+
+export async function preloadMediaPlayer(): Promise<void> { await loadLibrary(); }
 
 // One adapter owns the asynchronous command queue and the lifetime of each
 // player. Both viewers and previews feed original HTTP Range bytes to libmedia.
@@ -105,7 +107,7 @@ export class MediaPlayer {
       enableWebGPU: false,
       enableWorker: true,
       loop: false,
-      preLoadTime: this.muted ? 0.5 : 1,
+      preLoadTime: this.options.quickStart ? 0.1 : this.muted ? 0.5 : 1,
     });
     engine.setVolume(this.volumeValue, true);
     engine.setRenderMode(cover ? 1 : 0);
@@ -134,7 +136,11 @@ export class MediaPlayer {
     engine.on("time", timestamp => this.updateTime(timestamp));
     engine.on("error", error => this.fail(error));
     engine.on("timeout", () => this.fail(new Error("视频加载超时，请重试。")));
-    await engine.load(createMediaSource(Player, source, filename, this.sourceAbort.signal, this.options.retainBytes));
+    const input = createMediaSource(Player, source, filename, this.sourceAbort.signal, this.options.retainBytes);
+    await engine.load(input, {
+      maxProbeDuration: this.options.quickStart ? 0.1 : undefined,
+      formatOptions: this.options.quickStart ? { fastOpen: true } : undefined,
+    });
     if (this.disposed || this.failed) return;
     const streams = engine.getStreams();
     const videoStream = streams.find(stream => stream.codecparProxy.codecType === 0);

@@ -5,7 +5,10 @@ on:
     tags:
       - 'v*'
   pull_request:
-  workflow_dispatch:
+
+concurrency:
+  group: pixhelf-release-${{ forgejo.ref }}
+  cancel-in-progress: ${{ forgejo.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -16,488 +19,46 @@ jobs:
       - name: Check out source
         uses: https://data.forgejo.org/actions/checkout@v6
 
-      - name: Install Rust and cross-compilation toolchains
-        run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends \
-            binutils \
-            build-essential \
-            ca-certificates \
-            curl \
-            file \
-            ffmpeg \
-            libheif-examples \
-            pkg-config \
-            python3-venv
-          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
-            | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" target add \
-            x86_64-unknown-linux-musl \
-            aarch64-unknown-linux-musl
-          python3 -m venv /opt/cargo-zigbuild
-          /opt/cargo-zigbuild/bin/pip install \
-            --disable-pip-version-check \
-            --no-cache-dir \
-            cargo-zigbuild==0.23.0 \
-            ziglang==0.16.0
-          echo "/opt/cargo-zigbuild/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustc" --version
-          /opt/cargo-zigbuild/bin/cargo-zigbuild --version
-          /opt/cargo-zigbuild/bin/python -m ziglang version
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Test Rust application
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          export PIXHELF_SKIP_FRONTEND_BUILD=1
-          cargo test --locked
-
-      - name: Build static musl release binaries
-        run: |
-          set -eu
-          export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
-          export CARGO_ZIGBUILD_PYTHON_PATH=/opt/cargo-zigbuild/bin/python
-          export PIXHELF_SKIP_FRONTEND_BUILD=1
-          mkdir -p dist
-
-          build_release() {
-            target="$1"
-            asset="$2"
-            machine="$3"
-            binary="target/${target}/release/pixhelf"
-
-            cargo zigbuild --release --locked --target "$target"
-            file "$binary"
-
-            if [ "$(wc -c < "$binary")" -gt 26214400 ]; then
-              echo "${binary} exceeds the 25 MiB release size budget"
-              exit 1
-            fi
-
-            if ! readelf -h "$binary" | grep -q "Machine:.*${machine}"; then
-              echo "Unexpected architecture for ${binary}"
-              exit 1
-            fi
-            if readelf -l "$binary" | grep -q INTERP; then
-              echo "${binary} unexpectedly requires a dynamic loader"
-              exit 1
-            fi
-            if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
-              echo "${binary} unexpectedly requires a shared library"
-              exit 1
-            fi
-
-            install -m 0755 "$binary" "dist/${asset}"
-          }
-
-          build_release \
-            x86_64-unknown-linux-musl \
-            pixhelf-amd64-linux \
-            'Advanced Micro Devices X86-64'
-          build_release \
-            aarch64-unknown-linux-musl \
-            pixhelf-arm64-linux \
-            AArch64
-
-          dist/pixhelf-amd64-linux --help >/dev/null
+      - name: Build and verify release binaries
+        uses: ./.forgejo/actions/build-release
 
       - name: Stage release inputs
-        if: forgejo.event_name != 'pull_request'
+        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
         uses: https://data.forgejo.org/actions/upload-artifact@v3
         with:
           name: release-inputs
           path: |
             dist/
             compose.yml
-            packaging/install-video-runtime.sh
+            packaging/prepare-image.sh
+            packaging/publish-image.sh
           if-no-files-found: error
 
   publish:
     needs: build
-    if: forgejo.event_name != 'pull_request'
+    if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
     runs-on: docker
     container:
       image: docker.io/library/node:22-alpine3.23
-    env:
-      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pixhelf
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
     steps:
-      - name: Install OCI tooling
-        run: |
-          set -eu
-          apk add --no-cache bind-tools ca-certificates coreutils curl tar
-
-          crane_archive=/tmp/go-containerregistry.tar.gz
-          curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
-            https://github.com/google/go-containerregistry/releases/download/v0.21.7/go-containerregistry_Linux_x86_64.tar.gz \
-            --output "$crane_archive"
-          printf '%s  %s\n' \
-            1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230 \
-            "$crane_archive" \
-            | sha256sum --check -
-          tar -xzf "$crane_archive" -C /usr/local/bin crane
-          crane version
-
       - name: Download release inputs
         uses: https://data.forgejo.org/actions/download-artifact@v3
         with:
           name: release-inputs
           path: .
 
-      - name: Prepare release metadata
-        run: |
-          set -eu
-          ref="${FORGEJO_REF:-${GITHUB_REF:-}}"
-          ref_name="${FORGEJO_REF_NAME:-${GITHUB_REF_NAME:-}}"
-          event="${FORGEJO_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
-          revision="${FORGEJO_SHA:-${GITHUB_SHA:-unknown}}"
-          server="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL}}"
-          repository="${FORGEJO_REPOSITORY:-${GITHUB_REPOSITORY}}"
-          registry="${server#http://}"
-          registry="${registry#https://}"
-          registry="${registry%%/*}"
-          image="$(printf '%s/%s' "$registry" "$repository" | tr '[:upper:]' '[:lower:]')"
+      - name: Prepare image publishing
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: sh packaging/prepare-image.sh release
 
-          case "${event}:${ref}" in
-            push:refs/tags/v*)
-              release_tag="$ref_name"
-              version="${release_tag#v}"
-              is_release=true
-              ;;
-            *)
-              release_tag=""
-              version="validation-$(printf '%.12s' "$revision")"
-              is_release=false
-              ;;
-          esac
-
-          test -n "$version"
-          test -s dist/pixhelf-amd64-linux
-          test -s dist/pixhelf-arm64-linux
-          test -f compose.yml
-
-          printf 'IS_RELEASE=%s\n' "$is_release" >> "$GITHUB_ENV"
-          printf 'RELEASE_TAG=%s\n' "$release_tag" >> "$GITHUB_ENV"
-          printf 'IMAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
-          printf 'REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
-          printf 'REGISTRY=%s\n' "$registry" >> "$GITHUB_ENV"
-          printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
-          printf 'SOURCE_URL=%s/%s\n' "$server" "$repository" >> "$GITHUB_ENV"
-
-      - name: Log in to Forgejo Container Registry
-        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
-        run: |
-          set -eu
-          token="${REGISTRY_TOKEN:-}"
-          username="${REGISTRY_USERNAME:-${FORGEJO_ACTOR:-${GITHUB_ACTOR:-}}}"
-          if [ -z "$token" ]; then
-            echo 'REGISTRY_TOKEN must contain a Forgejo token with write:package access' >&2
-            exit 1
-          fi
-          test -n "$username"
-          printf '%s' "$token" \
-            | crane auth login "$REGISTRY" --username "$username" --password-stdin
-
-      - name: Log in to Docker Hub
-        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
-        run: |
-          set -eu
-          token="${DOCKERHUB_TOKEN:-}"
-          username="${DOCKERHUB_USERNAME:-}"
-          if [ -z "$token" ]; then
-            echo 'DOCKERHUB_TOKEN must contain a Docker Hub access token with write access' >&2
-            exit 1
-          fi
-          if [ -z "$username" ]; then
-            echo 'DOCKERHUB_USERNAME must contain the Docker Hub username' >&2
-            exit 1
-          fi
-          printf '%s' "$token" \
-            | crane auth login index.docker.io --username "$username" --password-stdin
-
-      - name: Assemble multi-platform OCI image
-        run: |
-          set -eu
-          work=/tmp/pixhelf-oci
-          local_registry=127.0.0.1:5000
-          model_revision=f4a64596bbcf9a2a94591b74b9dc39b2e4e77e3e
-          model_name=chinese-clip-vit-base-patch16-f4a64596
-          model_path="/opt/pixhelf/models/$model_name"
-          model_root="$work/model-root"
-          model_layer="$work/model-layer.tar"
-          model_base_ref="$local_registry/staging:model-base"
-          mkdir -p "$model_root$model_path"
-
-          retry_remote() {
-            attempt=1
-            while ! "$@"; do
-              if [ "$attempt" -ge 5 ]; then
-                echo "Remote operation failed after ${attempt} attempts: $*" >&2
-                return 1
-              fi
-              retry_seconds=$((attempt * 5))
-              echo "Remote operation failed; retrying in ${retry_seconds}s: $*" >&2
-              sleep "$retry_seconds"
-              attempt=$((attempt + 1))
-            done
-          }
-
-          pin_ipv4() {
-            host="$1"
-            address="$(dig +short A "$host" | awk '/^[0-9]+\./ { print; exit }')"
-            if [ -z "$address" ]; then
-              echo "Cannot resolve an IPv4 address for ${host}" >&2
-              return 1
-            fi
-            printf '%s %s\n' "$address" "$host" >> /etc/hosts
-            echo "Pinned ${host} to IPv4 address ${address}"
-          }
-
-          # Keep this metadata in sync with src/text_search/download.rs and Dockerfile.
-          download_model_artifact() {
-            filename="$1"
-            checksum="$2"
-            expected_size="$3"
-            destination="$model_root$model_path/$filename"
-            url="https://huggingface.co/OFA-Sys/chinese-clip-vit-base-patch16/resolve/$model_revision/$filename"
-
-            curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location \
-              --retry 5 \
-              --retry-all-errors \
-              --continue-at - \
-              "$url" \
-              --output "$destination"
-            printf '%s  %s\n' "$checksum" "$destination" | sha256sum --check -
-            actual_size="$(wc -c < "$destination" | tr -d ' ')"
-            test "$actual_size" = "$expected_size"
-            chmod 0644 "$destination"
-          }
-
-          download_model_artifact \
-            model.safetensors \
-            29cc0b2bcf6ff777f2e15742be92b110e4acbdb2068356e862c4637a4b15fe4f \
-            753106020
-          download_model_artifact \
-            vocab.txt \
-            45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c \
-            109540
-
-          chmod 0755 \
-            "$model_root/opt" \
-            "$model_root/opt/pixhelf" \
-            "$model_root/opt/pixhelf/models" \
-            "$model_root$model_path"
-
-          tar \
-            --sort=name \
-            --mtime=@0 \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -cf "$model_layer" \
-            -C "$model_root" \
-            opt
-
-          crane registry serve --address "$local_registry" >"$work/registry.log" 2>&1 &
-          registry_pid=$!
-          cleanup() {
-            kill "$registry_pid" >/dev/null 2>&1 || true
-            wait "$registry_pid" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          sleep 1
-
-          crane append --insecure --oci-empty-base \
-            --new_layer "$model_layer" \
-            --new_tag "$model_base_ref"
-          model_layer_digest="$(crane manifest --insecure "$model_base_ref" | node -e '
-            let input = "";
-            process.stdin.on("data", (chunk) => input += chunk);
-            process.stdin.on("end", () => {
-              const manifest = JSON.parse(input);
-              if (manifest.layers?.length !== 1) {
-                throw new Error(`model base has ${manifest.layers?.length ?? 0} layers`);
-              }
-              process.stdout.write(manifest.layers[0].digest);
-            });
-          ')"
-
-          build_platform() {
-            arch="$1"
-            asset="$2"
-            platform_dir="$work/$arch"
-            rootfs="$platform_dir/rootfs"
-            base_ref="$local_registry/staging:${arch}-base"
-            configured_ref="$local_registry/staging:${arch}"
-
-            runtime_root="$platform_dir/video-runtime"
-            sh packaging/install-video-runtime.sh "$arch" "$runtime_root"
-            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-              -cf "$platform_dir/video-runtime.tar" -C "$runtime_root" .
-
-            mkdir -p "$rootfs"
-            install -m 0755 "$asset" "$rootfs/pixhelf"
-            tar \
-              --sort=name \
-              --mtime=@0 \
-              --owner=0 \
-              --group=0 \
-              --numeric-owner \
-              -cf "$platform_dir/layer.tar" \
-              -C "$rootfs" \
-              pixhelf
-
-            crane append --insecure \
-              --base "$model_base_ref" \
-              --new_layer "$platform_dir/video-runtime.tar" \
-              --new_layer "$platform_dir/layer.tar" \
-              --new_tag "$base_ref"
-            crane mutate --insecure "$base_ref" \
-              --tag "$configured_ref" \
-              --set-platform "linux/$arch" \
-              --entrypoint /pixhelf \
-              --workdir /data \
-              --exposed-ports 3002/tcp \
-              --env "PIXHELF_TEXT_SEARCH_MODEL=$model_path" \
-              --env 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
-              --label org.opencontainers.image.title=Pixhelf \
-              --label 'org.opencontainers.image.description=Self-hosted photo and video gallery' \
-              --label "org.opencontainers.image.version=$IMAGE_VERSION" \
-              --label "org.opencontainers.image.revision=$REVISION" \
-              --label "org.opencontainers.image.source=$SOURCE_URL"
-
-            crane config --insecure "$configured_ref" \
-              | ARCH="$arch" MODEL_PATH="$model_path" node -e '
-                  let input = "";
-                  process.stdin.on("data", (chunk) => input += chunk);
-                  process.stdin.on("end", () => {
-                    const config = JSON.parse(input);
-                    if (config.os !== "linux" || config.architecture !== process.env.ARCH) {
-                      throw new Error(`unexpected platform: ${config.os}/${config.architecture}`);
-                    }
-                    if (config.config.Entrypoint?.[0] !== "/pixhelf") {
-                      throw new Error("unexpected entrypoint");
-                    }
-                    if (config.config.WorkingDir !== "/data") {
-                      throw new Error("unexpected working directory");
-                    }
-                    if (!config.config.ExposedPorts?.["3002/tcp"]) {
-                      throw new Error("missing exposed port");
-                    }
-                    const expectedModel = `PIXHELF_TEXT_SEARCH_MODEL=${process.env.MODEL_PATH}`;
-                    if (!config.config.Env?.includes(expectedModel)) {
-                      throw new Error("missing bundled model configuration");
-                    }
-                  });'
-
-            app_layer_digest="$(crane manifest --insecure "$configured_ref" \
-              | EXPECTED_MODEL_LAYER="$model_layer_digest" node -e '
-                  let input = "";
-                  process.stdin.on("data", (chunk) => input += chunk);
-                  process.stdin.on("end", () => {
-                    const manifest = JSON.parse(input);
-                    if (manifest.layers?.length !== 3) {
-                      throw new Error(`application image has ${manifest.layers?.length ?? 0} layers`);
-                    }
-                    if (manifest.layers[0].digest !== process.env.EXPECTED_MODEL_LAYER) {
-                      throw new Error("application image does not reuse the model base layer");
-                    }
-                    process.stdout.write(manifest.layers[2].digest);
-                  });'
-            )"
-
-            expected="$(sha256sum "$asset" | cut -d ' ' -f 1)"
-            actual="$(crane blob --insecure "$local_registry/staging@$app_layer_digest" \
-              | gzip -dc \
-              | tar -xOf - pixhelf \
-              | sha256sum \
-              | cut -d ' ' -f 1)"
-            test "$actual" = "$expected"
-
-            if [ "$IS_RELEASE" = true ]; then
-              crane pull --insecure "$configured_ref" "$platform_dir/image.tar"
-              digest="$(crane digest --tarball "$platform_dir/image.tar")"
-              retry_remote crane push "$platform_dir/image.tar" "${IMAGE}@${digest}"
-              retry_remote crane push "$platform_dir/image.tar" "${DOCKERHUB_IMAGE}@${digest}"
-              forgejo_manifest_ref="${IMAGE}@${digest}"
-              dockerhub_manifest_ref="${DOCKERHUB_IMAGE}@${digest}"
-            else
-              forgejo_manifest_ref="$configured_ref"
-              dockerhub_manifest_ref="$configured_ref"
-            fi
-          }
-
-          if [ "$IS_RELEASE" = true ]; then
-            pin_ipv4 auth.docker.io
-            pin_ipv4 index.docker.io
-            pin_ipv4 registry-1.docker.io
-          fi
-
-          build_platform amd64 dist/pixhelf-amd64-linux
-          amd64_forgejo_manifest="$forgejo_manifest_ref"
-          amd64_dockerhub_manifest="$dockerhub_manifest_ref"
-          build_platform arm64 dist/pixhelf-arm64-linux
-          arm64_forgejo_manifest="$forgejo_manifest_ref"
-          arm64_dockerhub_manifest="$dockerhub_manifest_ref"
-
-          if [ "$IS_RELEASE" = true ]; then
-            crane index append \
-              --manifest "$amd64_forgejo_manifest" \
-              --manifest "$arm64_forgejo_manifest" \
-              --tag "${IMAGE}:${IMAGE_VERSION}"
-            case "$IMAGE_VERSION" in
-              *-*) ;;
-              *) crane tag "${IMAGE}:${IMAGE_VERSION}" latest ;;
-            esac
-
-            crane index append \
-              --manifest "$amd64_dockerhub_manifest" \
-              --manifest "$arm64_dockerhub_manifest" \
-              --tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}"
-            case "$IMAGE_VERSION" in
-              *-*) ;;
-              *) crane tag "${DOCKERHUB_IMAGE}:${IMAGE_VERSION}" latest ;;
-            esac
-
-            forgejo_index_ref="${IMAGE}:${IMAGE_VERSION}"
-            dockerhub_index_ref="${DOCKERHUB_IMAGE}:${IMAGE_VERSION}"
-          else
-            index_ref="$local_registry/pixhelf:validation"
-            crane index append --insecure \
-              --manifest "$amd64_forgejo_manifest" \
-              --manifest "$arm64_forgejo_manifest" \
-              --tag "$index_ref"
-          fi
-
-          if [ "$IS_RELEASE" = true ]; then
-            forgejo_index="$(crane index list "$forgejo_index_ref")"
-            dockerhub_index="$(crane index list "$dockerhub_index_ref")"
-            printf '%s\n' "$forgejo_index"
-            printf '%s\n' "$forgejo_index" | grep -q 'linux/amd64'
-            printf '%s\n' "$forgejo_index" | grep -q 'linux/arm64'
-            printf '%s\n' "$dockerhub_index"
-            printf '%s\n' "$dockerhub_index" | grep -q 'linux/amd64'
-            printf '%s\n' "$dockerhub_index" | grep -q 'linux/arm64'
-          else
-            index="$(crane index list --insecure "$index_ref")"
-            printf '%s\n' "$index"
-            printf '%s\n' "$index" | grep -q 'linux/amd64'
-            printf '%s\n' "$index" | grep -q 'linux/arm64'
-          fi
+      - name: Publish multi-platform OCI image
+        run: sh packaging/publish-image.sh
 
       - name: Create Forgejo release and upload assets
-        if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
         run: |
           set -eu
           token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
@@ -575,7 +136,7 @@ jobs:
           delete_asset pixhelf-amd64
           delete_asset pixhelf-arm64
 
-          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux compose.yml; do
+          for asset in dist/pixhelf-amd64-linux dist/pixhelf-arm64-linux dist/pixhelf-media-sources.tar.xz compose.yml; do
             asset_name="$(basename "$asset")"
             delete_asset "$asset_name"
             curl --silent --show-error --fail \

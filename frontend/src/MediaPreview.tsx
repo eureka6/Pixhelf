@@ -4,6 +4,7 @@ import { CARD_MENU_EVENT, CARD_TOUCH_EVENT, clearCardFeedback, markCardPreviewPl
 import { MediaPlayer, type PlayerCallbacks, type VideoPlayer } from "./mediaPlayer";
 import { NativeMediaPlayer } from "./nativeMediaPlayer";
 import { LivePhotoPlayer } from "./livePhotoPlayer";
+import { canPreloadLivePhotos, preloadLivePhoto } from "./livePhotoPreload";
 import type { GalleryImage } from "./types";
 import { viewerOriginalUrl } from "./viewerAssets";
 import { isAnimatedImage } from "./mediaUrls";
@@ -66,7 +67,17 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     let playbackListeners: AbortController | null = null;
     let visibility: IntersectionObserver | null = null;
     let viewerVisibility: IntersectionObserver | null = null;
+    let preloadVisibility: IntersectionObserver | null = null;
+    let preloadTimer = 0;
+    let releasePreload: (() => void) | undefined;
     delete layer.dataset.failed;
+
+    const stopPreload = () => {
+      window.clearTimeout(preloadTimer);
+      preloadTimer = 0;
+      releasePreload?.();
+      releasePreload = undefined;
+    };
 
     const stop = () => {
       generation++;
@@ -114,6 +125,9 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
         : !isVideo ? new LivePhotoPlayer(viewport, source, callbacks, autoPlay)
         : preview ? new NativeMediaPlayer(viewport, source, image.name, true, callbacks, true)
         : new MediaPlayer(viewport, source, image.name, true, callbacks, true);
+      // Attach the player before releasing the preload's ownership, so an
+      // in-progress original download continues without restarting.
+      stopPreload();
       player.play();
       playbackListeners = new AbortController();
       const options = { capture: true, passive: true, signal: playbackListeners.signal };
@@ -131,6 +145,25 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
     };
     const listeners = new AbortController();
     const options = { passive: true, signal: listeners.signal };
+    if (!autoPlay && !isVideo && !animated) {
+      const schedulePreload = () => {
+        stopPreload();
+        if (player || blocked() || !canPreloadLivePhotos()) return;
+        const bounds = card.getBoundingClientRect();
+        if (bounds.bottom <= 0 || bounds.top >= innerHeight || bounds.right <= 0 || bounds.left >= innerWidth) return;
+        // Briefly passing a card while scrolling should not download its clip.
+        preloadTimer = window.setTimeout(() => {
+          preloadTimer = 0;
+          if (!player && !blocked() && canPreloadLivePhotos()) releasePreload = preloadLivePhoto(source);
+        }, 250);
+      };
+      preloadVisibility = new IntersectionObserver(entries => {
+        if (entries.at(-1)?.isIntersecting) schedulePreload();
+        else stopPreload();
+      });
+      preloadVisibility.observe(card);
+      document.addEventListener("visibilitychange", schedulePreload, options);
+    }
     if (autoPlay) {
       card.addEventListener(MEDIA_PREVIEW_PLAY_EVENT, () => start("viewer"), options);
       viewerVisibility = new IntersectionObserver(entries => {
@@ -151,20 +184,20 @@ export const MediaPreview = memo(function MediaPreview({ image, autoPlay = false
       if (window.matchMedia("(hover: hover) and (pointer: fine)").matches && card.matches(":hover")) start("mouse");
     }
     card.addEventListener(CARD_MENU_EVENT, stop, options);
-    return () => { listeners.abort(); viewerVisibility?.disconnect(); stop(); };
+    return () => { listeners.abort(); viewerVisibility?.disconnect(); preloadVisibility?.disconnect(); stopPreload(); stop(); };
   }, [image.id, preview, source, image.name, autoPlay, isVideo, animated]);
 
   if (!source) return null;
   return (
     <div ref={layerRef} className={`media-preview${isVideo ? " video-preview" : ""}`} data-playing="false" data-loading="false" title={isVideo ? "视频预览" : animated ? "GIF 动图" : "live 照片"}>
       <div className="media-preview-viewport" aria-hidden="true"><div ref={viewportRef} className="media-preview-player" /></div>
-      {!isVideo && <span className="live-photo-badge" aria-hidden="true">
+      {animated ? <span className="gif-badge" aria-hidden="true">GIF</span> : !isVideo && <span className="live-photo-badge" aria-hidden="true">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeDasharray="1.4 2" />
           <circle cx="8" cy="8" r="3.5" stroke="currentColor" /><circle cx="8" cy="8" r="1" fill="currentColor" />
         </svg>live
       </span>}
-      <span className="media-preview-loading" role="progressbar" aria-label={isVideo ? "加载视频预览" : "加载 live"} />
+      <span className="media-preview-loading" role="progressbar" aria-label={isVideo ? "加载视频预览" : animated ? "加载 GIF" : "加载 live"} />
     </div>
   );
 });

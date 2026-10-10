@@ -7,7 +7,7 @@ export async function checkSelectionNavigation(context, origin) {
   const act = locator => touch ? locator.tap() : locator.click();
   const bar = page.locator(".gallery-selection-bar");
   const cards = page.locator(".justified-gallery .image-card");
-  const first = page.locator(".justified-gallery .image-card:not(:has(.live-photo-badge)):not(:has(.video-badge))").first();
+  const first = page.locator(".justified-gallery .image-card:not(:has(.live-photo-badge, .gif-badge, .video-badge))").first();
   const select = async card => {
     if (touch) await activateTouchCard(card); else await card.hover();
     await act(card.getByRole("checkbox"));

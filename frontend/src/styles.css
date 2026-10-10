@@ -1,12 +1,9 @@
 .app-shell {
-  --sidebar-layout-width: var(--sidebar-width);
+  --sidebar-layout-width: 0px;
   min-height: 100vh;
   min-height: 100dvh;
 }
 
-.app-shell[data-sidebar-collapsed="true"] {
-  --sidebar-layout-width: var(--sidebar-rail-width);
-}
 
 .topbar {
   position: fixed;
@@ -41,9 +38,24 @@
 
 .sidebar-heading {
   flex: 0 0 var(--topbar-height);
+}
+
+.topbar-brand {
+  position: absolute;
+  inset: 0 auto 0 68px;
   display: flex;
   align-items: center;
-  padding: 0 18px 0 68px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) ease, visibility 0s linear var(--motion-fast);
+}
+
+.topbar-brand[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
 }
 
 .brand {
@@ -73,11 +85,11 @@
 
 .topbar-actions {
   min-width: 0;
-  flex: 0 1 360px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: max(0px, calc(var(--sidebar-layout-width) - 52px));
+  margin-left: auto;
 }
 
 .icon-button {
@@ -142,7 +154,14 @@
 
 .gallery-sidebar-toggle:hover { background: #eceeec; }
 
-.topbar-search,
+.sidebar-toggle-arrow { opacity: 0; transition: opacity var(--motion-fast) ease; }
+.gallery-sidebar-toggle[data-mode="pinned"] .sidebar-toggle-arrow,
+.gallery-sidebar-toggle[data-mode="automatic"]:focus-visible .sidebar-toggle-arrow { opacity: 1; }
+@media (hover: hover) {
+  .gallery-sidebar-toggle[data-mode="automatic"]:hover .sidebar-toggle-arrow { opacity: 1; }
+}
+
+.topbar-actions,
 .topbar .gallery-sidebar-toggle,
 .topbar-surface {
   transition: translate var(--motion-medium) var(--ease-standard),
@@ -151,7 +170,7 @@
     transform var(--motion-fast) var(--ease-standard);
 }
 
-.app-shell[data-topbar-hidden="true"] .topbar-search,
+.app-shell[data-topbar-hidden="true"] .topbar-actions,
 .app-shell[data-topbar-hidden="true"] .topbar-surface,
 .app-shell[data-topbar-hidden="true"] .request-progress {
   translate: 0 calc(-1 * var(--topbar-height));
@@ -186,7 +205,7 @@
   left: 0;
   width: var(--sidebar-width);
   overflow: hidden;
-  box-shadow: 7px 0 22px rgba(24, 34, 30, 0.035);
+  box-shadow: 12px 0 36px rgba(24, 34, 30, .14);
   transform: translate3d(0, 0, 0);
   transition: transform var(--motion-medium) var(--ease-standard);
 }
@@ -194,6 +213,11 @@
 .app-shell[data-sidebar-collapsed="true"] .desktop-sidebar {
   transform: translate3d(-100%, 0, 0);
   pointer-events: none;
+}
+
+@media (min-width: 721px) {
+  .app-shell[data-sidebar-pinned="true"] { --sidebar-layout-width: var(--sidebar-width); }
+  .app-shell[data-sidebar-pinned="true"] .desktop-sidebar { box-shadow: 3px 0 14px rgba(24, 34, 30, .035); }
 }
 
 .album-nav {
@@ -379,54 +403,6 @@
   transition-delay: 0s;
 }
 
-.topbar-search {
-  --popover-width: 430px;
-  width: 100%;
-  display: flex;
-  align-items: center;
-  height: 36px;
-  padding: 0 3px 0 11px;
-  border: 1px solid #dfe4e1;
-  border-radius: 9px;
-  background: #f3f5f3;
-}
-.topbar-search:focus-within { border-color: var(--focus-border); background: var(--surface); }
-/* Keep the mobile panel fixed to the viewport when search reveals a hidden bar. */
-.topbar-search.is-open { translate: none; transition-property: background, border-color; }
-.topbar-search .search-toggle {
-  width: 30px;
-  height: 28px;
-  flex-basis: 30px;
-  border: 0;
-  color: var(--muted);
-  background: transparent;
-}
-.topbar-search .search-toggle:hover { color: var(--ink); background: #eceeec; }
-.topbar-search .search-toggle[aria-expanded="true"] { color: var(--ink); background: transparent; }
-.topbar-search .search-toggle:has(.gallery-filter-count) { width: auto; flex-basis: auto; padding: 0 5px; }
-.topbar-search .toolbar-popover-trigger-icon { display: flex; gap: 5px; }
-
-.search-popover-icon { flex: 0 0 auto; color: #78847e; }
-
-.gallery-search-input input {
-  min-width: 0;
-  flex: 1;
-  height: 100%;
-  padding: 0 7px;
-  color: var(--ink);
-  background: transparent;
-  border: 0;
-  outline: 0;
-  font-size: 13px;
-}
-
-.gallery-search-input input::placeholder { color: #87918b; }
-
-.gallery-search-input input[type="search"]::-webkit-search-cancel-button { display: none; }
-
-.search-popover-panel.gallery-search-panel { top: calc(100% + 12px); left: 0; right: auto; width: min(var(--popover-width), calc(100vw - max(70px, var(--sidebar-layout-width) + 18px) - 18px)); height: auto; display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 16px; border-radius: 12px; box-shadow: 0 12px 36px rgba(20, 29, 25, .12); transform-origin: top left; max-height: calc(100dvh - var(--topbar-height) - 24px); overflow: auto; }
-.gallery-search-input { display: flex; flex: 1; align-items: center; gap: 2px; min-width: 0; height: 100%; }
-.gallery-filter-controls { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .gallery-filter-count { min-width: 17px; padding: 0 4px; border-radius: 4px; background: #e5e9e6; color: var(--ink); font-size: 11px; font-variant-numeric: tabular-nums; }
 .gallery-filter-reset { flex: none; padding: 5px 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
 .gallery-search-reset { align-self: flex-end; min-height: 30px; padding: 0 4px; }
@@ -451,12 +427,7 @@
 .gallery-filter-fields .gallery-filter-hint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 @media (max-width: 720px), (hover: none) and (pointer: coarse) {
   .topbar, .topbar-surface { top: var(--visual-viewport-top); }
-  .topbar-actions { flex: 1; margin-left: 0; }
-  .topbar-search { height: 40px; }
-  .topbar-search .search-toggle { width: 36px; height: 36px; flex-basis: 36px; }
-  .search-popover-panel.gallery-search-panel { position: fixed; top: calc(var(--visual-viewport-top) + var(--topbar-height) + 8px); left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); width: auto; padding: 14px; max-height: calc(var(--visual-viewport-height, 100dvh) - var(--topbar-height) - 16px); }
   .gallery-search-input input { font-size: 16px; }
-  .topbar-search .clear-search { flex: 0 0 32px; height: 36px; }
   .gallery-filter-options button, .gallery-filter-content legend button, .gallery-search-reset { min-height: 40px; }
   .gallery-filter-actions button { min-height: 40px; }
   .gallery-filter-fields select { height: 42px; font-size: 16px; }
@@ -664,7 +635,7 @@
 
 .live-photo-surface > canvas { z-index: 1; }
 
-.live-photo-badge {
+.live-photo-badge, .gif-badge {
   position: absolute;
   z-index: 2;
   top: 8px;
@@ -680,7 +651,8 @@
   line-height: 1;
 }
 
-.media-preview[data-failed="true"] .live-photo-badge::after { content: "· 暂不可播放"; }
+.gif-badge { font-weight: 650; letter-spacing: .4px; }
+.media-preview[data-failed="true"] :is(.live-photo-badge, .gif-badge)::after { content: "· 暂不可播放"; }
 
 .media-preview-loading {
   position: absolute;
@@ -889,11 +861,6 @@
   transition: opacity var(--motion-fast) ease;
 }
 
-.viewer-slideshow { position: absolute; z-index: 5; top: calc(var(--viewer-visible-bottom, 100dvh) - max(62px, calc(50px + env(safe-area-inset-bottom)))); left: 50%; translate: -50% 0; display: flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid rgba(255, 255, 255, .1); border-radius: 24px; background: rgba(18, 22, 20, .8); color: #e9eeeb; backdrop-filter: blur(12px); }
-.viewer-slideshow button { width: 38px; height: 38px; display: grid; place-items: center; border: 0; border-radius: 50%; color: inherit; background: transparent; }
-.viewer-slideshow button:hover { background: rgba(255, 255, 255, .12); }
-.viewer-slideshow button:focus-visible { outline: 2px solid #d6e5e1; outline-offset: -2px; }
-.viewer-slideshow span { min-width: 64px; text-align: center; color: #c5cec9; font-size: 12px; }
 
 .viewer-control {
   display: grid;
@@ -1530,8 +1497,8 @@
   :root { --topbar-height: calc(52px + env(safe-area-inset-top)); }
   .app-shell {
     --sidebar-layout-width: 0px;
-    /* Leave room for the search button beside the drawer. */
-    --mobile-drawer-width: min(286px, calc(100vw - 48px - max(12px, env(safe-area-inset-right))));
+    /* Keep both toolbar actions clear of the drawer on narrow screens. */
+    --mobile-drawer-width: min(286px, calc(100vw - 100px - max(12px, env(safe-area-inset-right))));
   }
   .topbar {
     position: fixed;
@@ -1544,9 +1511,6 @@
       max(12px, env(safe-area-inset-left));
     gap: 8px;
   }
-  .app-shell:has(.mobile-nav-layer) .topbar-actions { flex: 0 0 36px; margin-left: auto; }
-  .app-shell:has(.mobile-nav-layer) .topbar-search { padding: 0; background: transparent; border-color: transparent; }
-  .app-shell:has(.mobile-nav-layer) .gallery-search-input { display: none; }
   .topbar-surface {
     top: var(--visual-viewport-top);
     background: #fcfdfc;
@@ -1559,9 +1523,9 @@
     flex-basis: 42px;
   }
   .desktop-sidebar { display: none; }
-  .sidebar-heading {
+  .topbar-brand {
+    left: calc(max(12px, env(safe-area-inset-left)) + 52px);
     padding-top: env(safe-area-inset-top);
-    padding-left: calc(max(12px, env(safe-area-inset-left)) + 52px);
   }
   .content {
     margin-left: 0;

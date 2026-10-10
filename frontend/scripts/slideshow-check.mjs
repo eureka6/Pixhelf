@@ -67,7 +67,8 @@ async function fixture(width, paginated = false) {
     await card.dispatchEvent("contextmenu", { button: 2, clientX: bounds.x + bounds.width / 2, clientY: bounds.y + bounds.height / 2 });
     await page.getByRole("menuitem", { name: "幻灯片播放", exact: true }).click();
     await tick(100);
-    await page.locator(".viewer-slideshow").waitFor();
+    await page.locator(".image-viewer").waitFor();
+    assert.equal(await page.locator(".viewer-slideshow").count(), 0, "slideshow must not display a bottom capsule");
   };
   const id = () => page.locator(".image-viewer").getAttribute("data-image-id");
   const ready = async image => {
@@ -104,10 +105,10 @@ try {
       }
       assert(changed, 'GIF pixels must change in the rendered viewer');
       await page.clock.pauseAt(await page.evaluate(() => Date.now() + 50));
-      await page.getByRole('button', { name: '暂停幻灯片', exact: true }).click();
+      await page.locator('.image-viewer').focus(); await page.keyboard.press(' ');
       await tick(12_000);
       assert.equal(await f.id(), images[0].id, 'pause prevents switching');
-      await page.getByRole('button', { name: '继续幻灯片', exact: true }).click();
+      await page.locator('.image-viewer').focus(); await page.keyboard.press(' ');
       await tick(4900);
       assert.equal(await f.id(), images[0].id, 'each slide stays for five seconds');
       await tick(200);
@@ -147,7 +148,11 @@ try {
       await f.ready(images[4]);
       await tick(5100);
       await f.ready(images[0]);
-      await page.getByRole('button', { name: '结束幻灯片', exact: true }).click();
+      await page.locator('.viewer-close').click();
+      await tick(10_000);
+      assert.equal(await page.locator('.image-viewer').count(), 0, 'closing ends playback');
+      await page.locator('.image-card').first().click();
+      await f.ready(images[0]);
       await tick(10_000);
       assert.equal(await page.locator('.viewer-slideshow').count(), 0);
       assert.equal(await f.id(), images[0].id, 'ending clears the timer');
@@ -190,8 +195,7 @@ try {
       assert.equal(await f.id(), images[0].id, 'wait on a pending page without skipping slides');
       assert.equal(f.pageRequests(), 1, 'pagination is deduplicated');
       if (action === 'close') { await page.locator('.viewer-close').click(); await tick(200); }
-      if (action === 'pause') await page.getByRole('button', { name: '暂停幻灯片', exact: true }).click();
-      if (action === 'timeout') await page.getByRole('button', { name: '继续幻灯片', exact: true }).waitFor();
+      if (action === 'pause') { await page.locator('.image-viewer').focus(); await page.keyboard.press(' '); }
       f.release();
       await tick(300);
       if (action === 'close') {
@@ -201,7 +205,7 @@ try {
         if (action === 'pause' || action === 'timeout') {
           await tick(8000);
           assert.equal(await f.id(), images[0].id, 'late or failed pages cannot override a pause');
-          await page.getByRole('button', { name: '继续幻灯片', exact: true }).click();
+          await page.locator('.image-viewer').focus(); await page.keyboard.press(' ');
           await tick(5100);
         }
         await f.ready(images[2]);

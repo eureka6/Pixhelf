@@ -2,11 +2,22 @@
 // no browser, listener, backend, or real gallery is required.
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
+import { readFile } from "node:fs/promises";
 import { build } from "esbuild";
 
 const output = await build({ entryPoints: [new URL("../src/mediaSource.ts", import.meta.url).pathname],
   bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
 const { createMediaSource, motionBlob } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString("base64")}`);
+const codecOutput = await build({ entryPoints: [new URL("../src/motionCodec.ts", import.meta.url).pathname],
+  bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
+const { motionVideoCodec } = await import(`data:text/javascript;base64,${Buffer.from(codecOutput.outputFiles[0].text).toString("base64")}`);
+for (const [name, codec] of [["live-photo.mp4", "avc1"], ["live-photo-hevc.mov", "hvc1"]]) {
+  assert.equal(await motionVideoCodec(new Blob([await readFile(new URL(`fixtures/${name}`, import.meta.url))])), codec);
+}
+for (const hex of ["", "00000004", "000000046d6f6f76", "000000016d6f6f76ffffffffffffffff", "0000000c6d64617468766331"]) {
+  assert.equal(await motionVideoCodec(new Blob([Buffer.from(hex, "hex")])), undefined,
+    "invalid metadata and codec-like bytes inside media must keep the normal fallback path");
+}
 const Player = { IOLoader: { CustomIOLoader: class {} } };
 const BLOCK = 256 * 1024, MiB = 1024 * 1024, IO_END = -1048576;
 const requests = [], files = new Map();
@@ -77,6 +88,29 @@ try {
   const largeNativeUrl = file(32 * MiB + 1), beforeLargeNative = requests.length;
   assert.equal(await motionBlob(largeNativeUrl, new AbortController().signal), undefined);
   assert.equal(requests.length, beforeLargeNative + 1, "oversized originals must not be buffered into blobs");
+
+  // Hovering during a speculative download joins that download. Cancelling the
+  // speculative owner must not cancel the player that has just taken over.
+  let finishShared, sharedStarted;
+  const sharedReady = new Promise(resolve => { sharedStarted = resolve; });
+  const sharedUrl = file(BLOCK + 23, { pending({ start, end, responseHeaders }) {
+    return new Promise(resolve => {
+      finishShared = () => resolve(new Response(bytes(sharedUrl, start, end - start + 1), { status: 206, headers: responseHeaders }));
+      sharedStarted();
+    });
+  } });
+  const speculative = new AbortController(), playback = new AbortController();
+  const beforeShared = requests.length;
+  const speculativeLoad = motionBlob(sharedUrl, speculative.signal);
+  const cancelledPreload = assert.rejects(speculativeLoad, { name: "AbortError" });
+  const sharedPlayback = motionBlob(sharedUrl, playback.signal);
+  await sharedReady;
+  speculative.abort();
+  await cancelledPreload;
+  finishShared();
+  assert.deepEqual(new Uint8Array(await (await sharedPlayback).arrayBuffer()), bytes(sharedUrl, 0, files.get(sharedUrl).size));
+  assert.equal(requests.length, beforeShared + 2, "preload handoff must share both HEAD and GET");
+  assert.equal(getEventListeners(playback.signal, "abort").length, 0, "completed owners release their listeners");
 
   // A long-lived owner signal must not retain stopped readers or completed
   // native blob loads. Reopening a decoder reinstalls cancellation handling.

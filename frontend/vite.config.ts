@@ -14,13 +14,25 @@ async function libmediaFiles() {
   return files;
 }
 
+async function libmediaAsset(name: string, path: URL) {
+  const bytes = await readFile(path);
+  if (name !== "avplayer.js") return bytes;
+  // libmedia 1.3.1 only enables its fast stream probe for live broadcasts.
+  // Forward an explicit option so short MOVs can skip probe decoding while
+  // retaining normal recorded-video duration, seeking and end-of-playback.
+  const source = bytes.toString();
+  const before = "fastOpen:r.isLive}";
+  if (source.split(before).length !== 2) throw new Error("Review the libmedia fastOpen adapter before upgrading avplayer");
+  return Buffer.from(source.replace(before, "fastOpen:r.isLive||r.formatOptions?.fastOpen===true}"));
+}
+
 export default defineConfig({
   base: "./",
   plugins: [{
     name: "libmedia-assets",
     async generateBundle() {
       for (const [name, path] of await libmediaFiles()) {
-        this.emitFile({ type: "asset", fileName: `assets/libmedia/${name}`, source: await readFile(path) });
+        this.emitFile({ type: "asset", fileName: `assets/libmedia/${name}`, source: await libmediaAsset(name, path) });
       }
     },
     async configureServer(server) {
@@ -32,7 +44,7 @@ export default defineConfig({
         if (!file) return next();
         try {
           response.setHeader("Content-Type", path.endsWith(".wasm") ? "application/wasm" : path.endsWith(".js") ? "text/javascript" : "text/plain");
-          response.end(await readFile(file));
+          response.end(await libmediaAsset(path.slice(prefix.length), file));
         } catch (error) { next(error); }
       });
     },

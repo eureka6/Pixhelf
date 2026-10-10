@@ -17,7 +17,7 @@ async function traceNavigation(page, toggles) {
     const controls = [...toolbar.querySelectorAll("button")].filter(control => !control.closest("[inert]"));
     const menuRect = menu.getBoundingClientRect();
     let brandOffset;
-    const result = { frames: 0, reversals: [], leaks: [], coveredSidebar: 0, coveredControls: 0, menuDrift: 0, brandDrift: 0, hiddenBrandFrames: 0, partialFrames: 0 };
+    const result = { frames: 0, reversals: [], leaks: [], coveredSidebar: 0, coveredControls: 0, menuDrift: 0, brandDrift: 0, fadingBrandFrames: 0, partialFrames: 0 };
     const started = performance.now();
     let index = 0;
     while (performance.now() - started < times.at(-1) + 440) {
@@ -37,13 +37,14 @@ async function traceNavigation(page, toggles) {
       const topbarRect = toolbar.getBoundingClientRect();
       const rect = menu.getBoundingClientRect();
       result.menuDrift = Math.max(result.menuDrift, Math.hypot(rect.x - menuRect.x, rect.y - menuRect.y));
-      const brand = panel?.querySelector('.brand');
+      const brand = toolbar.querySelector('.topbar-brand');
       if (brand) {
         const bounds = brand.getBoundingClientRect();
-        const offset = { x: bounds.x - panelRect.x, y: bounds.y - panelRect.y };
+        const offset = { x: bounds.x, y: bounds.y };
         brandOffset ??= offset;
         result.brandDrift = Math.max(result.brandDrift, Math.hypot(offset.x - brandOffset.x, offset.y - brandOffset.y));
-        if (getComputedStyle(brand).visibility !== 'visible' || !bounds.width) result.hiddenBrandFrames++;
+        const opacity = Number(getComputedStyle(brand).opacity);
+        if (opacity > 0 && opacity < 1) result.fadingBrandFrames++;
       }
       if (panelRect && panelRect.right > 1 && panelRect.right < panelRect.width - 1) result.partialFrames++;
       for (const control of controls) {
@@ -66,6 +67,9 @@ async function traceNavigation(page, toggles) {
       }
     }
     result.open = menu.getAttribute("aria-expanded");
+    const brand = toolbar.querySelector('.topbar-brand');
+    result.brandVisible = getComputedStyle(brand).visibility === 'visible' && Number(getComputedStyle(brand).opacity) > 0;
+    result.brandInert = brand.inert;
     result.drawerMounted = Boolean(document.querySelector(".mobile-nav-layer"));
     result.bodyLocked = document.body.style.overflow === "hidden";
     result.overflow = document.documentElement.scrollWidth > innerWidth;
@@ -78,16 +82,19 @@ function checkTrace(trace, reduced = false) {
   assert.equal(trace.coveredSidebar, 0, "the header surface covers the visible sidebar");
   assert.equal(trace.coveredControls, 0, "navigation covers a toolbar control");
   assert.ok(trace.menuDrift < 1, `the menu button moved during navigation: ${trace.menuDrift}px`);
-  assert.ok(trace.brandDrift < 1, `the logo moved within the sidebar: ${trace.brandDrift}px`);
-  assert.equal(trace.hiddenBrandFrames, 0, "the logo disappeared during navigation");
+  assert.ok(trace.brandDrift < 1, `the logo moved on screen: ${trace.brandDrift}px`);
+  assert.equal(trace.brandVisible, trace.open === 'true', 'the logo fades with navigation');
+  assert.equal(trace.brandInert, trace.open !== 'true', 'the hidden logo cannot receive input');
   assert.equal(trace.overflow, false);
   if (!reduced) {
     assert.ok(trace.partialFrames > 1, "the sidebar did not animate");
+    assert.ok(trace.fadingBrandFrames > 0, 'the logo should fade in place');
     assert.ok(Math.max(...trace.reversals) < 2, `navigation jumped when reversed: ${trace.reversals}`);
   }
 }
 
 async function homeThroughBrand(page, selector, keyboard = false) {
+  if (await page.locator('.search-dialog').count()) await page.getByRole('button', { name: '关闭搜索', exact: true }).click();
   const toggle = page.locator('.gallery-sidebar-toggle');
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   const shell = await page.locator(".app-shell").elementHandle();
@@ -97,7 +104,7 @@ async function homeThroughBrand(page, selector, keyboard = false) {
       && url.searchParams.get("sort") === "default"
       && ["album", "search", "kind", "orientation", "seed"].every(key => !url.searchParams.has(key));
   });
-  const link = page.locator(`${page.viewportSize().width <= 720 ? '.mobile-sidebar' : '.desktop-sidebar'} ${selector}`);
+  const link = page.locator(`.topbar ${selector}`);
   if (keyboard) await link.press("Enter");
   else await link.click();
   const response = await homeResponse;
@@ -107,7 +114,8 @@ async function homeThroughBrand(page, selector, keyboard = false) {
     && document.querySelector(".app-shell").dataset.gallerySection === "library");
   assert.equal(await shell.evaluate(element => element.isConnected), true, "the logo reloaded the whole application");
   await shell.dispose();
-  assert.equal(await page.locator(".gallery-search-input input").inputValue(), "");
+  assert.equal(await page.locator(".gallery-search-input input").count(), 0);
+  assert.equal(await page.locator(".search-toggle").getAttribute("data-active"), "false");
   assert.equal(await page.locator(".search-toggle").getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator(".gallery-filter-summary").count(), 0);
   await page.locator(".mobile-nav-layer").waitFor({ state: "detached" });
@@ -120,10 +128,10 @@ try {
     const page = await browser.newPage({ viewport: { width, height: 844 }, hasTouch: mobile });
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.addInitScript(() => localStorage.setItem("pixhelf.sidebar-collapsed", "true"));
     await page.goto(process.env.PIXHELF_URL ?? "http://127.0.0.1:3002");
     await page.locator(".image-card").nth(24).waitFor();
-    assert.equal(await page.locator('.topbar .brand, .brand-version').count(), 0);
+    assert.equal(await page.locator('.topbar .brand').count(), 1);
+    assert.equal(await page.locator('.sidebar .brand, .brand-version').count(), 0);
     assert.equal(await page.getByRole("button", { name: "主页", exact: true }).count(), 0);
     const buttonBeforeScroll = await page.locator('.gallery-sidebar-toggle').boundingBox();
     // Put real, clickable cards behind the header, including its left edge.
@@ -143,7 +151,7 @@ try {
     checkTrace(opened);
     assert.equal(opened.open, "true");
     const panel = mobile ? ".mobile-sidebar" : ".desktop-sidebar";
-    const brandClickable = await page.locator(`${panel} .brand`).evaluate(brand =>
+    const brandClickable = await page.locator('.topbar .brand').evaluate(brand =>
       [...brand.querySelectorAll(".brand-mark, .brand-name")].every(element => {
         const rect = element.getBoundingClientRect();
         return element.closest("a").contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
@@ -216,7 +224,7 @@ try {
       await page.setViewportSize({ width, height: 844 });
       await page.waitForFunction(() => document.querySelector(".gallery-sidebar-toggle").getAttribute("aria-controls") === "mobile-album-navigation");
       assert.equal(await page.locator(".gallery-sidebar-toggle").getAttribute("aria-expanded"), "false");
-      assert.equal(await page.locator('.topbar .brand').count(), 0);
+      assert.equal(await page.locator('.topbar .brand').isVisible(), false);
     }
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ width, frames: opened.frames + closed.frames + rapid.frames, maxReversalJump: Math.max(...rapid.reversals), maxBrandDrift: Math.max(opened.brandDrift, closed.brandDrift, rapid.brandDrift), brandClickable, logoHome: true, reducedMotion: true }));

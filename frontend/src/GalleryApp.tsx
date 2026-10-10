@@ -8,6 +8,7 @@ import "./albums.css";
 import "./directories.css";
 import "./PhotoInformation.css";
 import "./settings.css";
+import "./search.css";
 import "./storage.css";
 import "./video.css";
 

@@ -3,7 +3,6 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -366,7 +365,7 @@ fn generate(entry: &VideoEntry) -> Result<tempfile::NamedTempFile> {
     let height = ((f64::from(height) * scale / 2.0).floor() as u32 * 2).max(2);
     let fps = if preview { "24" } else { "30" };
     let output = temporary(directory)?;
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::media_runtime::command(crate::media_runtime::Tool::Ffmpeg)?;
     command.args(["-v", "error", "-nostdin", "-y", "-filter_threads", "1"]);
     video::input_options(&mut command, source)?;
     command.args([

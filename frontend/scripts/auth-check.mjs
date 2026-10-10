@@ -325,7 +325,7 @@ async function checkAuthentication(protocol) {
         return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
       }), true, "logout is covered by navigation");
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-      assert.equal(await page.locator(`${width <= 720 ? '.mobile-sidebar' : '.desktop-sidebar'} .brand`).evaluate(brand => {
+      assert.equal(await page.locator('.topbar .brand').evaluate(brand => {
         const name = brand.querySelector(".brand-name");
         const box = name.getBoundingClientRect();
         return brand.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));

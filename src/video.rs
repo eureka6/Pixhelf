@@ -58,7 +58,7 @@ pub fn mime_type(path: &Path) -> Option<&'static str> {
 }
 
 pub fn probe(path: &Path) -> Result<(u32, u32, VideoMetadata)> {
-    let mut command = Command::new("ffprobe");
+    let mut command = crate::media_runtime::command(crate::media_runtime::Tool::Ffprobe)?;
     command.args(["-v", "error"]);
     input_options(&mut command, path)?;
     command.args([
@@ -165,7 +165,7 @@ pub fn thumbnail(record: &ImageRecord, edge: u32) -> Result<image::DynamicImage>
     // Seek only when the container supplies a duration; raw streams may not be seekable.
     let seek = video.duration.map(|duration| (duration * 0.1).min(3.0));
     let extract = |seek: Option<f64>| -> Result<image::DynamicImage> {
-        let mut command = Command::new("ffmpeg");
+        let mut command = crate::media_runtime::command(crate::media_runtime::Tool::Ffmpeg)?;
         command.args(["-v", "error", "-nostdin"]);
         if let Some(seek) = seek {
             command.arg("-ss").arg(format!("{seek:.3}"));
@@ -218,9 +218,7 @@ pub(crate) fn run_cancellable(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| {
-            format!("cannot start {program}; make sure it is installed and available on PATH")
-        })?;
+        .with_context(|| format!("cannot start embedded media tool {program}"))?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let read = |source: Box<dyn Read + Send>, cap: usize| {

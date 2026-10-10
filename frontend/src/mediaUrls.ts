@@ -5,7 +5,7 @@ export function isAnimatedImage(image: GalleryImage): boolean {
 }
 
 export function isLiveImage(image: GalleryImage): boolean {
-  return Boolean(image.motion) || isAnimatedImage(image);
+  return Boolean(image.motion);
 }
 
 export function viewerThumbnailUrl(image: GalleryImage): string {

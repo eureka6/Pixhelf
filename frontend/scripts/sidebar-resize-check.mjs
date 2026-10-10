@@ -103,7 +103,7 @@ try {
       }
       await page.waitForTimeout(200);
       const requestsBefore = imageRequests;
-      for (const phase of ["collapse", "expand"]) {
+      for (const phase of ["open", "close"]) {
         const trace = await traceResize(page);
         writeFileSync(`/tmp/pixhelf-sidebar-${width}-${deep ? "deep" : "top"}-${phase}.json`, JSON.stringify(trace));
         const { frames, ...result } = trace;
@@ -111,7 +111,7 @@ try {
         results.push(result);
         console.log(JSON.stringify(result));
         if (!baseline) {
-          assert.ok(trace.layoutCommits <= 2, "sidebar animation repeatedly recalculates the layout");
+          assert.ok(trace.layoutCommits >= 1 && trace.layoutCommits <= 2, "pinning commits the final gallery layout without recalculating every frame");
           assert.ok(trace.maxAnchorDrift <= 2, "the reading position moved during the transition");
           assert.ok(trace.maxExcessTravel <= 4, "cards reverse direction or jump between rows");
           assert.ok(trace.peakAnimated > 0, "cards did not transition to the new layout");
@@ -123,13 +123,13 @@ try {
     }
     if (!baseline) {
       const rapid = await traceResize(page, [0, 70, 140, 210]);
-      assert.ok(rapid.layoutCommits <= 4);
+      assert.ok(rapid.layoutCommits >= 1 && rapid.layoutCommits <= 4);
       assert.ok(rapid.maxAnchorDrift <= 2);
       assert.equal(rapid.remainingAnimations, 0);
       assert.equal(rapid.cardsPreserved && rapid.loadedPreserved, true);
       await page.emulateMedia({ reducedMotion: "reduce" });
       const reduced = await traceResize(page);
-      assert.ok(reduced.layoutCommits <= 2);
+      assert.ok(reduced.layoutCommits >= 1 && reduced.layoutCommits <= 2);
       assert.ok(reduced.maxAnchorDrift <= 2);
       assert.equal(reduced.peakAnimated, 0);
     }

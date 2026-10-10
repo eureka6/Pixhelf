@@ -6,6 +6,7 @@ mod gallery;
 mod heif;
 mod logging;
 mod management;
+mod media_runtime;
 mod motion;
 mod photo_details;
 mod similarity;
@@ -44,6 +45,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--check-media") => return media_runtime::check(),
+        Some("--media-licenses") => {
+            print!("{}", media_runtime::LICENSES);
+            return Ok(());
+        }
+        _ => {}
+    }
     if std::env::args().nth(1).as_deref() == Some("--hash-password") {
         anyhow::ensure!(
             std::env::args().len() == 2,

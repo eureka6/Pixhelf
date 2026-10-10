@@ -106,9 +106,15 @@ try {
     const motionRequests = [];
     let holdMotion = null;
     let releaseMotion = () => {};
-    page.on("pageerror", error => errors.push(error.message));
+    page.on("pageerror", error => {
+      errors.push(error.message);
+      if (process.env.PIXHELF_TEST_DEBUG) console.error(error.stack);
+    });
     if (process.env.PIXHELF_TEST_DEBUG) page.on("console", message => console.log(message.type(), message.text()));
     await page.addInitScript(() => {
+      // Keep these cancellation and loader checks cold; visible-card preloading
+      // is exercised separately, including its handoff to an active player.
+      Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } });
       window.mediaEvents = [];
       window.inputEvents = [];
       for (const type of ["touchstart", "touchend", "pointerdown", "mousedown", "click"]) {

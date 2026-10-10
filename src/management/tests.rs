@@ -46,6 +46,227 @@ async fn call(
 }
 
 #[tokio::test]
+async fn uploads_validate_images_preserve_existing_files_and_refresh_the_gallery() {
+    let (_temporary, state) = fixture();
+    let root = state.index.read().await.root.clone();
+    let app = router(state.clone());
+    let original = std::fs::read(root.join("one.png")).unwrap();
+    let upload = |uri: &str, bytes: Vec<u8>| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+    };
+    let response = upload(
+        "/api/management/upload?name=new.png&destination=%E7%9B%AE%E6%A0%87",
+        original.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(std::fs::read(root.join("目标/new.png")).unwrap(), original);
+    assert!(
+        state
+            .index
+            .read()
+            .await
+            .image_by_path("目标/new.png")
+            .is_some()
+    );
+    assert_eq!(
+        upload("/api/management/upload?name=one.png", original.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(std::fs::read(root.join("one.png")).unwrap(), original);
+    for (uri, bytes) in [
+        (
+            "/api/management/upload?name=bad.png",
+            b"not an image".to_vec(),
+        ),
+        ("/api/management/upload?name=empty.png", Vec::new()),
+        (
+            "/api/management/upload?name=truncated.png",
+            original[..24].to_vec(),
+        ),
+        (
+            "/api/management/upload?name=unsupported.png",
+            b"BMunsupported".to_vec(),
+        ),
+        ("/api/management/upload?name=script.svg", original.clone()),
+        (
+            "/api/management/upload?name=..%2Fescape.png",
+            original.clone(),
+        ),
+        (
+            "/api/management/upload?name=escape.png&destination=..",
+            original.clone(),
+        ),
+        (
+            "/api/management/upload?name=escape.png&destination=%2Ftmp",
+            original.clone(),
+        ),
+        (
+            "/api/management/upload?name=escape.png&destination=.pixhelf-trash",
+            original.clone(),
+        ),
+    ] {
+        assert_eq!(
+            upload(uri, bytes).await.unwrap().status(),
+            StatusCode::CONFLICT,
+            "{uri}"
+        );
+    }
+    // Check that the upload route overrides the smaller management JSON limit.
+    let mut large = original.clone();
+    large.resize(70 * 1024, 0);
+    assert_eq!(
+        upload("/api/management/upload?name=large.png", large)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        upload(
+            "/api/management/upload?name=oversize.png",
+            vec![0; upload::MAX_UPLOAD_BYTES + 1]
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(state.index.read().await.images.len(), 4);
+    assert!(
+        !walkdir::WalkDir::new(&root)
+            .into_iter()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pixhelf-upload-"))
+    );
+}
+
+#[tokio::test]
+async fn uploads_detect_real_formats_and_normalize_names_without_changing_bytes() {
+    let (_temporary, state) = fixture();
+    let root = state.index.read().await.root.clone();
+    let app = router(state.clone());
+    let mut cases = Vec::new();
+    for (name, saved, format) in [
+        ("photo.png", "photo.jpg", image::ImageFormat::Jpeg),
+        ("download.png", "download.webp", image::ImageFormat::WebP),
+        ("badge.jpg", "badge.png", image::ImageFormat::Png),
+        ("image.heic", "image.png", image::ImageFormat::Png),
+        ("original.JPEG", "original.JPEG", image::ImageFormat::Jpeg),
+    ] {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([50, 120, 180]),
+        ))
+        .write_to(&mut bytes, format)
+        .unwrap();
+        cases.push((name, saved, bytes.into_inner()));
+    }
+    cases.push((
+        "animated.png",
+        "animated.gif",
+        include_bytes!("../../frontend/scripts/fixtures/animated.gif").to_vec(),
+    ));
+    cases.push((
+        "apple.png",
+        "apple.heic",
+        include_bytes!("../../frontend/scripts/fixtures/live-photo.heic").to_vec(),
+    ));
+    cases.push((
+        "original.HEIF",
+        "original.HEIF",
+        include_bytes!("../../frontend/scripts/fixtures/live-photo.heic").to_vec(),
+    ));
+    for (name, saved, bytes) in cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/management/upload?name={name}&destination=%E7%9B%AE%E6%A0%87"
+                    ))
+                    .header("content-type", "image/png") // Browser MIME labels can also be wrong.
+                    .body(Body::from(bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let relative = format!("目标/{saved}");
+        assert_eq!(payload["path"], relative);
+        assert_eq!(
+            std::fs::read(root.join(&relative)).unwrap(),
+            bytes,
+            "original image bytes and metadata are preserved"
+        );
+        assert!(
+            state.index.read().await.image_by_path(&relative).is_some(),
+            "{saved}"
+        );
+        if name != saved {
+            assert!(!root.join("目标").join(name).exists());
+        }
+    }
+    // A corrected suffix must still respect the existing-file protection.
+    let original = std::fs::read(root.join("one.png")).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/management/upload?name=one.jpg")
+                .body(Body::from(original.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read(root.join("one.png")).unwrap(), original);
+    assert!(!root.join("one.jpg").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn uploads_reject_symlink_destinations() {
+    let (temporary, state) = fixture();
+    let root = state.index.read().await.root.clone();
+    std::os::unix::fs::symlink(temporary.path(), root.join("outside")).unwrap();
+    let bytes = std::fs::read(root.join("one.png")).unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/management/upload?name=escape.png&destination=outside")
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(!temporary.path().join("escape.png").exists());
+}
+
+#[tokio::test]
 async fn category_settings_are_validated_saved_and_reloaded() {
     let (_temporary, state) = fixture();
     let make_app = || {

@@ -1,6 +1,5 @@
 import type { RefObject } from "preact";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Pause, Play, X } from "./icons";
 import type { GalleryImage } from "./types";
 
 const SLIDE_INTERVAL_MS = 5_000;
@@ -14,11 +13,10 @@ type SlideshowProps = {
   blocked: boolean;
   onLoadMore: () => Promise<GalleryImage[]>;
   onOpen: (image: GalleryImage) => void;
-  onStop: () => void;
 };
 
 export function ViewerSlideshow(props: SlideshowProps) {
-  const { viewerRef, activeIndex, images, blocked, ready, onStop } = props;
+  const { viewerRef, activeIndex, images, blocked, ready } = props;
   const [paused, setPaused] = useState(false);
   const [available, setAvailable] = useState(!document.hidden);
   const latest = useRef(props);
@@ -84,12 +82,5 @@ export function ViewerSlideshow(props: SlideshowProps) {
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [imageId, paused, blocked, available, ready]);
 
-  return <div className="viewer-slideshow" role="group" aria-label="幻灯片播放" data-paused={paused}>
-    <button type="button" onClick={() => setPaused(value => !value)} aria-label={paused ? "继续幻灯片" : "暂停幻灯片"}
-      title={paused ? "继续幻灯片 (空格)" : "暂停幻灯片 (空格)"}>
-      {paused ? <Play size={18} /> : <Pause size={18} />}
-    </button>
-    <span>{paused ? "已暂停" : blocked || !available ? "暂缓切换" : !ready ? "载入图片…" : "每 5 秒"}</span>
-    <button type="button" onClick={onStop} aria-label="结束幻灯片" title="结束幻灯片"><X size={18} /></button>
-  </div>;
+  return null;
 }
