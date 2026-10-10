@@ -16,8 +16,10 @@ jobs:
       - name: Check out source
         uses: https://data.forgejo.org/actions/checkout@v6
 
-      - name: Build and verify release binaries
+      - name: Build amd64 musl Docker binary
         uses: ./.forgejo/actions/build-release
+        with:
+          image-only: 'true'
 
       - name: Stage image inputs
         uses: https://data.forgejo.org/actions/upload-artifact@v3
@@ -25,7 +27,6 @@ jobs:
           name: local-image-inputs
           path: |
             dist/pixhelf-amd64-linux
-            dist/pixhelf-arm64-linux
             packaging/prepare-image.sh
             packaging/publish-image.sh
           if-no-files-found: error

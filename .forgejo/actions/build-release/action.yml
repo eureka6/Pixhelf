@@ -1,30 +1,40 @@
 name: Build release binaries
-description: Build and verify the frontend and standalone Linux amd64 / arm64 binaries.
+description: Build musl binaries for release assets or an amd64 Docker image.
+inputs:
+  image-only:
+    description: Build only the amd64 Docker binary, skipping release tests and packaging.
+    default: 'false'
 runs:
   using: composite
   steps:
     - name: Install Rust and cross-compilation toolchains
       shell: sh
+      env:
+        IMAGE_ONLY: ${{ inputs.image-only }}
       run: |
+        set -eu
         apt-get update
-        apt-get install --yes --no-install-recommends \
+        set -- \
           binutils \
-          binutils-aarch64-linux-gnu \
           build-essential \
           ca-certificates \
           curl \
           file \
-          ffmpeg \
           musl-tools \
           nasm \
           pkg-config \
           python3-venv
+        if [ "$IMAGE_ONLY" != true ]; then
+          set -- "$@" binutils-aarch64-linux-gnu ffmpeg
+        fi
+        apt-get install --yes --no-install-recommends "$@"
         curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
           | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-        "$HOME/.cargo/bin/rustup" target add \
-          x86_64-unknown-linux-musl \
-          aarch64-unknown-linux-musl
+        "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
+        if [ "$IMAGE_ONLY" != true ]; then
+          "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl
+        fi
         python3 -m venv /opt/cargo-zigbuild
         /opt/cargo-zigbuild/bin/pip install \
           --disable-pip-version-check \
@@ -49,14 +59,17 @@ runs:
       run: npm run build
 
     - name: Test Rust application
+      if: inputs.image-only != 'true'
       shell: sh
       run: |
         export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
         export PIXHELF_SKIP_FRONTEND_BUILD=1
         cargo test --locked
 
-    - name: Build static musl release binaries
+    - name: Build static musl binaries
       shell: sh
+      env:
+        IMAGE_ONLY: ${{ inputs.image-only }}
       run: |
         set -eu
         export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
@@ -91,20 +104,28 @@ runs:
             exit 1
           fi
 
-          sh packaging/pack-release.sh "$binary" "dist/${asset}"
+          if [ "$IMAGE_ONLY" = true ]; then
+            install -m 0755 "$binary" "dist/${asset}"
+          else
+            sh packaging/pack-release.sh "$binary" "dist/${asset}"
+          fi
         }
 
         build_release \
           x86_64-unknown-linux-musl \
           pixhelf-amd64-linux \
           'Advanced Micro Devices X86-64'
-        build_release \
-          aarch64-unknown-linux-musl \
-          pixhelf-arm64-linux \
-          AArch64
+        if [ "$IMAGE_ONLY" != true ]; then
+          build_release \
+            aarch64-unknown-linux-musl \
+            pixhelf-arm64-linux \
+            AArch64
+        fi
 
         dist/pixhelf-amd64-linux --help >/dev/null
         env PATH=/nonexistent dist/pixhelf-amd64-linux --check-media
-        node packaging/check-standalone.mjs dist/pixhelf-amd64-linux
-        tar -cJf dist/pixhelf-media-sources.tar.xz packaging/build-media-runtime.sh packaging/pack-release.sh \
-          packaging/pack-media.mjs packaging/THIRD_PARTY.md target/media/sources/
+        if [ "$IMAGE_ONLY" != true ]; then
+          node packaging/check-standalone.mjs dist/pixhelf-amd64-linux
+          tar -cJf dist/pixhelf-media-sources.tar.xz packaging/build-media-runtime.sh packaging/pack-release.sh \
+            packaging/pack-media.mjs packaging/THIRD_PARTY.md target/media/sources/
+        fi

@@ -5,6 +5,11 @@ set -eu
 : "${IMAGE_VERSION:?Missing image tag}"
 : "${REVISION:?Missing commit SHA}"
 : "${SOURCE_URL:?Missing source URL}"
+: "${IMAGE_ARCHITECTURES:?Missing image architectures}"
+case "$IMAGE_ARCHITECTURES" in
+  amd64|'amd64 arm64') ;;
+  *) echo "Unsupported image architectures: $IMAGE_ARCHITECTURES" >&2; exit 1 ;;
+esac
 work="$(mktemp -d /tmp/pixhelf-oci.XXXXXX)"
 local_registry=127.0.0.1:5000
 model_revision=f4a64596bbcf9a2a94591b74b9dc39b2e4e77e3e
@@ -162,23 +167,23 @@ if [ -n "${DOCKERHUB_IMAGE:-}" ]; then
   pin_ipv4 registry-1.docker.io
 fi
 
-build_platform amd64 dist/pixhelf-amd64-linux
-amd64_manifest="$configured_ref"
-build_platform arm64 dist/pixhelf-arm64-linux
-arm64_manifest="$configured_ref"
+set --
+for arch in $IMAGE_ARCHITECTURES; do
+  build_platform "$arch" "dist/pixhelf-${arch}-linux"
+  set -- "$@" --manifest "$configured_ref"
+done
 
 verify_index() {
   index="$(retry_remote crane index list "$1")"
   printf '%s\n' "$index"
-  printf '%s\n' "$index" | grep -q 'linux/amd64'
-  printf '%s\n' "$index" | grep -q 'linux/arm64'
+  for expected_arch in $IMAGE_ARCHITECTURES; do
+    printf '%s\n' "$index" | grep -q "linux/$expected_arch"
+  done
 }
 
-# Assemble and check both architectures before publishing any remote tag.
+# Assemble and check the requested architectures before publishing any tag.
 index_path="$work/index"
-crane index append --insecure "$index_path" \
-  --manifest "$amd64_manifest" \
-  --manifest "$arm64_manifest"
+crane index append --insecure "$index_path" "$@"
 verify_index "$index_path"
 index_digest="sha256:$(sha256sum "$index_path/index.json" | cut -d ' ' -f 1)"
 

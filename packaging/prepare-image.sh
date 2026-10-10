@@ -12,12 +12,14 @@ version=latest
 release_tag=
 dockerhub_image=
 publish_latest=false
+architectures=amd64
 
 case "${1:?Usage: prepare-image.sh local|release}:${event}:${ref}" in
   local:workflow_dispatch:*)
     image="${repository%%/*}/pixhelf-local"
     ;;
   release:push:refs/tags/v*)
+    architectures='amd64 arm64'
     release_tag="${ref#refs/tags/}"
     version="${release_tag#v}"
     test -n "$version"
@@ -37,8 +39,9 @@ if ! printf '%s\n' "$revision" | grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$';
   echo 'Image publishing requires the checked-out commit SHA' >&2
   exit 1
 fi
-test -s dist/pixhelf-amd64-linux
-test -s dist/pixhelf-arm64-linux
+for arch in $architectures; do
+  test -s "dist/pixhelf-${arch}-linux"
+done
 : "${REGISTRY_TOKEN:?Forgejo token requires write:package access}"
 username="${REGISTRY_USERNAME:-${FORGEJO_ACTOR:-${GITHUB_ACTOR:-}}}"
 : "${username:?Missing Forgejo registry username}"
@@ -66,6 +69,7 @@ fi
 printf '%s\n' \
   "RELEASE_TAG=$release_tag" \
   "IMAGE_VERSION=$version" \
+  "IMAGE_ARCHITECTURES=$architectures" \
   "PUBLISH_LATEST=$publish_latest" \
   "DOCKERHUB_IMAGE=$dockerhub_image" \
   "REVISION=$revision" \
