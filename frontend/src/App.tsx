@@ -1549,7 +1549,10 @@ function App() {
       <Sidebar
         summary={summary}
         activeSection={section}
-        onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}
+        onChoose={section => {
+          if (!compactLayout) desktopNav.pin();
+          navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "");
+        }}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
         onMobileExited={finishMobileNavExit}

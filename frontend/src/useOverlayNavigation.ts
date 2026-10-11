@@ -44,5 +44,6 @@ export function useOverlayNavigation(compact: boolean) {
     };
   }, [mode, close]);
   return { open: mode !== "closed", pinned: mode === "pinned", enter, leave, close,
+    pin: () => { cancelClose(); setMode("pinned"); },
     toggle: () => { cancelClose(); setMode(current => current === "pinned" ? "closed" : "pinned"); } };
 }
