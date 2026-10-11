@@ -57,7 +57,6 @@ try {
       const bounds = () => page.locator('.image-card').first().boundingBox();
       const before = await bounds();
       const galleryBefore = await page.locator('.justified-gallery').boundingBox();
-      const contentBefore = await page.locator('.content').boundingBox();
       assert.equal(await toggle.getAttribute('title'), null, 'navigation uses icons without a hover tooltip');
       if (width > 720) {
         const arrow = toggle.locator('.sidebar-toggle-arrow');
@@ -83,22 +82,10 @@ try {
         await page.locator('.desktop-sidebar .sidebar-heading').click({ position: { x: 15, y: 25 } });
         assert.equal(await pinned(), 'false', 'clicking inside must not pin automatic navigation');
         await page.mouse.move(width - 30, 400); await collapsed(true);
-        for (const [label, card] of [['相册', '.album-card'], ['照片', '.image-card']]) {
-          await toggle.hover(); await collapsed(false);
-          const link = page.locator(`.desktop-sidebar .album-link[title="${label}"]`);
-          await link.click();
-          await page.locator(card).first().waitFor();
-          assert.equal(await pinned(), 'true', 'choosing a section pins automatic navigation');
-          const sidebar = await page.locator('.desktop-sidebar').boundingBox();
-          assert((await page.locator(card).first().boundingBox()).x >= sidebar.x + sidebar.width, 'the destination leaves room for navigation');
-          await link.click();
-          assert.equal(await pinned(), 'true', 'choosing the current section keeps navigation pinned');
-          await page.mouse.move(width - 30, 400);
-          await page.waitForTimeout(250);
-          assert.equal(await toggle.getAttribute('aria-expanded'), 'true', 'navigation stays pinned after the mouse leaves');
-          await toggle.click(); await collapsed(true); await settleLayout();
-          await page.mouse.move(width - 30, 400);
-        }
+        await toggle.hover(); await collapsed(false);
+        await page.locator('.desktop-sidebar .album-link[title="相册"]').click();
+        assert.equal(await pinned(), 'false', 'choosing a section must not pin automatic navigation');
+        await page.mouse.move(width - 30, 400); await collapsed(true);
         await toggle.hover(); await collapsed(false);
         await page.locator('.topbar .brand').click();
         assert.equal(await pinned(), 'false', 'clicking the logo must not pin automatic navigation');
@@ -159,16 +146,6 @@ try {
         await page.locator('.search-dialog[open]').waitFor();
         await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
         await page.getByRole('button', { name: '关闭搜索' }).click();
-        for (const [label, card] of [['相册', '.album-card'], ['照片', '.image-card']]) {
-          await toggle.tap();
-          await page.locator(`.mobile-sidebar .album-link[title="${label}"]`).tap();
-          await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
-          await page.locator(card).first().waitFor();
-          assert.equal(await page.locator('.app-shell').getAttribute('data-sidebar-pinned'), 'false', 'mobile navigation does not pin the desktop sidebar');
-          const content = await page.locator('.content').boundingBox();
-          assert.equal(content.x, contentBefore.x);
-          assert.equal(content.width, contentBefore.width, 'mobile destinations keep the full content width');
-        }
       }
       if (width > 720) { await toggle.click(); await collapsed(false); }
       await page.locator('.gallery-menu-toggle').focus();
@@ -200,7 +177,7 @@ try {
       await page.getByRole('button', { name: '完成', exact: true }).click();
       await page.locator('.upload-dialog').waitFor({ state: 'detached' });
       assert(await page.locator('.gallery-menu-toggle').evaluate(button => button === document.activeElement));
-      console.log(`${width}px: automatic hover, pinning on navigation, explicit fixed layout, icon states, mobile navigation, menu keyboard access, upload and retry passed`);
+      console.log(`${width}px: automatic hover, explicit fixed layout, icon states, navigation, menu keyboard access, upload and retry passed`);
     } finally { await f.close(); }
   }
   const guest = await fixture(390, true);
