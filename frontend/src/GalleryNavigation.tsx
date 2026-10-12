@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "preact/hooks";
+import type { ComponentChildren } from "preact";
+import { useLayoutEffect, useRef } from "preact/hooks";
 
 import logoMark from "./assets/pixhelf-mark.svg?inline";
 import { formatCount } from "./format";
@@ -15,10 +16,12 @@ import {
   MoreHorizontal,
   Upload,
   ScanSearch,
+  UserRound,
 } from "./icons";
 import { ToolbarPopover } from "./ToolbarPopover";
 import { imageFilterLabels } from "./GalleryFilters";
 import { SearchDialog, type SearchDialogProps } from "./SearchDialog";
+import { useSearchHistory } from "./useSearchHistory";
 import { AuthControls } from "./AuthControls";
 import { authentication } from "./auth";
 import { useManagement } from "./management";
@@ -26,7 +29,8 @@ import type { GallerySection, GallerySummary } from "./types";
 
 export function Header({
   hidden, onReveal, searchOpen, onSearchOpenChange, onToggleNavigation, onHoverNavigation, onLeaveNavigation,
-  onHome, navigationOpen, navigationPinned, compactLayout, menuOpen, onMenuOpenChange, onUpload, ...searchProps
+  onHome, navigationOpen, navigationPinned, mobileNavigationMounted, compactLayout, menuOpen, onMenuOpenChange, onUpload,
+  activeSection, onChoose, onSelectionTarget, ...searchProps
 }: SearchDialogProps & {
   hidden: boolean;
   onReveal: () => void;
@@ -38,20 +42,62 @@ export function Header({
   onHome: () => void;
   navigationOpen: boolean;
   navigationPinned: boolean;
+  mobileNavigationMounted: boolean;
   compactLayout: boolean;
   menuOpen: boolean;
   onMenuOpenChange: (open: boolean) => void;
   onUpload: () => void;
+  activeSection: GallerySection;
+  onChoose: (section: GallerySection) => void;
+  onSelectionTarget: (element: HTMLDivElement | null) => void;
 }) {
-  const menuItem = useRef<HTMLButtonElement>(null);
+  const menuItems = useRef<HTMLDivElement>(null);
+  const searchHistory = useSearchHistory();
+  const drawerVisible = compactLayout && mobileNavigationMounted;
   const filterCount = searchProps.filters ? imageFilterLabels(searchProps.filters, "", searchProps.categories).length : 0;
-  useEffect(() => { if (menuOpen) menuItem.current?.focus({ preventScroll: true }); }, [menuOpen]);
+  useLayoutEffect(() => { if (menuOpen) menuItems.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus({ preventScroll: true }); }, [menuOpen, compactLayout]);
   const openSearch = () => {
     onReveal();
     onMenuOpenChange(false);
     if (compactLayout && navigationOpen) onToggleNavigation();
     onSearchOpenChange(true);
   };
+  const choose = (section: GallerySection) => {
+    onReveal();
+    onMenuOpenChange(false);
+    onChoose(section);
+  };
+  const searchButton = <button type="button" className={`${compactLayout ? "mobile-tab" : "icon-button"} search-toggle`}
+    aria-label="搜索" title="搜索" aria-haspopup="dialog" aria-expanded={searchOpen} aria-controls="gallery-search-dialog"
+    onClick={openSearch} data-active={Boolean(searchProps.search || filterCount)}>
+    <span className="navigation-icon"><Search size={compactLayout ? 19 : 21} />
+      {Boolean(searchProps.search || filterCount) && <span className="search-active-dot" />}
+    </span>
+    {compactLayout && <span className="mobile-tab-label">搜索</span>}
+  </button>;
+  const actionsMenu = <ToolbarPopover id="gallery-actions" open={menuOpen} autoDismiss
+    onOpenChange={open => { onReveal(); if (open && compactLayout && navigationOpen) onToggleNavigation(); onMenuOpenChange(open); }}
+    openLabel="更多操作" closeLabel="关闭菜单" panelLabel="图库操作" panelRole="menu"
+    icon={<><MoreHorizontal size={compactLayout ? 20 : 22} />{compactLayout && <span className="mobile-tab-label">更多</span>}</>}
+    rootClassName={compactLayout ? "mobile-more" : "topbar-menu"}
+    triggerClassName={`gallery-menu-toggle${compactLayout ? " mobile-tab" : ""}`}
+    panelClassName={`gallery-menu-panel${compactLayout ? " mobile-more-panel" : ""}`}>
+      <div ref={menuItems}
+        onKeyDown={event => {
+          if (event.defaultPrevented || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem]"));
+          const current = items.indexOf(document.activeElement as HTMLElement);
+          const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+            : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+          items[next]?.focus();
+        }}>
+          {!authentication.guest && <button type="button" role="menuitem" aria-haspopup="dialog" onClick={() => { onMenuOpenChange(false); onUpload(); }}>
+            <Upload size={18} /><span>上传图片</span>
+          </button>}
+          {authentication.guest && <a role="menuitem" href="/login"><UserRound size={18} /><span>管理员登录</span></a>}
+      </div>
+  </ToolbarPopover>;
   return <>
     <header className="topbar" data-hidden={hidden} data-search-open={searchOpen} onFocus={onReveal}>
       <SidebarToggleButton className="gallery-sidebar-toggle" expanded={navigationOpen}
@@ -59,32 +105,27 @@ export function Header({
         onPointerEnter={onHoverNavigation} onPointerLeave={onLeaveNavigation}
         onClick={() => { onReveal(); onMenuOpenChange(false); onToggleNavigation(); }}
         controls={compactLayout ? "mobile-album-navigation" : "desktop-album-navigation"} />
-      <div className="topbar-brand" data-visible={navigationOpen} aria-hidden={!navigationOpen} inert={!navigationOpen}
-        onPointerEnter={onHoverNavigation} onPointerLeave={onLeaveNavigation}>
+      <div className="topbar-brand"
+        onPointerEnter={event => { if (navigationOpen) onHoverNavigation(event); }} onPointerLeave={onLeaveNavigation}>
         <Brand onHome={onHome} />
       </div>
-      <div className="topbar-actions" role="toolbar" aria-label="图库工具">
-        <button type="button" className="icon-button search-toggle" aria-label="搜索" title="搜索"
-          aria-haspopup="dialog" aria-expanded={searchOpen} aria-controls="gallery-search-dialog" onClick={openSearch}
-          data-active={Boolean(searchProps.search || filterCount)}>
-          <Search size={21} />
-          {Boolean(searchProps.search || filterCount) && <span className="search-active-dot" />}
-        </button>
-        {!authentication.guest && <ToolbarPopover id="gallery-actions" open={menuOpen} autoDismiss
-          onOpenChange={open => { onReveal(); if (open && compactLayout && navigationOpen) onToggleNavigation(); onMenuOpenChange(open); }}
-          openLabel="更多操作" closeLabel="关闭菜单" panelLabel="图库操作" panelRole="menu" icon={<MoreHorizontal size={22} />}
-          rootClassName="topbar-menu" triggerClassName="gallery-menu-toggle" panelClassName="gallery-menu-panel">
-          <div onKeyDown={event => {
-            if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) { event.preventDefault(); menuItem.current?.focus(); }
-          }}>
-            <button ref={menuItem} type="button" role="menuitem" onClick={() => { onMenuOpenChange(false); onUpload(); }}>
-              <Upload size={18} /><span>上传图片</span>
-            </button>
-          </div>
-        </ToolbarPopover>}
-      </div>
+      {!compactLayout && <div className="topbar-actions" role="toolbar" aria-label="图库工具">{searchButton}{actionsMenu}</div>}
     </header>
-    {searchOpen && <SearchDialog {...searchProps} onClose={() => onSearchOpenChange(false)} />}
+    <div className="bottom-dock" data-navigation-hidden={compactLayout && hidden} data-menu-open={menuOpen}
+      data-drawer-visible={drawerVisible} inert={drawerVisible} aria-hidden={drawerVisible}
+      onFocus={event => { if (event.target instanceof Element && event.target.matches(":focus-visible")) onReveal(); }}>
+      <div className="bottom-selection" ref={onSelectionTarget} />
+      {compactLayout && <div className="mobile-navigation-slot" inert={hidden} aria-hidden={hidden}>
+        <nav className="mobile-bottom-nav" aria-label="底部导航" onFocus={onReveal} onPointerDown={onReveal}>
+          <button type="button" className="mobile-tab" aria-current={activeSection === "library" ? "page" : undefined}
+            onClick={() => choose("library")}><Images size={19} /><span className="mobile-tab-label">图库</span></button>
+          <button type="button" className="mobile-tab" aria-current={activeSection === "albums" ? "page" : undefined}
+            onClick={() => choose("albums")}><BookImage size={19} /><span className="mobile-tab-label">相册</span></button>
+          {searchButton}{actionsMenu}
+        </nav>
+      </div>}
+    </div>
+    {searchOpen && <SearchDialog {...searchProps} history={searchHistory} onClose={() => onSearchOpenChange(false)} />}
   </>;
 }
 
@@ -170,40 +211,11 @@ export function Sidebar({
   onDesktopLeave: (event: PointerEvent) => void;
   onSettings: () => void;
 }) {
-  const management = useManagement();
   const navigation = (
     <>
       <div className="sidebar-heading" aria-hidden="true" />
       <nav className="album-nav" aria-label="主导航">
-        <NavigationButton
-          label="照片"
-          count={summary?.total ?? 0}
-          active={activeSection === "library"}
-          onClick={() => onChoose("library")}
-          section="library"
-        />
-        <NavigationButton
-          label="相册"
-          count={summary?.albums.length ?? 0}
-          active={activeSection === "albums"}
-          onClick={() => onChoose("albums")}
-          section="albums"
-        />
-        {!authentication.guest && <NavigationButton label="收藏" count={management.ready ? management.favoriteIds.size + management.favoriteAlbums.size : undefined} active={activeSection === "favorites"} onClick={() => onChoose("favorites")} section="favorites" />}
-        <NavigationButton
-          label="相似图片"
-          active={activeSection === "similar"}
-          onClick={() => onChoose("similar")}
-          section="similar"
-        />
-        {!authentication.guest && <NavigationButton label="本地存储" active={activeSection === "local"} onClick={() => onChoose("local")} section="local" />}
-        {!authentication.guest && <NavigationButton
-          label="外部存储"
-          active={activeSection === "storage"}
-          onClick={() => onChoose("storage")}
-          section="storage"
-        />}
-        {!authentication.guest && <NavigationButton label="回收站" count={management.trashCount} active={activeSection === "trash"} onClick={() => onChoose("trash")} section="trash" />}
+        <NavigationGroups summary={summary} activeSection={activeSection} onChoose={onChoose} />
       </nav>
       <AuthControls onSettings={() => { onClose(); onSettings(); }} />
     </>
@@ -255,6 +267,39 @@ export function Sidebar({
       )}
     </>
   );
+}
+
+function NavigationGroup({ label, children }: { label: string; children: ComponentChildren }) {
+  return <div className="sidebar-nav-group" role="group" aria-label={label}>
+    <h3 className="sidebar-group-label" aria-hidden="true">{label}</h3>
+    <div className="sidebar-nav-items">{children}</div>
+  </div>;
+}
+
+function NavigationGroups({ summary, activeSection, onChoose }: {
+  summary: GallerySummary | null;
+  activeSection: GallerySection;
+  onChoose: (section: GallerySection) => void;
+}) {
+  const management = useManagement();
+  const entry = (section: GallerySection, label: string, count?: number) => <NavigationButton
+    section={section} label={label} count={count} active={activeSection === section}
+    onClick={() => onChoose(section)} />;
+  return <>
+    <NavigationGroup label="浏览">
+      {entry("library", "图库", summary?.total ?? 0)}
+      {entry("albums", "相册", summary?.albums.length ?? 0)}
+      {!authentication.guest && entry("favorites", "收藏", management.ready ? management.favoriteIds.size + management.favoriteAlbums.size : undefined)}
+    </NavigationGroup>
+    <NavigationGroup label="图片工具">
+      {entry("similar", "相似图片")}
+    </NavigationGroup>
+    {!authentication.guest && <NavigationGroup label="存储管理">
+      {entry("local", "本地存储")}
+      {entry("storage", "外部存储")}
+      {entry("trash", "回收站", management.trashCount)}
+    </NavigationGroup>}
+  </>;
 }
 
 function NavigationButton({

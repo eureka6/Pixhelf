@@ -236,7 +236,7 @@ async function checkViewerMenu(page) {
 async function expectSimilar(page, imageId) {
   await page.waitForFunction(id => new URLSearchParams(location.search).get("source") === id && document.querySelector(".app-shell")?.dataset.gallerySection === "similar", imageId);
   assert.equal(await page.locator(".image-viewer").count(), 0);
-  await page.locator(".similar-search-page .image-card").first().waitFor();
+  await page.locator(".app-shell[data-gallery-section=similar] .image-card").first().waitFor();
 }
 
 try {
@@ -395,7 +395,7 @@ try {
     menu = await expectMenu(page);
     await clickVisible(menu.getByRole("menuitem", { name: "查找相似图片", exact: true }));
     await expectSimilar(page, nestedId);
-    const result = page.locator(".similar-search-page .image-card").first();
+    const result = page.locator(".app-shell[data-gallery-section=similar] .image-card").first();
     const resultId = await result.getAttribute("data-image-id");
     await centerCard(result);
     await clickVisible(result.locator(".photo-card-open"));

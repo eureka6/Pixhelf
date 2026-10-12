@@ -66,14 +66,23 @@ try {
   }
   const fixture = await build({ stdin: { resolveDir: fileURLToPath(new URL("../", import.meta.url)), loader: "tsx", contents: `
     import { render } from "preact";
+    import { useRef } from "preact/hooks";
     import { MediaPreview } from "./src/MediaPreview";
     import { MediaPlayer } from "./src/mediaPlayer";
+    import { useSlideshowTransition } from "./src/useSlideshowTransition";
     const root = document.getElementById("root");
-    window.show = (photo, viewer = true) => { root.style.cssText = ""; render(<div className={viewer ? "viewer-media" : "image-card"}
-      style={{ position: "relative", width: 280 * photo.width / Math.max(photo.width, photo.height),
-        height: 280 * photo.height / Math.max(photo.width, photo.height) }}>
-      <MediaPreview key={photo.id} image={photo} autoPlay={viewer} />
-    </div>, root); };
+    function Slide({ photo, viewer }) {
+      const stage = useRef(null), media = useRef(null);
+      const transition = useSlideshowTransition({ viewerRef: stage, stageRef: stage, mediaRef: media,
+        imageId: photo.id, request: 1, ready: false, onOpen: () => {} });
+      window.snapshotSlide = () => transition({ ...photo, id: "pending-slide" });
+      return <div ref={stage} style={{ position: "relative" }}><div ref={media} className={viewer ? "viewer-media" : "image-card"}
+        style={{ position: "relative", width: 280 * photo.width / Math.max(photo.width, photo.height),
+          height: 280 * photo.height / Math.max(photo.width, photo.height) }}>
+        <MediaPreview key={photo.id} image={photo} autoPlay={viewer} />
+      </div></div>;
+    }
+    window.show = (photo, viewer = true) => { root.style.cssText = ""; render(<Slide photo={photo} viewer={viewer} />, root); };
     window.prepareCapture = photo => {
       render(null, root);
       const host = window.captureHost = document.createElement("div");
@@ -134,12 +143,15 @@ try {
       const player = await page.locator(".media-player-surface").getAttribute("data-player");
       if (forceFallback) assert.equal(player, "libmedia");
       else if (sample.codec === "h264") assert.equal(player, "native-live");
-      const record = async phase => {
-        const actual = await viewport.screenshot(), error = await difference(page, actual, sample);
+      const record = async (phase, target = viewport) => {
+        const actual = await target.screenshot(), error = await difference(page, actual, sample);
         if (error > 8) await writeFile(`/tmp/pixhelf-orientation-${sample.id}-${viewportWidth}-${phase}.png`, actual);
         results.push({ viewportWidth, id: sample.id, player, phase, difference: Number(error.toFixed(2)) });
       };
       await record("first");
+      await page.evaluate(() => window.snapshotSlide());
+      await record("slideshow-transition", page.locator('.viewer-slideshow-snapshot canvas'));
+      await page.evaluate(() => window.dispatchEvent(new Event('resize')));
       if (sample.rotation === 90 && sample.flip) {
         await page.locator(".viewer-media").evaluate(media => {
           media.style.width = parseFloat(media.style.width) * .8 + "px";
@@ -147,7 +159,8 @@ try {
           media.style.transform = "scale(1.15)";
         });
         await record("resize-and-zoom");
-        await page.waitForFunction(() => !document.querySelector(".media-player-surface"));
+        await page.locator('.media-preview[data-playback-state="ended"]').waitFor();
+        await page.locator('.media-player-surface[data-player-state="paused"]').waitFor();
         const beforeReplay = requests.length;
         const attemptsBeforeReplay = await page.evaluate(() => window.nativeAttempts);
         await page.locator(".viewer-media").dispatchEvent("pixhelf:media-preview-play");
@@ -175,8 +188,10 @@ try {
           Number((await difference(page, Buffer.from(frame.bytes), sample, frame.type)).toFixed(2)) });
       }
       await page.evaluate(() => window.show({ id: "none", name: "none", width: 480, height: 320 }));
-      assert.equal(await page.evaluate(() => window.motionBlobs.size), 0, "ending, replacing and closing playback must release every native blob URL");
+      assert(await page.evaluate(() => window.motionBlobs.size <= 12), "native blob URLs stay bounded with the retained decoder cache");
     }
+    await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    assert.equal(await page.evaluate(() => window.motionBlobs.size), 0, "page exit must release every cached native blob URL");
     await page.close();
   }
   console.log(JSON.stringify({ noServer: true, forceFallback, results, errors }, null, 2));

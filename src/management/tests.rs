@@ -46,6 +46,51 @@ async fn call(
 }
 
 #[tokio::test]
+async fn duplicate_cleanup_rechecks_the_keeper_and_never_recycles_the_last_copy() {
+    let (_temporary, state) = fixture();
+    let index = state.index.read().await.clone();
+    let original = index.image_by_path("one.png").unwrap().id.clone();
+    let copy = index.image_by_path("two.png").unwrap().id.clone();
+    let root = index.root.clone();
+    let app = router(state);
+    let input =
+        json!({"ids": [copy], "action": "trash", "duplicateKeepers": {copy.clone(): original}});
+    let bytes = std::fs::read(root.join("one.png")).unwrap();
+    std::fs::remove_file(root.join("one.png")).unwrap();
+    let (status, result) = call(&app, "POST", "/api/management/batch", input.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["results"][0]["ok"], false);
+    assert!(root.join("two.png").exists());
+    std::fs::write(root.join("one.png"), bytes).unwrap();
+    // Even a restored same-name file has a different identity: recheck first.
+    let (_, result) = call(&app, "POST", "/api/management/batch", input).await;
+    assert_eq!(result["results"][0]["ok"], false);
+    assert!(root.join("two.png").exists());
+
+    let (_temporary, state) = fixture();
+    let index = state.index.read().await.clone();
+    let original = index.image_by_path("one.png").unwrap().id.clone();
+    let copy = index.image_by_path("two.png").unwrap().id.clone();
+    let root = index.root.clone();
+    let app = router(state);
+    let (status, _) = call(&app, "POST", "/api/management/batch", json!({"ids": [copy, original], "action": "trash", "duplicateKeepers": {copy.clone(): original, original.clone(): copy}})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(root.join("one.png").exists() && root.join("two.png").exists());
+    let (status, result) = call(
+        &app,
+        "POST",
+        "/api/management/batch",
+        json!({"ids": [copy], "action": "trash", "duplicateKeepers": {copy.clone(): original}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["results"][0]["ok"], true);
+    assert!(root.join("one.png").exists());
+    assert!(!root.join("two.png").exists());
+    assert_eq!(read_trash(&root).unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn uploads_validate_images_preserve_existing_files_and_refresh_the_gallery() {
     let (_temporary, state) = fixture();
     let root = state.index.read().await.root.clone();

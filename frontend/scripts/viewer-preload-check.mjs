@@ -15,6 +15,7 @@ const bundle = await build({
       import { prepareViewerImages, getViewerThumbnailStatus, getViewerOriginalStatus, getViewerViewportRenderAsset,
         getReadyViewerViewportRenderAsset } from "./src/viewerAssets";
       import { viewerHistoryState } from "./src/viewerHistory";
+      import { clearViewerOriginalCache } from "./src/viewerOriginalCache";
       import { viewportRenderDimensions } from "./src/viewerLogic";
       const previousVNode = options.vnode;
       options.vnode = vnode => {
@@ -22,6 +23,7 @@ const bundle = await build({
         if (vnode.type === ImageViewer) window.viewerLoadMore = vnode.props.onLoadMoreImages;
       };
       window.prepareImages = prepareViewerImages;
+      window.clearOriginalBytes = clearViewerOriginalCache;
       window.thumbnailStatus = id => getViewerThumbnailStatus({ id });
       window.originalStatus = id => getViewerOriginalStatus({ id, name: id + ".jpg" });
       window.renderAsset = getViewerViewportRenderAsset;
@@ -192,6 +194,14 @@ try {
     await revisited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
     await revisited.open(0);
     await revisited.page.waitForFunction(() => window.originalStatus("photo-40") === "idle");
+    const firstLoads = revisited.requests.filter(path => path === "/api/images/photo-40.jpg").length;
+    await revisited.open(40);
+    await revisited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
+    assert.equal(revisited.requests.filter(path => path === "/api/images/photo-40.jpg").length, firstLoads,
+      "decoded-image eviction must not download a cached original again");
+    await revisited.open(0);
+    await revisited.page.waitForFunction(() => window.originalStatus("photo-40") === "idle");
+    await revisited.page.evaluate(() => window.clearOriginalBytes());
     const client = await revisited.page.context().newCDPSession(revisited.page);
     await client.send("Network.clearBrowserCache");
     await client.send("HeapProfiler.collectGarbage");
@@ -251,7 +261,7 @@ try {
     let attempts = 0;
     const image = { ...images[0], id: "decode-retry" };
     await decodeRetry.page.route("**/decode-retry.jpg", route => ++attempts === 1
-      ? route.fulfill({ status: 503, body: "temporarily unavailable" })
+      ? route.fulfill({ contentType: "image/jpeg", body: "invalid image bytes" })
       : route.fulfill({ contentType: "image/jpeg", body: photo }));
     await decodeRetry.page.evaluate(async image => {
       const failed = window.renderAsset(image, 100, 75);

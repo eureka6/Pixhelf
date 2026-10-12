@@ -8,6 +8,11 @@ const sample = await loadSample();
 const bundle = await build({ stdin: { resolveDir: fileURLToPath(new URL("../", import.meta.url)), loader: "tsx", contents: `
   import { render } from "preact";
   import { MediaPreview } from "./src/MediaPreview";
+  import { preloadLivePhoto } from "./src/livePhotoPreload";
+  import { motionBlob, isMotionCached } from "./src/mediaSource";
+  window.preloadLivePhoto = preloadLivePhoto;
+  window.motionBlob = motionBlob;
+  window.isMotionCached = isMotionCached;
   render(<div style={{ display: "flex", gap: 8 }}>
     {[0, 1, 2].map(id => <div className="image-card" data-image-id={id} data-loaded="true"
       style={{ position: "relative", width: 100, height: 100 }}>
@@ -102,6 +107,42 @@ try {
     assert.deepEqual(handoff.requests.filter(request => request.path === "/motion/0").map(request => request.method), ["HEAD", "GET"],
       "tapping during preload must continue the same download");
   } finally { await handoff.close(); }
+  const slideshowHandoff = await fixture(390, { saveData: true });
+  try {
+    await slideshowHandoff.page.evaluate(() => {
+      window.releaseSlide = window.preloadLivePhoto('/motion/0', true);
+      window.releaseNext = window.preloadLivePhoto('/motion/1', true);
+    });
+    await until(() => slideshowHandoff.requests.some(request => request.path === '/motion/1' && request.method === 'GET' && !request.done));
+    await slideshowHandoff.page.evaluate(() => {
+      window.releaseSlide();
+      window.releaseNext();
+      window.releaseSlide = window.preloadLivePhoto('/motion/1', true);
+    });
+    await until(() => slideshowHandoff.requests.some(request => request.path === '/motion/1' && request.method === 'GET' && request.done));
+    await slideshowHandoff.page.locator('.image-card[data-image-id="1"]').dispatchEvent('pixhelf:card-touch');
+    await slideshowHandoff.page.locator('.image-card[data-image-id="1"] .media-preview[data-playing="true"]').waitFor();
+    assert.deepEqual(slideshowHandoff.requests.filter(request => request.path === '/motion/1').map(request => request.method), ['HEAD', 'GET'],
+      'a photo/video slideshow controller handoff preserves the pending next-clip download');
+    await slideshowHandoff.page.evaluate(() => window.releaseSlide());
+  } finally { await slideshowHandoff.close(); }
+  const evictedPreload = await fixture(390, { saveData: true });
+  try {
+    await evictedPreload.page.evaluate(() => { window.releaseCard = window.preloadLivePhoto('/motion/0'); });
+    await until(() => evictedPreload.requests.some(request => request.method === 'GET' && request.done));
+    await evictedPreload.page.waitForLoadState('networkidle');
+    await evictedPreload.page.route('**/motion/evict-*', route => serveMotion(route, sample));
+    await evictedPreload.page.evaluate(async () => {
+      for (let i = 0; i < 32; i++) await window.motionBlob('/motion/evict-' + i, new AbortController().signal);
+    });
+    assert.equal(await evictedPreload.page.evaluate(() => window.isMotionCached('/motion/0')), false, 'browsing more clips can evict an old speculative preload');
+    await evictedPreload.page.evaluate(() => { window.releaseSlide = window.preloadLivePhoto('/motion/0', true); });
+    await until(() => evictedPreload.requests.filter(request => request.method === 'GET' && request.done).length === 2);
+    const before = evictedPreload.requests.length;
+    await play(evictedPreload.page);
+    assert.equal(evictedPreload.requests.length, before, 'slideshow promotion refreshes an evicted preload before playback');
+    await evictedPreload.page.evaluate(() => { window.releaseCard(); window.releaseSlide(); });
+  } finally { await evictedPreload.close(); }
   const cancelled = await fixture(390);
   try {
     await until(() => cancelled.requests.length > 0);
@@ -111,5 +152,5 @@ try {
     assert(cancelled.requests.every(request => request.method === "HEAD"), "leaving the viewport must cancel preloads before fetching the clip");
     assert.equal(await cancelled.page.locator(".media-player-surface").count(), 0);
   } finally { await cancelled.close(); }
-  console.log("In-flight handoff and offscreen preload cancellation passed");
+  console.log("In-flight slideshow handoff, evicted preload refresh and offscreen cancellation passed");
 } finally { await browser.close(); }

@@ -89,8 +89,10 @@ async function checkSearchDisclosure(f, width) {
   if (width <= 720) {
     await page.locator('.gallery-sidebar-toggle').click();
     assert(await page.locator('.mobile-sidebar').isVisible());
-    await f.open();
+    assert.equal(await page.locator('.search-toggle').isVisible(), false, 'the drawer temporarily hides bottom navigation');
+    await page.locator('.gallery-sidebar-toggle').click();
     await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
+    await f.open();
   } else await f.open();
   assert.equal(await input.evaluate(element => element === document.activeElement), width > 720, 'desktop search focuses the input; touch search leaves the keyboard closed');
   await input.fill('输入法测试');
@@ -101,6 +103,18 @@ async function checkSearchDisclosure(f, width) {
   assert(await page.locator('.search-toggle').evaluate(button => button === document.activeElement));
   await f.open();
   assert.equal(await input.inputValue(), '输入法测试');
+  assert.deepEqual(await page.locator('.search-history-items button').allTextContents(), ['输入法测试']);
+  const layout = await panel.evaluate(element => {
+    const bounds = selector => element.querySelector(selector).getBoundingClientRect();
+    const filters = bounds('.gallery-filter-fields'), categories = bounds('.gallery-filter-content');
+    const input = bounds('.gallery-search-input'), history = bounds('.search-history');
+    const selects = [...element.querySelectorAll('select')].map(select => select.getBoundingClientRect().top);
+    return { ordered: filters.bottom <= categories.top && categories.bottom <= input.top && input.bottom <= history.top,
+      singleRow: selects.every(top => Math.abs(top - selects[0]) < 1), fits: element.scrollWidth <= element.clientWidth };
+  });
+  assert(layout.ordered && layout.singleRow && layout.fits, JSON.stringify(layout));
+  assert.equal(await panel.getByText('内容分类', { exact: true }).count(), 0);
+  assert.equal(await panel.getByRole('button', { name: '管理分类', exact: true }).count(), 0);
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
   await page.keyboard.press('Shift+Tab');
   assert(await page.evaluate(() => document.activeElement === document.body || !!document.activeElement.closest('.search-dialog')), 'modal focus never enters the gallery behind it');
@@ -122,16 +136,36 @@ async function checkSearchDisclosure(f, width) {
       const input = element.querySelector('input').getBoundingClientRect(), header = element.querySelector('header').getBoundingClientRect();
       const body = element.querySelector('.search-dialog-content');
       return { top: box.top, bottom: box.bottom, footer: footer.bottom, scrolls: body.scrollHeight > body.clientHeight,
-        inputVisible: input.top >= header.top && input.bottom <= header.bottom && header.bottom <= footer.top,
+        inputVisible: input.top >= header.bottom && input.bottom <= footer.top,
         inputTop: input.top, inputBottom: input.bottom, headerBottom: header.bottom, footerTop: footer.top, active: document.activeElement.tagName, scrollTop: body.scrollTop };
     });
-    assert(viewport.top >= 24 && viewport.bottom <= 324 && viewport.footer <= 324 && viewport.scrolls && viewport.inputVisible, JSON.stringify(viewport));
+    assert(viewport.top >= 24 && viewport.bottom <= 324 && viewport.footer <= 324 && viewport.inputVisible, JSON.stringify(viewport));
     await page.screenshot({ path: `${output}/search-keyboard-${width}.png` });
     await page.evaluate(() => { delete visualViewport.height; delete visualViewport.offsetTop; visualViewport.dispatchEvent(new Event('resize')); });
   }
   await page.keyboard.press('Escape');
   await panel.waitFor({ state: 'detached' });
   assert.notEqual(await page.evaluate(() => getComputedStyle(document.documentElement).overflow), 'hidden');
+  await page.reload();
+  await f.open();
+  await page.locator('.search-history-items').getByRole('button', { name: '输入法测试', exact: true }).click();
+  await panel.waitFor({ state: 'detached' });
+  await f.open();
+  assert.equal(await input.inputValue(), '输入法测试', 'history restores the query after a reload');
+  await input.fill('  海边的日落  ');
+  await input.press('Enter');
+  await f.open();
+  assert.deepEqual(await page.locator('.search-history-items button').allTextContents(), ['海边的日落', '输入法测试']);
+  await input.press('Enter');
+  await f.open();
+  assert.equal(await page.locator('.search-history-items button').count(), 2, 'repeated searches are deduplicated');
+  await page.getByRole('button', { name: '清空搜索历史', exact: true }).click();
+  await page.getByText('暂无搜索历史', { exact: true }).waitFor();
+  assert.equal(await input.inputValue(), '  海边的日落  ', 'clearing history preserves the active query');
+  await page.reload();
+  await f.open();
+  await page.getByText('暂无搜索历史', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '关闭搜索', exact: true }).click();
   console.log(`${width}px: modal search, persistence, IME, focus, drawer handoff and keyboard viewport passed`);
 }
 
@@ -186,7 +220,7 @@ try {
       assert.equal(f.requests.at(-1).get('seed'), seed);
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('.topbar-actions .explore-toggle').count(), 0);
-      assert.equal(await page.locator('.topbar-actions > button, .topbar-actions .toolbar-popover-trigger').count(), 2);
+      assert.equal(await page.locator(width <= 720 ? '.mobile-bottom-nav .mobile-tab' : '.topbar-actions > button, .topbar-actions .toolbar-popover-trigger').count(), width <= 720 ? 4 : 2);
       const next = f.request('sort', 'explore');
       await page.getByRole('button', { name: '换一组', exact: true }).click();
       await next; await f.idle();
@@ -257,8 +291,14 @@ try {
   const custom = await fixture(390);
   try {
     const { page } = custom;
+    const openCategories = async () => {
+      await page.getByRole('button', { name: '关闭搜索', exact: true }).click();
+      await page.getByRole('button', { name: '展开侧栏', exact: true }).click();
+      await page.locator('.mobile-sidebar').getByRole('button', { name: '设置', exact: true }).click();
+      await page.locator('.settings-nav').getByRole('button', { name: '图片分类', exact: true }).click();
+    };
     await custom.open();
-    await page.getByRole('button', { name: '管理分类', exact: true }).click();
+    await openCategories();
     assert.equal(await page.locator('.search-toggle').getAttribute('aria-expanded'), 'false');
     await page.locator('#category-name-0').fill('亲友');
     await page.locator('#category-query-0').fill('朋友\u007f的合照');
@@ -283,7 +323,7 @@ try {
     await page.reload();
     await custom.open();
     await page.getByRole('button', { name: '旅行', exact: true }).waitFor();
-    await page.getByRole('button', { name: '管理分类', exact: true }).click();
+    await openCategories();
     await page.locator('#category-query-0').fill('海边的日落');
     await page.getByRole('button', { name: '保存分类', exact: true }).click();
     await page.getByText('搜索描述不能重复', { exact: true }).waitFor();

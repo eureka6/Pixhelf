@@ -54,7 +54,7 @@ async function navigate(page, title) {
     await page.locator(".gallery-sidebar-toggle").click();
   }
   const panel = page.viewportSize().width <= 720 ? ".mobile-sidebar" : ".desktop-sidebar";
-  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["照片", "相册", "收藏", "相似图片", "本地存储", "外部存储", "回收站"]);
+  assert.deepEqual(await page.locator(`${panel} .album-link strong`).allTextContents(), ["图库", "相册", "收藏", "相似图片", "本地存储", "外部存储", "回收站"]);
   await page.locator(`${panel} .album-link`).getByText(title, { exact: true }).click();
   if (title === "相册") await page.locator(".albums-grid").waitFor();
   else await page.locator(".image-card").nth(24).waitFor();
@@ -290,7 +290,7 @@ try {
     }
     const seeds = imageRequests.map(url => new URL(url).searchParams).filter(query => query.get("sort") === "explore").map(query => query.get("seed"));
     assert.notEqual(seeds.at(-1), seeds.at(-2), "exploring again creates a new queue");
-    await navigate(page, "照片");
+    await navigate(page, "图库");
     assert.equal(new URL(page.url()).search, "");
     assert.equal(await page.locator(".album-heading").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

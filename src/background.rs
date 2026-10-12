@@ -51,6 +51,7 @@ pub async fn run(state: AppState, config: Config) {
             "图库扫描完成"
         );
         *state.index.write().await = Arc::new(index);
+        crate::web::duplicates::warm(&state).await;
         state.thumbnails.start_workers(config.workers);
         state.thumbnails.start_similarity_warmup();
         let manager = Arc::clone(&state.thumbnails);
@@ -112,6 +113,7 @@ async fn prepare_text_search(thumbnails: Arc<ThumbnailManager>, source: TextSear
 
 async fn rescan_gallery(state: AppState, config: Config) {
     loop {
+        crate::web::duplicates::warm(&state).await;
         tokio::time::sleep(config.scan_interval).await;
         let previous = {
             let index = state.index.read().await;
@@ -153,6 +155,7 @@ async fn rescan_gallery(state: AppState, config: Config) {
         state.thumbnails.start_similarity_warmup();
         *current = updated;
         drop(current);
+        crate::web::duplicates::warm(&state).await;
         state.thumbnails.cleanup_stale().await;
         info!(previous = old_count, images = new_count, "图库已更新");
     }

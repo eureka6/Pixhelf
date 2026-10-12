@@ -11,34 +11,34 @@ export function imageFilterLabels(filters: ImageFilters, search = "", categories
     filters.sort !== "default" && SORTS.find(([value]) => value === filters.sort)?.[1]].filter((label): label is string => Boolean(label));
 }
 
-export function GalleryFilters({ filters, search, categories, categoriesHint, onConfigureCategories, onChange, onContentChange, contentReady, contentHint }: {
-  filters: ImageFilters; search: string; categories: ContentCategory[]; categoriesHint: string; onConfigureCategories?: () => void;
-  onChange: (filters: ImageFilters) => void; onContentChange: (query: string) => void;
+export function SearchCategories({ search, categories, categoriesHint, onContentChange, contentReady, contentHint }: {
+  search: string; categories: ContentCategory[]; categoriesHint: string;
+  onContentChange: (query: string) => void;
   contentReady: boolean; contentHint: string;
 }) {
   const category = contentReady ? contentCategory(search, categories) : "";
-  return <div className="gallery-filter-controls">
-    <fieldset className="gallery-filter-content"><legend><span>内容分类</span>
-      {onConfigureCategories && <button type="button" className="gallery-filter-reset" onClick={onConfigureCategories}>管理分类</button>}
-    </legend>
+  return <div className="gallery-filter-content" role="group" aria-label="图片分类">
       <div className="gallery-filter-options">
         <button type="button" aria-pressed={!category} onClick={() => onContentChange("")}>全部</button>
         {categories.map(({ query, name }) => <button key={query} type="button" disabled={!contentReady} aria-pressed={category === name}
           onClick={() => onContentChange(category === name ? "" : query)}>{name}</button>)}
       </div>
       {(categoriesHint || !contentReady) && <p>{categoriesHint || contentHint}</p>}
-    </fieldset>
-    <div className="gallery-filter-fields">
-      <label>媒体类型<select aria-label="媒体类型" value={filters.kind} onChange={event => onChange({ ...filters, kind: event.currentTarget.value as ImageFilters["kind"] })}>
+    </div>;
+}
+
+export function GalleryFilters({ filters, onChange }: {
+  filters: ImageFilters; onChange: (filters: ImageFilters) => void;
+}) {
+  return <div className="gallery-filter-fields">
+      <label><span>媒体类型</span><select aria-label="媒体类型" title="媒体类型" value={filters.kind} onChange={event => onChange({ ...filters, kind: event.currentTarget.value as ImageFilters["kind"] })}>
         {KINDS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
       </select></label>
-      <label>图片画幅<select aria-label="图片画幅" value={filters.orientation} onChange={event => onChange({ ...filters, orientation: event.currentTarget.value as ImageFilters["orientation"] })}>
+      <label><span>图片画幅</span><select aria-label="图片画幅" title="图片画幅" value={filters.orientation} onChange={event => onChange({ ...filters, orientation: event.currentTarget.value as ImageFilters["orientation"] })}>
         {ORIENTATIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
       </select></label>
-      <label className="gallery-filter-sort">排序<select aria-label="排序方式" value={filters.sort} onChange={event => onChange({ ...filters, sort: event.currentTarget.value as ImageFilters["sort"] })}>
+      <label className="gallery-filter-sort"><span>排序</span><select aria-label="排序方式" title="排序" value={filters.sort} onChange={event => onChange({ ...filters, sort: event.currentTarget.value as ImageFilters["sort"] })}>
         {SORTS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
       </select></label>
-      {filters.sort === "explore" && <p className="gallery-filter-hint">随机排列当前筛选结果。</p>}
-    </div>
   </div>;
 }

@@ -7,7 +7,8 @@ import type { ImageViewerProps } from "./ImageViewer";
 import { ChevronUp, LoaderCircle, RefreshCw, ScanSearch, SkipBack, SkipForward, X } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
 import { stopMediaPreview } from "./MediaPreview";
-import type { VideoPlayer } from "./mediaPlayer";
+import type { PlayerState, VideoPlayer } from "./mediaPlayer";
+import { useSlideshowPause, ViewerSlideshow } from "./ViewerSlideshow";
 import { PhotoInformation } from "./PhotoInformation";
 import { SimilarImageGallery, SimilarImageSkeleton } from "./SimilarImages";
 import { useModalDialog } from "./useModalDialog";
@@ -18,6 +19,7 @@ import { prepareViewerImages, viewerOriginalUrl, viewerThumbnailUrl } from "./vi
 export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadMoreImages, onClose, onOpenImage, onSelectImage, onSelectImages, onClearSelection, selectedIds, selectionDisabled, onOpenSimilarImage,
   similarActive, similarImages, similarTotal, similarHasMore, similarLoading, similarLoadingMore, similarError,
   onSearchSimilar, onSearchVideoFrame, similarFrameTime, onLoadMoreSimilar,
+  slideshowRequest = 0,
 }: ImageViewerProps) {
   const image = images[activeIndex]!;
   const videoRef = useRef<VideoPlayer | null>(null);
@@ -32,8 +34,13 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
   const [captureError, setCaptureError] = useState<string | null>(null);
   const captureJob = useRef<object | null>(null);
   const [state, setState] = useState<PlaybackState>("loading");
-  const episodes = images.filter(image => image.video);
-  const episodeIndex = images.slice(0, activeIndex).filter(episode => episode.video).length;
+  const [playback, setPlayback] = useState<{ id: string; state: PlayerState } | null>(null);
+  const playbackState = playback?.id === image.id ? playback.state : "loading";
+  const [slideshowPlaying, setSlideshowPlaying] = useState(false);
+  const [slideshowRunning, setSlideshowRunning] = useState(false);
+  const { setPaused } = useSlideshowPause();
+  const episodes = slideshowRequest ? images : images.filter(image => image.video);
+  const episodeIndex = slideshowRequest ? activeIndex : images.slice(0, activeIndex).filter(episode => episode.video).length;
   const previousEpisode = episodes[episodeIndex - 1];
   const nextEpisode = episodes[episodeIndex + 1];
   const canNext = Boolean(nextEpisode) || hasMore;
@@ -53,7 +60,7 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
       while (navigationLatest.current.hasMore && navigationJob.current === job) {
         const incoming = await navigationLatest.current.onLoadMoreImages();
         if (navigationJob.current !== job) return;
-        const next = incoming.find(image => image.video);
+        const next = slideshowRequest ? incoming[0] : incoming.find(image => image.video);
         if (next) { navigationLatest.current.onOpenImage(next); return; }
         if (!incoming.length) return;
         // Let the new pagination cursor reach the next load callback.
@@ -181,11 +188,17 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
         }
       }}>
       <VideoPlayback source={image.playback ?? viewerOriginalUrl(image)} prepared={Boolean(image.playback)} autoPlay
+        playbackRequest={slideshowRequest}
+        suspended={slideshowRequest > 0 && !slideshowRunning}
+        onPlaybackState={state => setPlayback({ id: image.id, state })}
+        onUserPlaybackChange={playing => { if (slideshowRequest) setPaused(!playing); }}
         downloadSource={viewerOriginalUrl(image)} name={image.name} poster={viewerThumbnailUrl(image)}
         durationHint={image.video?.duration ?? 0} playerRef={videoRef} onState={setState} keepControlsVisible={menu || episodesOpen}
         header={<header className="video-viewer-header video-controls-region">
           <h1 className="video-viewer-title" title={image.name}>{image.name.replace(/\.[^.]+$/, "") || image.name}</h1>
-          <button type="button" className="video-control video-return viewer-close" aria-label="关闭查看器" title="关闭查看器 (Esc)" onClick={onClose}>
+          <button type="button" className="video-control video-return viewer-close" aria-label="关闭查看器" title="关闭查看器 (Esc)" onClick={onClose}
+            data-slideshow-playing={slideshowRequest > 0 && slideshowPlaying}
+            aria-description={slideshowRequest > 0 ? slideshowPlaying ? "幻灯片播放中" : "幻灯片已暂停" : undefined}>
             <X size={26} strokeWidth={2.1} />
           </button>
         </header>}
@@ -201,8 +214,14 @@ export function VideoViewer({ images, activeIndex, hasMore, loadingMore, onLoadM
           onSelect={onSelectImage ? () => onSelectImage(image) : undefined}
           onAction={action => {
             if (action === "view") { returnToPlayback(); videoRef.current?.play(); }
+            else if (action === "slideshow") { returnToPlayback(); onOpenImage(image, action); }
             else void showDetails(action === "similar" ? "similar" : "details");
           }} />} />
+      {slideshowRequest > 0 && <ViewerSlideshow key={slideshowRequest} viewerRef={dialog.ref}
+        images={images} activeIndex={activeIndex} hasMore={hasMore} onLoadMore={onLoadMoreImages}
+        ready={state === "ready" || state === "failed"} mediaState={playbackState}
+        blocked={details || menu || episodesOpen || capturing}
+        onPlayingChange={setSlideshowPlaying} onPlaybackChange={setSlideshowRunning} onOpen={onOpenImage} />}
       <section ref={detailsRef} className="viewer-details-page video-viewer-details" aria-label="视频信息" tabIndex={-1} data-details-image-name={image.name}>
         <div className="viewer-details-inner">
           <header className="video-details-toolbar">

@@ -45,6 +45,16 @@ export interface ImagesPage {
   nextOffset: number | null;
 }
 
+export interface DuplicateImage extends GalleryImage { path: string; size: number; modifiedMs: number }
+export interface DuplicateGroup { id: string; images: DuplicateImage[] }
+export interface DuplicateSelectionImage { id: string; size: number; modifiedMs: number }
+export interface DuplicateSelectionGroup { id: string; images: DuplicateSelectionImage[] }
+export interface DuplicatePage {
+  groups: DuplicateGroup[]; total: number; scanned: number; imageTotal: number; skipped: number;
+  scanning: boolean; revision: string; offset: number; nextOffset: number | null;
+  plan: DuplicateSelectionGroup[] | null;
+}
+
 export interface PhotoExifField {
   label: string;
   value: string;

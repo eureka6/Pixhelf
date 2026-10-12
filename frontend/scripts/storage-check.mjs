@@ -274,7 +274,7 @@ try {
     await page.getByRole("button", { name: "上一张", exact: true }).click();
     assert.equal(await page.locator(".storage-preview img").getAttribute("alt"), "秋日.png");
     await page.keyboard.press("Escape");
-    await navigate(page, "照片"); await page.locator(".image-card").waitFor();
+    await navigate(page, "图库"); await page.locator(".image-card").waitFor();
     await navigate(page, "外部存储"); await waitEntries(page, 60);
     console.log(JSON.stringify({ width, directoryBrowser: true, settingsBackdrop: true, stableBackground: true, preview: true }));
   }

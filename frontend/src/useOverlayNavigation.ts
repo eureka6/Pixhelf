@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
-const NAVIGATION_REGION = '.desktop-sidebar, .gallery-sidebar-toggle, .topbar-brand[data-visible="true"]';
+const NAVIGATION_REGION = '.desktop-sidebar, .gallery-sidebar-toggle, .topbar-brand';
 
 export function useOverlayNavigation(compact: boolean) {
   const [mode, setMode] = useState<"closed" | "hover" | "pinned">("closed");
@@ -19,7 +19,7 @@ export function useOverlayNavigation(compact: boolean) {
     if (event.relatedTarget instanceof Element && event.relatedTarget.closest(NAVIGATION_REGION)) return;
     cancelClose();
     // Bridge the small gap between the trigger and the drawer.
-    timer.current = window.setTimeout(() => setMode(current => current === "hover" ? "closed" : current), 160);
+    timer.current = window.setTimeout(() => setMode(current => current === "hover" ? "closed" : current), 60);
   };
   useLayoutEffect(() => { cancelClose(); setMode("closed"); }, [compact, cancelClose]);
   useEffect(() => cancelClose, [cancelClose]);

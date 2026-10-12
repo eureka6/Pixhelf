@@ -2,6 +2,7 @@ import { authentication, requireLogin } from "./auth";
 import { isCategoryConfig } from "./contentCategories";
 import type {
   Album,
+  DuplicatePage,
   BootstrapData,
   GalleryImage,
   GallerySummary,
@@ -278,6 +279,21 @@ export function getSimilarImages(
 
 export function getGalleryImage(imageId: string, signal?: AbortSignal): Promise<GalleryImage> {
   return requestJson(`/api/images/${encodeURIComponent(imageId)}`, isGalleryImage, signal);
+}
+
+export function getDuplicates(offset: number, search: string, signal?: AbortSignal, refresh = false): Promise<DuplicatePage> {
+  const params = new URLSearchParams({ offset: String(offset), limit: "12", search });
+  if (refresh) params.set("refresh", "true");
+  if (offset === 0) params.set("plan", "true");
+  return requestJson(`/api/images/duplicates?${params}`, (value): value is DuplicatePage => isObject(value)
+    && Array.isArray(value.groups) && value.groups.every(group => isObject(group) && typeof group.id === "string"
+      && Array.isArray(group.images) && group.images.length >= 2 && group.images.every(image => isGalleryImage(image)
+        && isObject(image) && typeof image.path === "string" && isNonNegativeInteger(image.size) && isNonNegativeInteger(image.modifiedMs)))
+    && [value.total, value.scanned, value.imageTotal, value.skipped, value.offset].every(isNonNegativeInteger)
+    && typeof value.scanning === "boolean" && typeof value.revision === "string"
+    && (value.plan === null || Array.isArray(value.plan) && value.plan.every(group => isObject(group) && typeof group.id === "string"
+      && Array.isArray(group.images) && group.images.length >= 2 && group.images.every(image => isObject(image) && typeof image.id === "string" && isNonNegativeInteger(image.size) && isNonNegativeInteger(image.modifiedMs))))
+    && (value.nextOffset === null || (isNonNegativeInteger(value.nextOffset) && value.nextOffset > Number(value.offset) && value.nextOffset < Number(value.total))), signal);
 }
 
 export function searchByUploadedImage(file: File, options: { offset: number; limit: number; exclude?: string }, signal?: AbortSignal): Promise<ImagesPage> {

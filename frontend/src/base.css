@@ -8,7 +8,8 @@
   text-rendering: auto;
   -webkit-tap-highlight-color: transparent;
   --topbar-height: 54px;
-  --sidebar-width: 238px;
+  --sidebar-width: clamp(280px, 22vw, 352px);
+  --navigation-scrim: rgba(9, 16, 24, .48);
   --sidebar-rail-width: 0px;
   --visual-viewport-top: 0px;
   --bg: #f5f7f6;

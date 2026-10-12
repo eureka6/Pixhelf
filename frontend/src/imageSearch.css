@@ -1,0 +1,12 @@
+.image-search-summary { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.similar-source-preview { flex: none; width: 44px; height: 44px; object-fit: contain; background: #f0f4f1; border-radius: 5px; }
+.similar-source-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 5px; }
+.similar-source-copy > strong { overflow: hidden; color: var(--ink); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.similar-source-copy > span { color: var(--muted); font-size: 11px; }
+.image-search-summary > .icon-button { flex: none; width: 36px; height: 36px; border: 0; background: transparent; }
+.similar-results-footer { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.similar-results-footer button { min-height: 40px; padding: 8px 16px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--border); border-radius: 7px; font-size: 12px; }
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  .image-search-summary { gap: 8px; padding: 8px; }
+  .image-search-summary > button { min-height: 40px; }
+}

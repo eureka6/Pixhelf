@@ -13,7 +13,7 @@ type ToolbarPopoverProps = {
   onOpenChange: (open: boolean) => void;
   panelClassName?: string;
   panelLabel: string;
-  panelRole?: "group" | "menu";
+  panelRole?: "group" | "menu" | "dialog";
   rootClassName?: string;
   triggerClassName?: string;
   field?: ComponentChildren;
@@ -39,6 +39,13 @@ export function ToolbarPopover({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeFromKeyboard = (event: KeyboardEvent) => {
+    if (!open || event.key !== "Escape" || event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onOpenChange(false);
+    triggerRef.current?.focus({ preventScroll: true });
+  };
 
   useLayoutEffect(() => {
     const active = document.activeElement;
@@ -61,14 +68,6 @@ export function ToolbarPopover({
       }
       onOpenChange(false);
     };
-    const closeFromKeyboard = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onOpenChange(false);
-      triggerRef.current?.focus({ preventScroll: true });
-    };
-
     document.addEventListener("pointerdown", closeFromOutside, true);
     document.addEventListener("keydown", closeFromKeyboard);
     if (autoDismiss) {
@@ -98,6 +97,7 @@ export function ToolbarPopover({
   return (
     <div
       ref={rootRef}
+      onKeyDown={closeFromKeyboard}
       className={`toolbar-popover ${open ? "is-open" : ""} ${rootClassName}`}
     >
       {field}
@@ -108,13 +108,13 @@ export function ToolbarPopover({
         className={`icon-button toolbar-popover-trigger ${triggerClassName}`}
         onClick={() => onOpenChange(!open)}
         onKeyDown={event => {
-          if (panelRole === "menu" && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+          if (panelRole !== "group" && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
             event.preventDefault();
             onOpenChange(true);
           }
         }}
         aria-label={triggerLabel}
-        aria-haspopup={panelRole === "menu" ? "menu" : undefined}
+        aria-haspopup={panelRole === "group" ? undefined : panelRole}
         aria-expanded={open}
         aria-controls={id}
         title={triggerLabel}

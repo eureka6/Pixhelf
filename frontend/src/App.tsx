@@ -38,7 +38,8 @@ import {
 import type { ViewerAnchor } from "./galleryViewport";
 import { ImageViewer } from "./ImageViewer";
 import { PhotoInformationDialog } from "./PhotoInformationDialog";
-import { SimilarSearchView } from "./SimilarSearchView";
+import { ImageSearchSummary } from "./ImageSearch";
+import { DuplicateImages } from "./DuplicateImages";
 import { useImageSimilarity } from "./useImageSimilarity";
 import type { ImageSearchSource } from "./useImageSimilarity";
 import { appendUniqueImages } from "./galleryImages";
@@ -243,25 +244,32 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-function useVisualViewportTop(): void {
-  useEffect(() => {
+function useVisualViewport(): void {
+  useLayoutEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
 
     let frame = 0;
     let settleTimer = 0;
     const update = () => {
-      frame = 0;
       const pageOffset = viewport.pageTop - window.scrollY;
       const offset = Math.max(0, viewport.offsetTop, pageOffset);
-      document.documentElement.style.setProperty(
-        "--visual-viewport-top",
-        `${Math.round(offset * 100) / 100}px`,
-      );
-      document.documentElement.style.setProperty("--visual-viewport-height", `${viewport.height}px`);
+      const root = document.documentElement;
+      const top = `${Math.round(offset * 100) / 100}px`;
+      const height = `${viewport.height}px`;
+      if (root.style.getPropertyValue("--visual-viewport-top") !== top) root.style.setProperty("--visual-viewport-top", top);
+      if (root.style.getPropertyValue("--visual-viewport-height") !== height) root.style.setProperty("--visual-viewport-height", height);
+      const active = document.activeElement;
+      const editing = active instanceof HTMLElement && (active.isContentEditable
+        || active.matches('textarea, input:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]):not([type="hidden"])'));
+      const adjusted = String(editing || viewport.scale > 1.01);
+      if (root.dataset.visualViewportAdjusted !== adjusted) root.dataset.visualViewportAdjusted = adjusted;
     };
     const schedule = () => {
-      if (!frame) frame = window.requestAnimationFrame(update);
+      // Apply the event's geometry immediately; a following frame also catches
+      // browsers that commit viewport metrics just after the event dispatch.
+      update();
+      if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; update(); });
       window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(update, 120);
     };
@@ -269,13 +277,20 @@ function useVisualViewportTop(): void {
     update();
     viewport.addEventListener("resize", schedule);
     viewport.addEventListener("scroll", schedule);
+    window.addEventListener("resize", schedule);
     window.addEventListener("orientationchange", schedule);
+    document.addEventListener("focusin", schedule);
+    document.addEventListener("focusout", schedule);
     return () => {
       if (frame) window.cancelAnimationFrame(frame);
       window.clearTimeout(settleTimer);
       viewport.removeEventListener("resize", schedule);
       viewport.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);
+      document.removeEventListener("focusin", schedule);
+      document.removeEventListener("focusout", schedule);
+      delete document.documentElement.dataset.visualViewportAdjusted;
       document.documentElement.style.removeProperty("--visual-viewport-top");
       document.documentElement.style.removeProperty("--visual-viewport-height");
     };
@@ -325,7 +340,7 @@ function createExploreSeed(): string {
 
 function App() {
   const manager = useManagement();
-  useVisualViewportTop();
+  useVisualViewport();
   const [location, setLocation] = useState(readGalleryLocation);
   const locationRef = useRef(location);
   const { section, path } = location;
@@ -335,6 +350,8 @@ function App() {
   const browsingFavorites = section === "favorites";
   const browsingTrash = section === "trash";
   const browsingSimilar = section === "similar";
+  const browsingDuplicates = browsingSimilar && !path;
+  const browsingImageSearch = browsingSimilar && Boolean(path);
   const browsingAlbums = section === "albums" && !album;
   const hasInitialImages = Boolean(INITIAL_BOOTSTRAP && section === "library");
   const [summary, setSummary] = useState<GallerySummary | null>(
@@ -386,14 +403,14 @@ function App() {
   const [localMedia, setLocalMedia] = useState<LocalMediaPage | null>(null);
   const [infoImage, setInfoImage] = useState<GalleryImage | null>(null);
   const [uploadedQuery, setUploadedQuery] = useState<File | null>(null);
+  const [duplicateImages, setDuplicateImages] = useState<GalleryImage[]>([]);
   const [galleryQuerySnapshot, setGalleryQuerySnapshot] = useState<GalleryImage | null>(null);
-  const lastSimilarPathRef = useRef(browsingSimilar ? path : "");
-  const queryImageId = browsingSimilar ? path : lastSimilarPathRef.current;
+  const queryImageId = browsingImageSearch && path !== "upload" ? path : "";
   const querySource = useMemo<ImageSearchSource | null>(() => queryImageId
     ? { kind: "gallery", imageId: queryImageId, image: galleryQuerySnapshot?.id === queryImageId ? galleryQuerySnapshot : undefined }
-    : uploadedQuery ? { kind: "upload", file: uploadedQuery } : null,
-  [queryImageId, galleryQuerySnapshot, uploadedQuery]);
-  const imageSimilarity = useImageSimilarity(querySource, browsingSimilar);
+    : browsingImageSearch && uploadedQuery ? { kind: "upload", file: uploadedQuery } : null,
+  [queryImageId, galleryQuerySnapshot, uploadedQuery, browsingImageSearch]);
+  const imageSimilarity = useImageSimilarity(querySource, browsingImageSearch);
   const [selectionToolbar, setSelectionToolbar] = useState<HTMLDivElement | null>(null);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const galleryLayoutRef = useRef<SelectableGalleryHandle>(null);
@@ -469,8 +486,13 @@ function App() {
   const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const viewerHistoryActiveRef = useRef(false);
   const viewerHistoryClosingRef = useRef(false);
-  const { images, total, nextOffset } = browsingSimilar ? imageSimilarity : browsingLocal && localMedia ? localMedia : imagePage;
-  const pageLoadingMore = browsingSimilar ? imageSimilarity.loadingMore : browsingLocal ? Boolean(localMedia?.loadingMore) : loadingMore;
+  const { images, total, nextOffset } = browsingImageSearch ? imageSimilarity : browsingDuplicates ? { images: duplicateImages, total: duplicateImages.length, nextOffset: null } : browsingLocal && localMedia ? localMedia : imagePage;
+  const pageLoadingMore = browsingImageSearch ? imageSimilarity.loadingMore : browsingLocal ? Boolean(localMedia?.loadingMore) : loadingMore;
+  const pageLoading = browsingImageSearch ? imageSimilarity.loading : (browsingDuplicates || browsingLocal || browsingStorage || browsingTrash) ? false : browsingAlbums ? !summary : loading;
+  const pageError = browsingImageSearch ? imageSimilarity.error : error;
+  const visibleImages = useMemo(() => browsingImageSearch && search.trim()
+    ? images.filter(image => image.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) : images,
+  [browsingImageSearch, images, search]);
   const selectedAlbum = useMemo(() => summary?.albums.find(item => item.path === album), [summary, album]);
   const visibleAlbums = useMemo(() => {
     const albums = summary?.albums ?? [];
@@ -488,7 +510,7 @@ function App() {
   }, [albumSelection.clear]);
   const selectionStateRef = useRef({ active: selectionActive, clear: clearSelection });
   selectionStateRef.current = { active: selectionActive, clear: clearSelection };
-  useSelectionDismiss(selectionActive, manager.busy, Boolean(viewerImageId), clearSelection);
+  useSelectionDismiss(selectionActive && !browsingDuplicates, manager.busy, Boolean(viewerImageId), clearSelection);
   useEffect(() => {
     const changed = (event: Event) => {
       const action = (event as CustomEvent<string>).detail;
@@ -497,16 +519,16 @@ function App() {
         setViewerDiscoveredImages([]);
         updateViewerBranch(null);
         viewerLoadJobRef.current?.controller.abort();
-        if (browsingSimilar) imageSimilarity.retry();
+        if (browsingImageSearch) imageSimilarity.retry();
       }
       if (action !== "favorite" || browsingFavorites) setReloadToken(value => value + 1);
     };
     window.addEventListener(MANAGEMENT_CHANGED, changed);
     return () => window.removeEventListener(MANAGEMENT_CHANGED, changed);
-  }, [browsingFavorites, browsingSimilar, imageSimilarity.retry]);
+  }, [browsingFavorites, browsingImageSearch, imageSimilarity.retry]);
   const viewerImages = useMemo(
-    () => viewerBranch?.images ?? appendUniqueImages(images, viewerDiscoveredImages),
-    [images, viewerDiscoveredImages, viewerBranch],
+    () => viewerBranch?.images ?? appendUniqueImages(visibleImages, viewerDiscoveredImages),
+    [visibleImages, viewerDiscoveredImages, viewerBranch],
   );
 
   useLayoutEffect(() => {
@@ -528,7 +550,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!mobileNavMounted) return;
+    if (!mobileNavMounted && !(compactLayout && menuOpen)) return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -539,7 +561,7 @@ function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [mobileNavMounted]);
+  }, [mobileNavMounted, compactLayout, menuOpen]);
 
   useEffect(() => {
     if (!compactLayout && mobileNavOpen) setMobileNavOpen(false);
@@ -703,7 +725,7 @@ function App() {
     loadMorePromiseRef.current = promise;
     return promise;
   }, [location, requestImages, loading, imagePage]);
-  const loadMore = browsingSimilar ? imageSimilarity.loadMore : browsingLocal && localMedia ? localMedia.loadMore : loadMoreLibrary;
+  const loadMore = browsingImageSearch ? imageSimilarity.loadMore : browsingLocal && localMedia ? localMedia.loadMore : loadMoreLibrary;
 
   const resetSimilarSearch = useCallback(() => {
     similarRequestVersionRef.current += 1;
@@ -720,8 +742,8 @@ function App() {
 
   const activateLocation = useCallback((next: GalleryLocation) => {
     clearSelection();
+    desktopNav.close();
     locationRef.current = next;
-    if (next.section === "similar") lastSimilarPathRef.current = next.path;
     requestVersionRef.current++;
     skipInitialImagesRef.current = false;
     loadMoreControllerRef.current?.abort();
@@ -735,6 +757,7 @@ function App() {
     setExploreSeed("");
     setImageFilters(DEFAULT_IMAGE_FILTERS);
     setMobileNavOpen(false);
+    setMenuOpen(false);
     setInfoImage(null);
     setSlideshowRequest(0);
     viewerImageIdRef.current = null;
@@ -746,7 +769,7 @@ function App() {
     disposeViewerReturnFlight(viewerReturnFlightRef.current);
     viewerReturnFlightRef.current = null;
     resetSimilarSearch();
-  }, [resetSimilarSearch, clearSelection]);
+  }, [resetSimilarSearch, clearSelection, desktopNav.close]);
 
   const openSimilarSearch = useCallback((source: GalleryImage) => {
     setGalleryQuerySnapshot(source);
@@ -869,7 +892,7 @@ function App() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || nextOffset === null || loading || loadingMore || error || viewerImageId) return;
+    if (!sentinel || nextOffset === null || pageLoading || pageLoadingMore || pageError || viewerImageId) return;
     const margin = compactLayout ? MOBILE_PAGE_PREFETCH_MARGIN : DESKTOP_PAGE_PREFETCH_MARGIN;
     let active = true;
     const gallery = sentinel.parentElement?.querySelector<HTMLElement>(".justified-gallery");
@@ -891,7 +914,7 @@ function App() {
     if (ready()) observer.observe(sentinel);
     else layout.observe(gallery!);
     return () => { active = false; layout.disconnect(); observer.disconnect(); };
-  }, [compactLayout, loadMore, nextOffset, loading, loadingMore, error, viewerImageId]);
+  }, [compactLayout, loadMore, nextOffset, pageLoading, pageLoadingMore, pageError, viewerImageId]);
 
   const viewerIndex = viewerImageId
     ? viewerBranch?.index ?? viewerImages.findIndex((image) => image.id === viewerImageId)
@@ -1360,7 +1383,6 @@ function App() {
 
   const showViewerImage = useCallback((candidate: GalleryImage, branch: ViewerBranch | null) => {
     if (viewerHistoryClosingRef.current) return;
-    if (candidate.video) setSlideshowRequest(0);
     recordViewerHistory(candidate, branch, true);
     updateViewerBranch(branch);
     setViewerDiscoveredImages(current => appendUniqueImages(current, [candidate]));
@@ -1490,7 +1512,12 @@ function App() {
     }
   }, [album, summary]);
 
-  const pageLoading = browsingSimilar ? imageSimilarity.loading : (browsingLocal || browsingStorage || browsingTrash) ? false : browsingAlbums ? !summary : loading;
+  useEffect(() => {
+    if (browsingImageSearch && !querySource) {
+      navigateTo("similar", "", true);
+      setSearchOpen(true);
+    }
+  }, [browsingImageSearch, querySource]);
   return (
     <div
       className="app-shell"
@@ -1513,7 +1540,8 @@ function App() {
         albumSearch={browsingAlbums}
         storageSearch={browsingStorage}
         localSearch={browsingLocal}
-        similarSearch={browsingSimilar}
+        similarSearch={browsingImageSearch}
+        duplicateSearch={browsingDuplicates}
         onSearchChange={changeSearch}
         onToggleNavigation={() => {
           if (compactLayout) setMobileNavOpen(open => !open);
@@ -1523,19 +1551,23 @@ function App() {
         onHoverNavigation={desktopNav.enter}
         onLeaveNavigation={desktopNav.leave}
         onHome={goHome}
+        activeSection={section}
+        onChoose={section => navigateTo(section)}
         menuOpen={menuOpen}
         onMenuOpenChange={setMenuOpen}
         onUpload={() => { desktopNav.close(); setUploadOpen(true); }}
+        onImageSearch={file => { setUploadedQuery(file); setGalleryQuerySnapshot(null); navigateTo("similar", "upload"); }}
         navigationOpen={compactLayout ? mobileNavOpen : !sidebarCollapsed}
         navigationPinned={desktopNav.pinned}
+        mobileNavigationMounted={mobileNavMounted}
         compactLayout={compactLayout}
+        onSelectionTarget={setSelectionToolbar}
         filters={filtersAvailable ? imageFilters : null}
         onFiltersChange={changeFilters}
         onContentChange={changeContent}
         onResetFilters={resetFilters}
         categories={categories}
         categoriesHint={categoriesHint}
-        onConfigureCategories={authentication.guest ? undefined : () => setSettingsSection("categories")}
       />
       <div
         className="request-progress"
@@ -1549,7 +1581,7 @@ function App() {
       <Sidebar
         summary={summary}
         activeSection={section}
-        onChoose={section => navigateTo(section, section === "similar" ? lastSimilarPathRef.current : "")}
+        onChoose={section => navigateTo(section)}
         mobileOpen={mobileNavOpen}
         mobileMounted={mobileNavMounted}
         onMobileExited={finishMobileNavExit}
@@ -1573,34 +1605,23 @@ function App() {
             </div>;
           })}
         </div>}
-        {error && !browsingLocal && !browsingStorage && !browsingSimilar && (
+        {pageError && !browsingLocal && !browsingStorage && (
           <div className="error-banner" role="alert">
-            <span>{error}</span>
+            <span>{pageError}</span>
             <button
               type="button"
-              onClick={() => setReloadToken((value) => value + 1)}
-              aria-label="重新加载"
-              title="重新加载"
+              onClick={() => browsingSimilar ? imageSimilarity.retry() : setReloadToken((value) => value + 1)}
+              aria-label={browsingSimilar ? "重试" : "重新加载"}
+              title={browsingSimilar ? "重试" : "重新加载"}
             >
               <RefreshCw size={17} />
             </button>
           </div>
         )}
 
-        {(browsingFavorites || browsingTrash || browsingLocal) && authentication.guest ? <div className="empty-state"><strong>图库管理仅限管理员访问</strong><a href="/login">管理员登录</a></div> : browsingLocal ? <LocalStorageView path={path} search={search} albums={summary?.albums ?? []} onOpen={openLocal} onAlbum={chooseAlbum} onImage={viewLocalImage} onMediaChange={setLocalMedia} /> : browsingTrash ? <TrashView search={search} /> : browsingSimilar ? (
-          <SimilarSearchView
-            source={querySource}
-            results={imageSimilarity}
-            filter={search}
-            onUpload={file => { setUploadedQuery(file); setGalleryQuerySnapshot(null); navigateTo("similar"); }}
-            onClear={() => { setUploadedQuery(null); setGalleryQuerySnapshot(null); navigateTo("similar"); }}
-            onOpen={openViewer}
-            layoutRef={galleryLayoutRef}
-            toolbarTarget={selectionToolbar}
-            onSelectionChange={setSelectedIds}
-            preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
-          />
-        ) : browsingStorage ? (
+        {browsingDuplicates ? <DuplicateImages ref={galleryLayoutRef} search={debouncedSearch} revision={summary?.revision} viewing={Boolean(viewerImageId)}
+          onImagesChange={setDuplicateImages} onOpen={openViewer} toolbarTarget={selectionToolbar} onSelectionChange={setSelectedIds} />
+        : (browsingFavorites || browsingTrash || browsingLocal) && authentication.guest ? <div className="empty-state"><strong>图库管理仅限管理员访问</strong><a href="/login">管理员登录</a></div> : browsingLocal ? <LocalStorageView path={path} search={search} albums={summary?.albums ?? []} onOpen={openLocal} onAlbum={chooseAlbum} onImage={viewLocalImage} onMediaChange={setLocalMedia} /> : browsingTrash ? <TrashView search={search} toolbarTarget={selectionToolbar} /> : browsingStorage ? (
           authentication.guest ? (
             <div className="empty-state"><strong>外部存储仅限管理员访问</strong><a className="sidebar-login-link" href="/login">管理员登录</a></div>
           ) : <ExternalStorageView
@@ -1614,8 +1635,12 @@ function App() {
           <AlbumsView albums={summary?.albums} search={search} onOpen={chooseAlbum} onStorage={openLocal} onCover={id => void viewAlbumCover(id)} selection={albumSelection.selection} />
         ) : (
           <>
+            {browsingImageSearch && <button type="button" className="duplicate-action similar-back" onClick={() => navigateTo("similar")}>返回重复图片</button>}
+            {browsingSimilar && querySource && <ImageSearchSummary source={querySource} name={imageSimilarity.reference?.name}
+              total={total} loading={pageLoading} onReplace={() => setSearchOpen(true)}
+              onClear={() => { setUploadedQuery(null); setGalleryQuerySnapshot(null); navigateTo("library"); }} />}
             {selectedAlbum && <AlbumBackLink onOpen={chooseAlbum} />}
-            {filterLabels.length > 0 && <div className="gallery-filter-summary" role="status">
+            {filtersAvailable && filterLabels.length > 0 && <div className="gallery-filter-summary" role="status">
               <span>{filterLabels.join(" · ")}<small>{loading ? "正在筛选…" : `${formatCount(total)} 项`}</small></span>
               <div className="gallery-filter-actions">
                 {imageFilters.sort === "explore" && <button type="button" className="gallery-filter-reset gallery-reshuffle" disabled={loading || total < 2}
@@ -1625,20 +1650,25 @@ function App() {
             </div>}
             {browsingFavorites && <header className="management-page-heading"><h1><Heart size={23} />收藏</h1><span>{visibleAlbums.length ? `${visibleAlbums.length} 个相册 · ${total} 个文件` : `${total} 项`}</span></header>}
             {browsingFavorites && visibleAlbums.length > 0 && <section className="favorite-albums" aria-label="收藏的相册"><h2>相册</h2><AlbumGrid albums={visibleAlbums} onOpen={chooseAlbum} onStorage={openLocal} onCover={id => void viewAlbumCover(id)} selection={albumSelection.selection} /></section>}
-            {loading ? (
+            {pageLoading ? (
               <GallerySkeleton />
-            ) : images.length ? (
+            ) : visibleImages.length ? (
               <SelectableGallery
                 key={`${section}:${path}:${debouncedSearch}:${exploreSeed}:${imageFilters.kind}:${imageFilters.orientation}:${imageFilters.sort}`}
                 ref={galleryLayoutRef}
                 toolbarTarget={selectionToolbar}
                 onSelectionChange={setSelectedIds}
                 onSelectionStart={albumSelection.clear}
-                images={images}
+                images={visibleImages}
                 preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
                 onOpen={openViewer}
               />
-            ) : browsingFavorites && visibleAlbums.length > 0 ? null : (
+            ) : (browsingFavorites && visibleAlbums.length > 0) || (browsingSimilar && pageError) ? null : browsingSimilar ? (
+              <div className="empty-state"><ImageIcon size={30} strokeWidth={1.6} />
+                <strong>{search.trim() ? "没有匹配的结果" : "没有找到相似图片"}</strong>
+                <span>{search.trim() ? "试试其他文件名" : "换一张图片试试"}</span>
+              </div>
+            ) : (
               <div className="empty-state">
                 <ImageIcon size={30} strokeWidth={1.6} />
                 <strong>{filterLabels.length ? "没有符合筛选条件的内容" : browsingFavorites ? debouncedSearch ? "没有匹配的收藏" : "暂无收藏" : selectedAlbum?.count === 0 ? "相册暂无内容" : summary?.total === 0 ? "图库暂无内容" : "没有找到图片或视频"}</strong>
@@ -1652,16 +1682,16 @@ function App() {
               </div>
             )}
 
-            <div ref={sentinelRef} className="load-sentinel" aria-live="polite">
-              {loadingMore && <LoaderCircle className="spin" size={21} aria-label="加载更多" />}
-              {!loading && nextOffset === null && images.length > 0 && (
-                <span>已显示全部 {formatCount(total)} 项</span>
+            <div ref={sentinelRef} className={`load-sentinel${browsingSimilar ? " similar-results-footer" : ""}`} aria-live="polite">
+              {pageLoadingMore && <LoaderCircle className="spin" size={21} aria-label="加载更多" />}
+              {browsingSimilar && !pageLoading && !pageLoadingMore && nextOffset !== null && <button type="button" onClick={() => void loadMore()}>加载更多</button>}
+              {!pageLoading && nextOffset === null && visibleImages.length > 0 && (
+                <span>{browsingSimilar ? `已显示 ${formatCount(visibleImages.length)} 张${search.trim() ? "匹配图片" : "相似图片"}` : `已显示全部 ${formatCount(total)} 项`}</span>
               )}
             </div>
           </>
         )}
       </main>
-      <div className="bottom-selection" ref={setSelectionToolbar} />
       {albumSelection.controls(selectionToolbar)}
       {uploadOpen && !authentication.guest && <UploadDialog albums={summary?.albums ?? []}
         initialDestination={browsingLocal ? path : album} onClose={() => setUploadOpen(false)}

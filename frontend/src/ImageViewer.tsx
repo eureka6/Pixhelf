@@ -10,9 +10,12 @@ import {
 import { PhotoInformation } from "./PhotoInformation";
 import { VideoViewer } from "./VideoViewer";
 import { ViewerNavigationButton } from "./ViewerNavigationButton";
-import { ViewerSlideshow } from "./ViewerSlideshow";
+import { SlideshowSession, ViewerSlideshow } from "./ViewerSlideshow";
+import type { PlayerState } from "./mediaPlayer";
+import { useSlideshowTransition } from "./useSlideshowTransition";
 import { useViewerNavigation } from "./useViewerNavigation";
 import { useViewerPreloads } from "./useViewerPreloads";
+import { getViewerOriginalSource, invalidateViewerOriginal } from "./viewerOriginalCache";
 import type { VideoFrame } from "./videoFrame";
 import { ImageCardActions } from "./ImageCardActions";
 import { MEDIA_PREVIEW_PLAY_EVENT, MediaPreview } from "./MediaPreview";
@@ -71,16 +74,28 @@ const TOUCH_SWIPE_DISTANCE_RATIO = 0.08;
 const TOUCH_SWIPE_FLICK_MIN_DISTANCE_PX = 20;
 const TOUCH_SWIPE_FLICK_VELOCITY = 0.32;
 
-function ViewerImage(props: JSX.ImgHTMLAttributes<HTMLImageElement>) {
+function ViewerImage({ cacheOriginal = false, ...props }: JSX.ImgHTMLAttributes<HTMLImageElement> & { cacheOriginal?: boolean }) {
   const ref = useRef<HTMLImageElement>(null);
   useLayoutEffect(() => {
     const element = ref.current;
+    const controller = new AbortController();
+    if (cacheOriginal && typeof props.src === "string") {
+      void getViewerOriginalSource(props.src, controller.signal).then(source => {
+        if (element && !controller.signal.aborted) element.src = source;
+      }).catch(() => {
+        if (!controller.signal.aborted) element?.dispatchEvent(new Event("error"));
+      });
+    }
     return () => {
+      controller.abort();
       element?.removeAttribute("srcset");
       element?.removeAttribute("src");
     };
-  }, []);
-  return <img {...props} ref={ref} />;
+  }, [cacheOriginal, props.src]);
+  return <img {...props} src={cacheOriginal ? undefined : props.src} ref={ref} onError={event => {
+    if (cacheOriginal && typeof props.src === "string") invalidateViewerOriginal(props.src);
+    props.onError?.(event);
+  }} />;
 }
 
 function disposeSwipeSnapshot(snapshot: HTMLElement | null): void {
@@ -186,7 +201,14 @@ export type ImageViewerProps = {
 };
 
 export function ImageViewer(props: ImageViewerProps) {
-  return props.images[props.activeIndex]?.video ? <VideoViewer {...props} /> : <PhotoViewer {...props} />;
+  const request = props.slideshowRequest ?? 0;
+  const image = props.images[props.activeIndex];
+  const start = useRef({ request, imageId: image?.id, firstSlide: true });
+  if (start.current.request !== request) start.current = { request, imageId: image?.id, firstSlide: true };
+  if (start.current.imageId !== image?.id) start.current.firstSlide = false;
+  return <SlideshowSession request={request}>
+    {image?.video ? <VideoViewer {...props} /> : <PhotoViewer {...props} firstSlide={start.current.firstSlide} />}
+  </SlideshowSession>;
 }
 
 function PhotoViewer({
@@ -198,6 +220,7 @@ function PhotoViewer({
   onLoadMoreImages,
   onClose,
   slideshowRequest = 0,
+  firstSlide,
   onSelectImage,
   onSelectImages,
   onClearSelection,
@@ -214,8 +237,11 @@ function PhotoViewer({
   onSearchSimilar,
   onLoadMoreSimilar,
   onOpenImage,
-}: ImageViewerProps) {
+}: ImageViewerProps & { firstSlide: boolean }) {
   const image = images[activeIndex]!;
+  const [slideshowPlaying, setSlideshowPlaying] = useState(false);
+  const [slideshowRunning, setSlideshowRunning] = useState(false);
+  const [motionState, setMotionState] = useState<{ id: string; state: PlayerState } | null>(null);
   const stageRef = useRef<HTMLElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const viewport = useViewportSize(surfaceRef);
@@ -311,6 +337,15 @@ function PhotoViewer({
     : getViewerThumbnailStatus(image) === "ready";
   const thumbnailFailed = thumbnailState.id === image.id && thumbnailState.failed;
   const fullSource = viewerOriginalUrl(image, currentLoadState.attempt);
+  const currentMotionState = motionState?.id === image.id ? motionState.state : "loading";
+  const slideshowMotion = slideshowRequest > 0 && Boolean(image.motion);
+  const slideshowReady = slideshowMotion
+    ? currentMotionState === "playing" || currentMotionState === "ended" || currentMotionState === "failed"
+    : currentLoadState.loaded || currentLoadState.failed;
+  const openSlideshowImage = useSlideshowTransition({
+    viewerRef: dialogRef, stageRef, mediaRef, imageId: image.id, request: slideshowRequest,
+    ready: slideshowReady, onOpen: onOpenImage,
+  });
 
   const viewerIsBusy = (includeSwipe = true) => pointersRef.current.size > 0
     || (includeSwipe && Boolean(dialogRef.current?.hasAttribute("data-swipe-direction")));
@@ -1883,6 +1918,8 @@ function PhotoViewer({
 
       <header className="viewer-header">
         <button type="button" className="viewer-control viewer-close" onClick={onClose}
+          data-slideshow-playing={slideshowRequest > 0 && slideshowPlaying}
+          aria-description={slideshowRequest > 0 ? slideshowPlaying ? "幻灯片播放中" : "幻灯片已暂停" : undefined}
           onPointerDown={event => {
             if (event.button === 0 && event.isPrimary) event.currentTarget.dataset.pressed = "true";
           }}
@@ -1918,6 +1955,7 @@ function PhotoViewer({
         <div ref={surfaceRef} className="viewer-image-frame">
           <div className="viewer-media-center">
             <div key={image.id} ref={mediaRef} className="viewer-media" style={mediaStyle}
+              data-slideshow-motion={slideshowMotion && !firstSlide && currentMotionState !== "failed"}
               data-image-id={image.id} data-image-name={image.name} tabIndex={0} aria-label={`图片：${image.name}`} aria-haspopup="menu">
               <ViewerImage
                 key={`thumbnail-${image.id}`}
@@ -1954,6 +1992,7 @@ function PhotoViewer({
               ) : (
                 <ViewerImage
                   key={fullSource}
+                  cacheOriginal
                   className="viewer-original"
                   src={fullSource}
                   width={image.width}
@@ -1979,6 +2018,7 @@ function PhotoViewer({
               {useViewportBitmapRenderer && currentFullResolution.requested && (
                 <ViewerImage
                   key={`native-original-${fullSource}`}
+                  cacheOriginal
                   className="viewer-original viewer-native-original"
                   src={fullSource}
                   width={image.width}
@@ -2005,7 +2045,9 @@ function PhotoViewer({
                   })}
                 />
               )}
-              {image.motion && <MediaPreview image={image} autoPlay />}
+              {image.motion && <MediaPreview image={image} autoPlay playbackRequest={slideshowRequest}
+                paused={slideshowRequest > 0 && !slideshowRunning}
+                onStateChange={state => setMotionState({ id: image.id, state })} />}
               <ImageCardActions image={image} selected={selectedIds?.has(image.id)} selectionDisabled={selectionDisabled} onSelect={onSelectImage ? () => onSelectImage(image) : undefined}
                 onMenuChange={setMenuOpen}
                 fullscreen={fullscreen} onToggleFullscreen={fullscreenAvailable ? () => void toggleFullscreen() : undefined} onAction={action => {
@@ -2024,12 +2066,15 @@ function PhotoViewer({
       <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
       <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
       {slideshowRequest > 0 && <ViewerSlideshow key={slideshowRequest} viewerRef={dialogRef}
+        onPlayingChange={setSlideshowPlaying}
+        onPlaybackChange={setSlideshowRunning}
+        mediaState={currentMotionState}
         images={images} activeIndex={activeIndex} hasMore={hasMore} onLoadMore={onLoadMoreImages}
-        ready={currentLoadState.loaded || currentLoadState.failed}
+        ready={slideshowReady}
         blocked={contactActive || dragging || menuOpen || scrollPage !== "image" || transform.scale > MIN_SCALE}
-        onOpen={onOpenImage} />}
+        onOpen={openSlideshowImage} />}
 
-      {currentLoadState.failed && (
+      {currentLoadState.failed && (!slideshowMotion || currentMotionState === "failed") && (
         <button type="button" className="viewer-load-error" onClick={retryOriginal}>
           <RefreshCw size={15} />
           <span>原图加载失败，点击重试</span>

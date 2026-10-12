@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from "preact/hooks";
 import { ensureSelectionHistory } from "./selectionHistory";
 
-const INTERACTIVE = '.image-card, .album-card, .album-folder, .viewer-similar-card, .image-viewer, .video-viewer, .mobile-nav-layer, .photo-card-menu, .selection-menu, dialog, button, a, input, textarea, select, label, summary, [role="button"], [role="checkbox"], [role="slider"], [contenteditable="true"]';
+const INTERACTIVE = '.image-card, .album-card, .album-folder, .viewer-similar-card, .image-viewer, .video-viewer, .mobile-nav-layer, .bottom-dock, .photo-card-menu, .selection-menu, .gallery-selection-bar, dialog, button, a, input, textarea, select, label, summary, [role="button"], [role="checkbox"], [role="slider"], [contenteditable="true"]';
 const blank = (target: EventTarget | null) => target instanceof Element && !target.closest(INTERACTIVE);
 
 export function useSelectionDismiss(active: boolean, busy: boolean, viewing: boolean, clear: () => void) {

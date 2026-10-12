@@ -1,5 +1,4 @@
 import type { ComponentChildren } from "preact";
-import { createPortal } from "preact/compat";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authentication } from "./auth";
 import { CARD_MENU_EVENT, clearCardFeedback, useCardInteraction, type CardMenuRequest } from "./cardInteraction";
@@ -7,6 +6,7 @@ import { Download, FolderInput, Heart, LoaderCircle, Trash2 } from "./icons";
 import type { GallerySelection } from "./JustifiedGallery";
 import { MAX_SELECTION, useManagement, type ManagementAction } from "./management";
 import { SelectionDialog } from "./SelectableGallery";
+import { SelectionBar } from "./SelectionBar";
 import { useSelectionGestures } from "./selectionGestures";
 import type { Album } from "./types";
 
@@ -84,19 +84,17 @@ export function useAlbumSelection(albums: Album[], scope: string, onActivate: ()
     },
   };
   const controls = (target: HTMLDivElement | null) => <>
-    {selected.length > 0 && target && createPortal(<div className="gallery-selection-bar" role="region" aria-label="所选相册操作" aria-busy={manager.busy}>
-      <div className="selection-actions">
+    <SelectionBar target={target} count={selected.length} unit="个相册" label="所选相册操作" busy={manager.busy} progress={manager.progress} onClear={clear}
+      messages={(manager.busy || manager.error || ids.size === MAX_SELECTION) && <>
+        {ids.size === MAX_SELECTION && <span className="selection-progress">已达 {MAX_SELECTION} 个相册上限</span>}
+        {manager.busy && <span className="selection-progress" role="status"><LoaderCircle className="spin" size={15} />正在处理，请稍候…</span>}
+        {manager.error && <span className="selection-progress" role="alert">{manager.error}<button type="button" onClick={() => void manager.refresh()}>重试</button></span>}
+      </>}>
         <button type="button" title="下载" disabled={manager.busy} onClick={() => void manager.download([...ids], "albums").catch(error => manager.notify(error.message, true))}><Download size={18} /><span>下载</span></button>
         <button type="button" title={allFavorite ? "取消收藏" : "收藏"} aria-label={allFavorite ? "取消收藏所选相册" : "收藏所选相册"} disabled={manager.busy || !manager.ready} onClick={() => void run("favorite", { favorite: !allFavorite })}><Heart size={18} fill={allFavorite ? "currentColor" : "none"} /><span>{allFavorite ? "取消收藏" : "收藏"}</span></button>
         <button type="button" title="移动" disabled={manager.busy} onClick={() => setDialog("move")}><FolderInput size={18} /><span>移动</span></button>
         <button type="button" className="selection-trash" title="移入回收站" disabled={manager.busy} onClick={() => setDialog("trash")}><Trash2 size={18} /><span>删除</span></button>
-      </div>
-      {(manager.busy || manager.error || ids.size === MAX_SELECTION) && <div className="selection-messages">
-        {ids.size === MAX_SELECTION && <span className="selection-progress">已达 {MAX_SELECTION} 个相册上限</span>}
-        {manager.busy && <span className="selection-progress" role="status"><LoaderCircle className="spin" size={15} />正在处理，请稍候…</span>}
-        {manager.error && <span className="selection-progress" role="alert">{manager.error}<button type="button" onClick={() => void manager.refresh()}>重试</button></span>}
-      </div>}
-    </div>, target)}
+    </SelectionBar>
     {dialog && <SelectionDialog kind={dialog} selectedAlbums={selected} busy={manager.busy} onClose={() => setDialog(null)} onConfirm={destination => void run(dialog, dialog === "move" ? { destination } : undefined)} />}
   </>;
   return { selection, clear, controls };

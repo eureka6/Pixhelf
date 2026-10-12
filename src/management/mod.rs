@@ -275,6 +275,8 @@ struct Batch {
     action: Action,
     destination: Option<String>,
     favorite: Option<bool>,
+    #[serde(default, rename = "duplicateKeepers")]
+    duplicate_keepers: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -363,6 +365,20 @@ async fn batch(
     Json(input): Json<Batch>,
 ) -> Result<Response, Failure> {
     validate_selection(&input.ids, input.kind)?;
+    if let Some(keepers) = &input.duplicate_keepers {
+        if input.kind != SelectionKind::Images || input.action != Action::Trash {
+            return Err(anyhow::anyhow!("重复图片保留规则仅用于清理副本").into());
+        }
+        if keepers.len() != input.ids.len()
+            || !input.ids.iter().all(|id| {
+                keepers
+                    .get(id)
+                    .is_some_and(|keeper| !input.ids.contains(keeper))
+            })
+        {
+            return Err(anyhow::anyhow!("每组必须保留一张图片").into());
+        }
+    }
     if input.kind == SelectionKind::Albums && matches!(input.action, Action::Restore | Action::Copy)
     {
         return Err(anyhow::anyhow!("相册操作无效").into());
@@ -434,6 +450,12 @@ async fn batch(
                     .image(id)
                     .context("文件已变化，请刷新后重试")
                     .and_then(|record| {
+                        if let Some(keepers) = &input.duplicate_keepers {
+                            let keeper = index
+                                .image(&keepers[id])
+                                .context("保留图片已变化，已跳过副本，请重新检查")?;
+                            crate::web::duplicates::verify_pair(record, keeper)?;
+                        }
                         update_record(&root, &directory, record, &input, &mut favorites)
                     })
             };

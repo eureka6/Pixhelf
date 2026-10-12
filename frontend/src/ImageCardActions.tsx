@@ -239,7 +239,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
           <button type="button" role="menuitem" onClick={() => void viewFullscreen()}>
             {isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}<span>{isFullscreen ? "退出全屏" : "全屏查看"}</span>
           </button>
-          {!image.video && <button type="button" role="menuitem" onClick={() => choose("slideshow")}><Play size={17} /><span>幻灯片播放</span></button>}
+          <button type="button" role="menuitem" onClick={() => choose("slideshow")}><Play size={17} /><span>幻灯片播放</span></button>
           <div className="photo-card-menu-divider" role="separator" />
           <a role="menuitem" href={originalUrl} download={image.name} onClick={() => closeMenu()}><Download size={17} /><span>{image.video ? "下载原视频" : "下载原图"}</span></a>
           {(["link", "name"] as const).map(target => {

@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launchBrowser } from "./live-photo-fixture.mjs";
+import { launchBrowser, serveMotion } from "./live-photo-fixture.mjs";
 import { serveFrontendAsset } from "./frontend-fixture.mjs";
 
 const html = await readFile(new URL("../dist/index.html", import.meta.url), "utf8");
 const photo = await readFile(new URL("fixtures/live-photo.jpg", import.meta.url));
 const gif = await readFile(new URL("fixtures/animated.gif", import.meta.url));
+const video = await readFile(new URL("fixtures/live-photo.mp4", import.meta.url));
 const images = Array.from({ length: 5 }, (_, index) => ({
   id: String(index).padStart(32, "0"), name: index === 0 ? "animated.GIF" : `photo-${index}.jpg`, width: 960, height: 720,
-  ...(index === 1 ? { video: { duration: 1, codec: "h264", audioCodec: null, frameRate: 30, container: "mp4" } } : {}),
+  ...(index === 1 ? { playback: "/video/slideshow.mp4", video: { duration: 1, codec: "h264", audioCodec: null, frameRate: 30, container: "mp4" } } : {}),
 }));
 const related = images.slice(2).map((image, i) => ({ ...image, id: String(i + 10).padStart(32, "0") }));
 const auth = { enabled: false, authenticated: false };
@@ -25,7 +26,7 @@ async function fixture(width, paginated = false) {
   const summary = { total: images.length, albums: [], revision: "slideshow" };
   const status = { total: 5, ready: 5, queued: 0, processing: 0, failed: 0, initialBatchReady: true, backgroundComplete: true,
     textSearch: { enabled: false, total: 0, ready: 0, queued: 0, processing: 0, failed: 0, backgroundComplete: true } };
-  const imagePage = offset => ({ items: paginated && !offset ? images.slice(0, 2) : images.slice(offset),
+  const imagePage = offset => ({ items: paginated && !offset ? images.slice(0, 1) : images.slice(offset),
     offset, limit: 60, total: images.length, nextOffset: paginated && !offset ? 2 : null });
   await page.clock.install();
   await page.route("**/*", async route => {
@@ -35,6 +36,8 @@ async function fixture(width, paginated = false) {
     if (path === "/") return route.fulfill({ contentType: "text/html", body: html.replace("__PIXHELF_AUTH__", JSON.stringify(auth))
       .replace("__PIXHELF_BOOTSTRAP__", JSON.stringify({ summary, status, images: imagePage(0) })) });
     if (path.startsWith("/assets/")) return serveFrontendAsset(route);
+    if (path === "/video/slideshow.mp4") return searchParams.has("status") ? reply({ state: "ready" })
+      : serveMotion(route, { clip: video, contentType: "video/mp4" });
     if (/\.gif$/i.test(path)) return route.fulfill({ contentType: "image/gif", body: gif });
     if (path.endsWith("/thumbnail") || /\.jpg$/.test(path)) return route.fulfill({ contentType: "image/jpeg", body: photo });
     if (path === "/api/gallery") return reply(summary);
@@ -112,8 +115,12 @@ try {
       await tick(4900);
       assert.equal(await f.id(), images[0].id, 'each slide stays for five seconds');
       await tick(200);
+      await page.locator('.video-viewer-stage[data-playing="true"]').waitFor();
+      assert.equal(await f.id(), images[1].id, 'slideshow includes ordinary videos');
+      await page.locator('.media-player-surface[data-player-state="ended"]').waitFor();
+      await tick(600);
       await f.ready(images[2]);
-      assert.equal(await page.locator('.video-viewer-stage').count(), 0, 'slideshow skips videos');
+      assert.equal(await page.locator('.video-viewer-stage').count(), 0, 'slideshow continues after the video ends');
 
       await page.locator('.image-viewer').focus();
       await page.keyboard.press(' ');

@@ -86,6 +86,9 @@ try {
   await page.mouse.move(0, 0);
   assert.equal(await first.getByRole("checkbox").evaluate(element => getComputedStyle(element).opacity), "0", "desktop selector is quiet until hover/focus");
   await select(first);
+  const selectionBeforeCountClick = await countSelected(page);
+  await page.locator('.selection-count').click();
+  assert.equal(await countSelected(page), selectionBeforeCountClick, 'the selected-count area does not dismiss the selection');
   assert.equal(await countSelected(page), 1);
   await page.waitForFunction(element => getComputedStyle(element).opacity === "1", await second.getByRole("checkbox").elementHandle());
   assert.equal(await second.getByRole("checkbox").evaluate(element => getComputedStyle(element).opacity), "1", "the first selection reveals the other selectors");
@@ -158,7 +161,14 @@ try {
   await page.getByRole("button", { name: "移入回收站", exact: true }).click();
   await waitFor(async () => (await state()).trashCount === 1, "trash contains selected image");
   await navigate(page, "回收站");
-  await page.getByRole("button", { name: "恢复 photo-00.jpg" }).click();
+  await page.getByRole('checkbox', { name: '选择 photo-00.jpg', exact: true }).check();
+  const trashSelection = page.getByRole('region', { name: '所选回收站项目操作', exact: true });
+  assert.equal(await trashSelection.getAttribute('data-selected-count'), '1');
+  await trashSelection.getByRole('button', { name: '取消全部选择', exact: true }).click();
+  assert.equal(await trashSelection.count(), 0);
+  assert.equal((await state()).trashCount, 1);
+  await page.getByRole('checkbox', { name: '选择 photo-00.jpg', exact: true }).check();
+  await trashSelection.getByRole('button', { name: '恢复所选', exact: true }).click();
   await waitFor(async () => (await state()).trashCount === 0, "restore empties trash");
   assert.equal((await state()).favoriteIds.length, 2, "restoring also restores favorite state");
   await stop(); await start();

@@ -83,12 +83,12 @@ function checkTrace(trace, reduced = false) {
   assert.equal(trace.coveredControls, 0, "navigation covers a toolbar control");
   assert.ok(trace.menuDrift < 1, `the menu button moved during navigation: ${trace.menuDrift}px`);
   assert.ok(trace.brandDrift < 1, `the logo moved on screen: ${trace.brandDrift}px`);
-  assert.equal(trace.brandVisible, trace.open === 'true', 'the logo fades with navigation');
-  assert.equal(trace.brandInert, trace.open !== 'true', 'the hidden logo cannot receive input');
+  assert.equal(trace.brandVisible, true, 'the logo stays visible independently of navigation');
+  assert.equal(trace.brandInert, false, 'the logo remains interactive with navigation closed');
+  assert.equal(trace.fadingBrandFrames, 0, 'sidebar transitions do not fade the logo');
   assert.equal(trace.overflow, false);
   if (!reduced) {
     assert.ok(trace.partialFrames > 1, "the sidebar did not animate");
-    assert.ok(trace.fadingBrandFrames > 0, 'the logo should fade in place');
     assert.ok(Math.max(...trace.reversals) < 2, `navigation jumped when reversed: ${trace.reversals}`);
   }
 }
@@ -137,8 +137,11 @@ try {
     // Put real, clickable cards behind the header, including its left edge.
     await page.evaluate(() => window.scrollTo(0, 320));
     await page.waitForFunction(() => document.querySelector('.topbar').dataset.hidden === 'true');
+    if (mobile) {
+      await page.waitForFunction(() => document.querySelector('.bottom-dock').dataset.navigationHidden === 'true');
+    }
     await page.waitForTimeout(250);
-    assert((await page.locator('.search-toggle').boundingBox()).y < 0, 'scrolling down hides the toolbar');
+    if (!mobile) assert((await page.locator('.search-toggle').boundingBox()).y < 0, 'scrolling down hides the toolbar');
     assert(await page.locator('.gallery-sidebar-toggle').evaluate(button => {
       const box = button.getBoundingClientRect();
       return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));

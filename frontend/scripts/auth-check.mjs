@@ -494,10 +494,12 @@ async function checkAuthentication(protocol) {
       assert.equal(await nav.getByRole("button", { name: "外部存储", exact: true }).count(), 0);
       assert(await nav.getByRole("link", { name: "管理员登录", exact: true }).isVisible());
       await page.screenshot({ path: join(tmpdir(), `pixhelf-guest-gallery-${protocol}-${width}.png`), animations: "disabled" });
-      await nav.getByRole("button", { name: "相似图片", exact: true }).click();
+      assert.equal(await nav.getByRole("button", { name: "相似图片", exact: true }).count(), 1);
+      await page.locator(".search-toggle").click();
+      await page.getByRole("button", { name: "以图搜图", exact: true }).waitFor();
       await page.getByLabel("上传查询图片").setInputFiles({ name: "guest-query.png", mimeType: "image/png", buffer: png(0) });
-      await page.locator(".similar-search-page .image-card").first().waitFor();
-      await page.locator(".similar-search-page .photo-card-open").first().click();
+      await page.locator(".app-shell[data-gallery-section=similar] .image-card").first().waitFor();
+      await page.locator(".app-shell[data-gallery-section=similar] .photo-card-open").first().click();
       await page.locator(".image-viewer").waitFor();
       await page.keyboard.press("Escape");
       await page.locator(".image-viewer").waitFor({ state: "detached" });

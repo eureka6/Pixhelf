@@ -1,0 +1,97 @@
+.navigation-icon { position: relative; display: grid; place-items: center; }
+.navigation-icon .search-active-dot { top: -2px; right: -3px; }
+
+@media (max-width: 720px) {
+  :root { --mobile-navigation-height: 50px; --mobile-navigation-offset: max(12px, env(safe-area-inset-bottom)); --mobile-navigation-clearance: calc(var(--mobile-navigation-height) + var(--mobile-navigation-offset)); }
+  html { scroll-padding-bottom: calc(var(--mobile-navigation-clearance) + 12px); }
+  .bottom-dock {
+    --dock-motion: 140ms cubic-bezier(.16, 1, .3, 1);
+    --dock-panel-gap: 8px;
+    --dock-slide-distance: calc(var(--mobile-navigation-clearance) + 16px);
+    position: fixed;
+    z-index: 40;
+    left: 50%;
+    /* Let the browser move its fixed bottom edge during toolbar animations,
+       even before it reports the new visual viewport size to JavaScript. */
+    bottom: var(--mobile-navigation-offset);
+    width: min(320px, calc(100% - 24px));
+    transform: translateX(-50%);
+    color: #425a4c;
+    pointer-events: none;
+    transition: translate var(--dock-motion);
+    -webkit-tap-highlight-color: transparent;
+  }
+  :root[data-visual-viewport-adjusted="true"] .bottom-dock {
+    /* Keyboards and pinch zoom can cover the layout viewport's bottom edge. */
+    bottom: calc(var(--mobile-navigation-offset) + max(0px, 100% - var(--visual-viewport-top) - var(--visual-viewport-height, 100dvh)));
+  }
+  .bottom-dock:has(.gallery-selection-bar) { --dock-slide-distance: calc(var(--mobile-navigation-clearance) + var(--dock-panel-gap) + 16px); }
+  .bottom-dock[data-navigation-hidden="true"] { translate: 0 var(--dock-slide-distance); }
+  /* The drawer owns the bottom area through its entire entrance and exit. */
+  .bottom-dock[data-drawer-visible="true"] { display: none; }
+  .bottom-dock .bottom-selection { position: relative; z-index: auto; left: auto; bottom: auto; width: 100%; max-width: none; transform: none; transition: translate var(--dock-motion); }
+  /* Keep the selection above the safe area while the dock slides navigation off screen. */
+  .bottom-dock[data-navigation-hidden="true"] .bottom-selection { translate: 0 calc(-1 * (var(--mobile-navigation-offset) + 16px)); }
+  .mobile-navigation-slot { height: var(--mobile-navigation-height); }
+  .bottom-dock:has(.gallery-selection-bar) .mobile-navigation-slot { margin-top: var(--dock-panel-gap); }
+  .bottom-dock[data-menu-open="true"] { z-index: 45; }
+  .mobile-bottom-nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    height: var(--mobile-navigation-height);
+    padding: 2px 3px;
+    color: #596a60;
+    background: #f8fcf9;
+    border: 1px solid #cdded2;
+    border-radius: 26px;
+    box-shadow: 0 6px 20px #173a291f, 0 1px 4px #173a290a, inset 0 1px 0 #fff;
+    pointer-events: auto;
+  }
+  .mobile-bottom-nav .mobile-tab {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    width: 100%;
+    height: 44px;
+    min-width: 0;
+    padding: 0 4px;
+    border: 4px solid transparent;
+    border-radius: 24px;
+    color: inherit;
+    background: transparent;
+    background-clip: padding-box;
+    transition: background 140ms ease, color 140ms ease;
+    touch-action: manipulation;
+  }
+  .mobile-tab-label { font-size: 12px; font-weight: 550; line-height: 16px; white-space: nowrap; }
+  .mobile-bottom-nav .mobile-tab[aria-current="page"],
+  .mobile-bottom-nav .mobile-tab[aria-expanded="true"] { color: #21644f; background-color: #deede3; }
+  .mobile-bottom-nav .search-toggle[data-active="true"] { color: #1d6859; }
+  .mobile-bottom-nav .mobile-tab:active { background-color: #d9e9e2; }
+  .mobile-bottom-nav .mobile-tab:focus-visible { outline-offset: -2px; }
+  .mobile-bottom-nav .toolbar-popover-trigger-icon { display: flex; align-items: center; gap: 5px; }
+  .mobile-more { position: static; min-width: 0; }
+  .mobile-more .toolbar-popover-trigger { flex: 1; }
+  .mobile-more-panel {
+    top: auto;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: 180px;
+    max-height: calc(var(--visual-viewport-height, 100dvh) - var(--mobile-navigation-clearance) - 20px);
+    padding: 4px;
+    border-radius: 17px;
+    background: #fcfefb;
+    box-shadow: 0 6px 24px #173a291f;
+    transform-origin: bottom right;
+  }
+  .mobile-more-panel [role="menuitem"] { gap: 10px; padding: 8px 10px; border-radius: 12px; }
+  @media (hover: hover) {
+    .mobile-bottom-nav .mobile-tab:hover { color: #1d6859; background-color: #e1eee7; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bottom-dock, .bottom-dock .bottom-selection, .mobile-bottom-nav .mobile-tab { transition: none; }
+  }
+}

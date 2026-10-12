@@ -97,13 +97,20 @@ async function playing(card) {
   }, await card.elementHandle());
 }
 
-async function noPlayers(page) {
+async function noPlayers(page, retained = 0) {
   await page.waitForFunction(() => !document.querySelector(".media-player-surface"));
-  await page.waitForFunction(async () => {
+  await page.waitForFunction(async retained => {
     const { default: Player } = await import("/assets/libmedia/avplayer.js");
-    return Player.Instances.length === 0;
-  });
+    return Player.Instances.length <= retained;
+  }, retained);
   assert.equal(await page.locator(".media-player-surface").count(), 0);
+}
+
+async function finished(card) {
+  await card.locator('.media-preview[data-playback-state="ended"]').waitFor();
+  await card.locator('.media-player-surface[data-player-state="paused"]').waitFor();
+  assert.equal(await card.locator('.media-preview').getAttribute('data-playing'), 'false');
+  assert.equal(await card.page().locator('.media-player-surface').count(), 1, 'only the latest decoder stays warm');
 }
 
 try {
@@ -123,26 +130,30 @@ try {
     const previous = await first.locator(".media-player-surface").elementHandle();
     if (touch) await second.locator(".photo-card-open").tap(); else await second.hover();
     await playing(second);
-    assert.equal(await previous.evaluate(player => !player.isConnected && player.dataset.playerState === "destroyed"), true);
+    await page.waitForFunction(player => !player.isConnected && player.dataset.playerState === "paused", previous);
     await first.dispatchEvent("pointerleave", { pointerType: "mouse" });
     await playing(second);
     assert.equal(await page.locator(".media-player-surface").count(), 1);
     await second.dispatchEvent("pixhelf:card-menu");
-    await noPlayers(page);
+    await noPlayers(page, 2);
 
     // A completed preview still opens on the next tap. The real image viewer
     // must recover from an initially invisible layout and allow tap replay.
     await first.dispatchEvent("pixhelf:card-touch");
     await playing(first);
-    await noPlayers(page);
+    await finished(first);
     if (touch) await first.locator(".photo-card-open").tap(); else await first.locator(".photo-card-open").click();
     const viewer = page.locator(".viewer-media:not(.viewer-swipe-outgoing)");
     await playing(viewer);
-    await noPlayers(page);
+    await finished(viewer);
+    const retained = await viewer.locator('.media-player-surface').elementHandle();
     assert.equal(await viewer.locator(".media-preview").getAttribute("data-playing"), "false");
     if (touch) await viewer.tap(); else await viewer.click();
     await playing(viewer);
+    assert(await retained.evaluate(player => player.isConnected), 'tap replay reuses the retained decoder');
     await page.locator(".viewer-close").click();
+    await noPlayers(page, 2);
+    await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
     await noPlayers(page);
     await page.close();
     console.log(`${engine.name()}: ${width}px contact feedback, handoff, decoder cleanup, transient visibility and replay passed`);
@@ -168,6 +179,8 @@ try {
       Object.defineProperty(document, "hidden", { configurable: true, value: true });
       document.dispatchEvent(new Event("visibilitychange"));
     });
+    await noPlayers(page, 1);
+    await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
     await noPlayers(page);
     assert.deepEqual(errors, []);
     console.log(`${engine.name()}: pending load cancellation and hidden-page cleanup passed`);

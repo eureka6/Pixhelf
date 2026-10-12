@@ -137,6 +137,8 @@ export async function checkAlbumManagement(context, origin, gallery, fixture) {
     await page.keyboard.press("Escape");
     await selectAlbum(source);
     await page.screenshot({ path: `/tmp/pixhelf-album-selection-${width}.png`, animations: "disabled" });
+    assert.equal(await page.locator('[aria-label="所选相册操作"]').getAttribute('data-selected-count'), '1');
+    assert.match(await page.locator('.selection-count').textContent(), /已选 1 个相册/);
     assert(await page.locator(".gallery-selection-bar button").evaluateAll(buttons => buttons.filter(button => button.getBoundingClientRect().width).every(button => {
       const rect = button.getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
     })), "every album action fits in the bottom toolbar");

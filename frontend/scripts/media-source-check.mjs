@@ -7,7 +7,7 @@ import { build } from "esbuild";
 
 const output = await build({ entryPoints: [new URL("../src/mediaSource.ts", import.meta.url).pathname],
   bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
-const { createMediaSource, motionBlob } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString("base64")}`);
+const { createMediaSource, motionBlob, retainMotionSource } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString("base64")}`);
 const codecOutput = await build({ entryPoints: [new URL("../src/motionCodec.ts", import.meta.url).pathname],
   bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
 const { motionVideoCodec } = await import(`data:text/javascript;base64,${Buffer.from(codecOutput.outputFiles[0].text).toString("base64")}`);
@@ -111,6 +111,30 @@ try {
   assert.deepEqual(new Uint8Array(await (await sharedPlayback).arrayBuffer()), bytes(sharedUrl, 0, files.get(sharedUrl).size));
   assert.equal(requests.length, beforeShared + 2, "preload handoff must share both HEAD and GET");
   assert.equal(getEventListeners(playback.signal, "abort").length, 0, "completed owners release their listeners");
+
+  // Component cleanup can release the preload before the player is mounted in
+  // the same turn. This handoff must preserve the already-running GET as well.
+  let finishHandoff, handoffStarted;
+  const handoffReady = new Promise(resolve => { handoffStarted = resolve; });
+  const handoffUrl = file(BLOCK + 13, { pending({ start, end, responseHeaders }) {
+    return new Promise(resolve => {
+      finishHandoff = () => resolve(new Response(bytes(handoffUrl, start, end - start + 1), { status: 206, headers: responseHeaders }));
+      handoffStarted();
+    });
+  } });
+  const leaving = new AbortController(), entering = new AbortController();
+  const beforeHandoff = requests.length;
+  const left = assert.rejects(motionBlob(handoffUrl, leaving.signal), { name: "AbortError" });
+  await handoffReady;
+  delete files.get(handoffUrl).pending;
+  leaving.abort();
+  const entered = motionBlob(handoffUrl, entering.signal);
+  finishHandoff();
+  await left;
+  assert.deepEqual(new Uint8Array(await (await entered).arrayBuffer()), bytes(handoffUrl, 0, files.get(handoffUrl).size));
+  assert.equal(requests.length, beforeHandoff + 2, "releasing then acquiring in one turn must not restart the download");
+  assert.equal(getEventListeners(leaving.signal, "abort").length, 0);
+  assert.equal(getEventListeners(entering.signal, "abort").length, 0);
 
   // A long-lived owner signal must not retain stopped readers or completed
   // native blob loads. Reopening a decoder reinstalls cancellation handling.
@@ -346,6 +370,21 @@ try {
   await read(evicted.input, largeUrls[1], 0, 1);
   assert.equal(requests.length, beforeMiss + 2, "least recently used source is evicted when exceeding 64 MiB");
   evicted.abort.abort();
+  // Gallery speculation must not push out a retained replay or next slide.
+  const retainedUrl = file(5 * MiB), releaseRetained = retainMotionSource(retainedUrl);
+  await fill(retainedUrl);
+  for (let i = 0; i < 3; i++) await fill(file(24 * MiB));
+  const retained = loader(retainedUrl), beforeRetained = requests.length;
+  await retained.input.open();
+  await read(retained.input, retainedUrl, 0, files.get(retainedUrl).size);
+  assert.equal(requests.length, beforeRetained, 'retained playback bytes survive more than 64 MiB of speculation');
+  retained.abort.abort();
+  releaseRetained();
+  for (let i = 0; i < 3; i++) await fill(file(24 * MiB));
+  const released = loader(retainedUrl), beforeReleased = requests.length;
+  await released.input.open();
+  assert.equal(requests.length, beforeReleased + 1, 'released sources become evictable again');
+  released.abort.abort();
   const metadataUrl = file(1), metadata = loader(metadataUrl);
   await metadata.input.open();
   metadata.abort.abort();

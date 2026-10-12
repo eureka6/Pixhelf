@@ -1,4 +1,5 @@
 import type AVPlayer from "@libmedia/avplayer/AVPlayer";
+import { SharedDownloads } from "./sharedDownloads";
 
 type ReadBuffer = Parameters<InstanceType<typeof AVPlayer.IOLoader.CustomIOLoader>["read"]>[0];
 const IO_END = -1048576;
@@ -9,6 +10,7 @@ const CACHE_SOURCE_LIMIT = 32;
 const EMPTY_BYTES = new Uint8Array(0);
 type CachedSource = { length: bigint; blocks: Map<number, Uint8Array>; bytes: number };
 const cachedSources = new Map<string, CachedSource>();
+const retainedSources = new Map<string, number>();
 let cachedBytes = 0;
 let recentSource = "";
 
@@ -38,10 +40,26 @@ function cacheSource(source: string, length: bigint, start?: number, bytes?: Uin
     cachedBytes += bytes.byteLength;
   }
   while (cachedBytes > CACHE_TOTAL_BYTES || cachedSources.size > CACHE_SOURCE_LIMIT) {
-    const oldest = cachedSources.entries().next().value!;
+    // Visible-card speculation must not evict the slideshow's next clip or a
+    // recently used decoder's seek data. The total byte budget remains strict.
+    const oldest = [...cachedSources].find(([key]) => !retainedSources.has(key)) ?? cachedSources.entries().next().value!;
     cachedBytes -= oldest[1].bytes;
     cachedSources.delete(oldest[0]);
   }
+}
+
+export function retainMotionSource(source: string): () => void {
+  retainedSources.set(source, (retainedSources.get(source) ?? 0) + 1);
+  return () => {
+    const owners = (retainedSources.get(source) ?? 1) - 1;
+    if (owners) retainedSources.set(source, owners);
+    else retainedSources.delete(source);
+  };
+}
+
+export function isMotionCached(source: string): boolean {
+  const entry = cachedSource(source);
+  return Boolean(entry && entry.bytes === Number(entry.length));
 }
 
 function cancelled() { return new DOMException("Playback cancelled", "AbortError"); }
@@ -283,35 +301,10 @@ async function loadMotionBlob(source: string, signal: AbortSignal): Promise<Blob
   } finally { await reader.stop(); }
 }
 
-type MotionLoad = { abort: AbortController; promise: Promise<Blob | undefined>; consumers: number };
-const motionLoads = new Map<string, MotionLoad>();
+const motionLoads = new SharedDownloads<Blob | undefined>();
 
 // A visible-card preload and its player share one download. Cancelling either
 // owner releases only that owner; leaving both cancels the remaining network IO.
 export function motionBlob(source: string, signal: AbortSignal): Promise<Blob | undefined> {
-  if (signal.aborted) return Promise.reject(cancelled());
-  let load = motionLoads.get(source);
-  if (!load || load.abort.signal.aborted) {
-    const abort = new AbortController();
-    const current: MotionLoad = { abort, consumers: 0, promise: loadMotionBlob(source, abort.signal) };
-    current.promise = current.promise.finally(() => {
-      if (motionLoads.get(source) === current) motionLoads.delete(source);
-    });
-    motionLoads.set(source, current);
-    load = current;
-  }
-  const current = load;
-  current.consumers++;
-  return new Promise((resolve, reject) => {
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      signal.removeEventListener("abort", abort);
-      if (--current.consumers === 0) current.abort.abort();
-    };
-    const abort = () => { release(); reject(cancelled()); };
-    signal.addEventListener("abort", abort, { once: true });
-    current.promise.then(value => { release(); resolve(value); }, error => { release(); reject(error); });
-  });
+  return motionLoads.get(source, signal, signal => loadMotionBlob(source, signal));
 }

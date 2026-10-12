@@ -54,8 +54,9 @@ async function playing(card) {
 
 async function finished(card) {
   const player = await card.locator(".media-player-surface").elementHandle();
-  await card.page().waitForFunction(player => player.dataset.playerState === "destroyed", player, { timeout: 10_000 });
-  assert.equal(await player.evaluate(player => player.isConnected), false);
+  await card.locator('.media-preview[data-playback-state="ended"]').waitFor({ timeout: 10_000 });
+  await card.page().waitForFunction(player => player.dataset.playerState === "paused", player);
+  assert.equal(await player.evaluate(player => player.isConnected), true, 'completed clips retain a paused decoder for replay');
   assert.equal(await card.locator(".media-preview").getAttribute("data-failed"), null);
   assert.equal(await card.locator(".media-preview").getAttribute("data-playing"), "false");
 }

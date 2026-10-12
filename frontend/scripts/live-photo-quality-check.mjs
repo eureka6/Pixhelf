@@ -78,7 +78,8 @@ try {
     // This multi-megabyte clip exercises many network ranges. Replay must work
     // from retained original bytes even though browser routing disables HTTP cache.
     const player = await media.locator(".media-player-surface").elementHandle();
-    await page.waitForFunction(element => element.dataset.playerState === "destroyed", player, { timeout: 15000 });
+    await media.locator('.media-preview[data-playback-state="ended"]').waitFor({ timeout: 15000 });
+    await page.waitForFunction(element => element.dataset.playerState === "paused", player);
     const completedRequests = requests.filter(request => request.path === "/original-motion.mp4");
     const rangeRequests = completedRequests.filter(request => request.method === "GET");
     assert(rangeRequests.length >= 1 && rangeRequests.length <= 4, "continuous playback streams ranges instead of requesting each cache block separately");
@@ -87,7 +88,9 @@ try {
     await media.dispatchEvent("pixhelf:media-preview-play");
     await page.waitForFunction(() => document.querySelector('.viewer-media .media-preview[data-playing="true"] canvas'));
     const replay = await media.locator(".media-player-surface").elementHandle();
-    await page.waitForFunction(element => element.dataset.playerState === "destroyed", replay, { timeout: 15000 });
+    assert(await player.evaluate(element => element === document.querySelector('.viewer-media .media-player-surface')), 'replay keeps the full-resolution decoder');
+    await media.locator('.media-preview[data-playback-state="ended"]').waitFor({ timeout: 15000 });
+    await page.waitForFunction(element => element.dataset.playerState === "paused", replay);
     assert.deepEqual(requests.filter(request => request.path === "/original-motion.mp4"), completedRequests,
       "a full replay must issue no new HEAD or GET requests");
     assert.deepEqual(decoderRequests, [], "native-supported Live Photos must never load the ordinary video decoder");

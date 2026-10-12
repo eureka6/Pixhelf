@@ -7,19 +7,22 @@ export const MANAGEMENT_CHANGED = "pixhelf:management-changed";
 export const MAX_SELECTION = 500;
 export type ManagementAction = "favorite" | "move" | "copy" | "trash" | "restore";
 export type ManagementKind = "images" | "albums";
+export type ManagementOptions = { destination?: string; favorite?: boolean; kind?: ManagementKind; duplicateKeepers?: Record<string, string> };
 export type BatchResult = { id: string; ok: boolean; error: string | null };
 export type TrashItem = { id: string; name: string; originalPath: string; deletedAt: number; size: number; fileCount: number; album?: boolean };
 
 export async function managementRequest(path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+  const timeout = AbortSignal.timeout(body === undefined ? 30_000 : 900_000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response = await fetch(`/api/management${path}`, {
     method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(body === undefined ? 30_000 : 900_000),
+    signal: requestSignal,
     headers: body === undefined ? {} : { "Content-Type": "application/json", "X-Pixhelf-Origin": location.origin,
       ...(authentication.csrfToken ? { "X-CSRF-Token": authentication.csrfToken } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (response.status === 401) requireLogin();
-  const payload = await response.json().catch(() => null);
+  const payload = await response.json().catch(() => { requestSignal.throwIfAborted(); return null; });
   if (!response.ok) throw new Error(payload?.error ?? "操作失败，请刷新后重试");
   return payload;
 }
@@ -27,7 +30,8 @@ export async function managementRequest(path: string, body?: unknown, signal?: A
 type ManagementContextValue = {
   favoriteIds: ReadonlySet<string>; favoriteAlbums: ReadonlySet<string>; privateAlbums: ReadonlySet<string>; trashCount: number | undefined; ready: boolean; error: string;
   busy: boolean; refresh: () => Promise<void>; notify: (message: string, error?: boolean) => void;
-  run: (action: ManagementAction, ids: string[], options?: { destination?: string; favorite?: boolean; kind?: ManagementKind }) => Promise<BatchResult[]>;
+  progress: { completed: number; total: number } | null;
+  run: (action: ManagementAction, ids: string[], options?: ManagementOptions) => Promise<BatchResult[]>;
   mutate: (path: string, body: unknown) => Promise<unknown>;
   download: (ids: string[], kind?: ManagementKind) => Promise<void>;
 };
@@ -46,6 +50,7 @@ export function ManagementProvider({ children }: { children: ComponentChildren }
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
   const running = useRef(false);
   const revision = useRef(0);
   const [notice, setNotice] = useState<{ message: string; error: boolean } | null>(null);
@@ -75,17 +80,30 @@ export function ManagementProvider({ children }: { children: ComponentChildren }
     const timer = window.setTimeout(() => setNotice(null), 5000);
     return () => clearTimeout(timer);
   }, [notice]);
-  const run = useCallback(async (action: ManagementAction, ids: string[], options = {}) => {
+  const run = useCallback(async (action: ManagementAction, ids: string[], options: ManagementOptions = {}) => {
     if (running.current) throw new Error("请等待当前操作完成");
     running.current = true; setBusy(true);
+    setProgress({ completed: 0, total: ids.length });
     try {
-      const value = await managementRequest("/batch", { ids, action, ...options }) as { results?: BatchResult[] } | null;
-      const results = value?.results;
-      if (!Array.isArray(results) || results.length !== ids.length || !results.every((item, index) => item.id === ids[index] && typeof item.ok === "boolean" && (item.error === null || typeof item.error === "string"))) throw new Error("无法确认操作结果，请刷新图库查看");
+      const results: BatchResult[] = [];
+      for (let offset = 0; offset < ids.length; offset += MAX_SELECTION) {
+        const batch = ids.slice(offset, offset + MAX_SELECTION);
+        const duplicateKeepers = options.duplicateKeepers && Object.fromEntries(batch.map(id => [id, options.duplicateKeepers![id]]));
+        try {
+          const value = await managementRequest("/batch", { action, ...options, duplicateKeepers, ids: batch }) as { results?: BatchResult[] } | null;
+          if (!Array.isArray(value?.results) || value.results.length !== batch.length || !value.results.every((item, index) => item.id === batch[index] && typeof item.ok === "boolean" && (item.error === null || typeof item.error === "string"))) throw new Error("无法确认操作结果，请刷新图库查看");
+          results.push(...value.results);
+          setProgress({ completed: results.length, total: ids.length });
+        } catch (reason) {
+          const error = reason instanceof Error ? reason.message : "操作中断，请刷新查看结果";
+          results.push(...ids.slice(offset).map(id => ({ id, ok: false, error })));
+          break;
+        }
+      }
       await refresh();
       window.dispatchEvent(new CustomEvent(MANAGEMENT_CHANGED, { detail: action }));
       return results;
-    } finally { running.current = false; setBusy(false); }
+    } finally { running.current = false; setBusy(false); setProgress(null); }
   }, [refresh]);
   const mutate = useCallback(async (path: string, body: unknown) => {
     if (running.current || authentication.guest) throw new Error("当前无法操作，请稍后重试");
@@ -109,7 +127,7 @@ export function ManagementProvider({ children }: { children: ComponentChildren }
       notify(`已开始下载 ${ids.length} 项`);
     } finally { running.current = false; setBusy(false); }
   }, [notify]);
-  const value = useMemo(() => ({ favoriteIds, favoriteAlbums, privateAlbums, mutate, trashCount, ready, error, busy, refresh, notify, run, download }), [favoriteIds, favoriteAlbums, privateAlbums, mutate, trashCount, ready, error, busy, refresh, notify, run, download]);
+  const value = useMemo(() => ({ favoriteIds, favoriteAlbums, privateAlbums, mutate, trashCount, ready, error, busy, progress, refresh, notify, run, download }), [favoriteIds, favoriteAlbums, privateAlbums, mutate, trashCount, ready, error, busy, progress, refresh, notify, run, download]);
   return <ManagementContext.Provider value={value}>{children}{notice && <div className="management-notice" data-error={notice.error} role={notice.error ? "alert" : "status"}>
     <span>{notice.message}</span><button type="button" aria-label="关闭操作提示" onClick={() => setNotice(null)}><X size={17} /></button>
   </div>}</ManagementContext.Provider>;

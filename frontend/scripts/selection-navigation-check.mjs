@@ -69,6 +69,8 @@ export async function checkSelectionNavigation(context, origin) {
     await page.goBack();
     await none();
     assert.equal(page.url(), initialUrl);
+    // Popstate restores the reading position on the next animation frame.
+    await page.waitForFunction(scroll => Math.abs(scrollY - scroll) < 2, scroll);
     assert(Math.abs(await page.evaluate(() => scrollY) - scroll) < 2, "canceling selection preserves scroll");
     await page.goForward();
     await first.waitFor();

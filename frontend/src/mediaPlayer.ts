@@ -17,7 +17,7 @@ export type PlayerCallbacks = {
 };
 
 export type VideoPlayer = Pick<MediaPlayer, "play" | "pause" | "seek" | "volume" | "rate" | "captureFrame" | "destroy">;
-type MediaPlayerOptions = { sourceResolution?: boolean; retainBytes?: boolean; quickStart?: boolean };
+type MediaPlayerOptions = { sourceResolution?: boolean; retainBytes?: boolean; quickStart?: boolean; originalBlob?: Blob };
 
 const assetBase = import.meta.env.DEV
   ? new URL("/assets/libmedia/", location.origin).href
@@ -46,7 +46,9 @@ export class MediaPlayer {
   private timeout = 0;
   private clock = 0;
   private playing = false;
+  private wantsPlay = false;
   private loaded = false;
+  private rendered = false;
   private duration = 0;
   private volumeValue = 1;
   private rateValue = 1;
@@ -113,6 +115,7 @@ export class MediaPlayer {
     engine.setRenderMode(cover ? 1 : 0);
     engine.on("firstVideoRendered", () => {
       if (this.disposed || this.failed) return;
+      this.rendered = true;
       this.resizeSurface(true);
       this.callbacks.frame?.();
     });
@@ -136,7 +139,12 @@ export class MediaPlayer {
     engine.on("time", timestamp => this.updateTime(timestamp));
     engine.on("error", error => this.fail(error));
     engine.on("timeout", () => this.fail(new Error("视频加载超时，请重试。")));
-    const input = createMediaSource(Player, source, filename, this.sourceAbort.signal, this.options.retainBytes);
+    // Completed Live Photo downloads are local files. Sending every cached
+    // read through CustomIOLoader still incurs main-thread/worker round trips
+    // during HEVC probing and seeking, despite issuing no HTTP requests.
+    const input = this.options.originalBlob
+      ? new File([this.options.originalBlob], filename, { type: this.options.originalBlob.type })
+      : createMediaSource(Player, source, filename, this.sourceAbort.signal, this.options.retainBytes);
     await engine.load(input, {
       maxProbeDuration: this.options.quickStart ? 0.1 : undefined,
       formatOptions: this.options.quickStart ? { fastOpen: true } : undefined,
@@ -234,19 +242,41 @@ export class MediaPlayer {
   }
 
   play() {
+    this.wantsPlay = true;
     // Resume the audio context directly in the click/tap call stack.
     if (!this.muted && this.engine?.isSuspended()) void this.engine.resume().catch(error => this.fail(error));
     this.enqueue(async engine => {
-      if (this.playing) return;
+      if (!this.wantsPlay) return;
+      if (this.playing) {
+        this.setState("playing");
+        if (this.rendered) this.callbacks.frame?.();
+        return;
+      }
       this.setState("loading");
       await engine.play({ audio: !this.muted, video: true, subtitle: !this.muted });
+      if (!this.disposed && this.rendered) this.callbacks.frame?.();
       if (!this.disposed && !engine.hasVideo()) throw new Error("暂时无法播放此视频的编码，可下载原视频后播放。");
       if (!this.disposed && !this.muted) this.callbacks.audioUnsupported?.(
         engine.getStreams().some(stream => stream.codecparProxy.codecType === 1) && !engine.hasAudio());
     });
   }
 
-  pause() { this.enqueue(async engine => { if (this.playing) await engine.pause(); }); }
+  pause() {
+    this.wantsPlay = false;
+    this.enqueue(async engine => {
+      if (this.wantsPlay) return;
+      if (this.playing) await engine.pause();
+      else if (this.container.dataset.playerState !== "ended") this.setState("paused");
+    });
+  }
+  prepareReplay() {
+    this.wantsPlay = false;
+    this.enqueue(async engine => {
+      if (!this.loaded) return;
+      await engine.seek(0n);
+      if (!this.disposed) await engine.pause();
+    });
+  }
   seek(seconds: number) {
     this.enqueue(async engine => {
       if (this.loaded && this.container.dataset.playerState !== "ready") {
@@ -263,9 +293,22 @@ export class MediaPlayer {
     if (!this.disposed && this.loaded) this.engine?.setPlaybackRate(value);
   }
 
+  attach(host: HTMLDivElement, sourceResolution: boolean) {
+    if (this.disposed) return;
+    this.resize.disconnect();
+    this.host = host;
+    this.options.sourceResolution = sourceResolution;
+    host.append(this.container);
+    this.resize.observe(host);
+    this.resizeSurface();
+  }
+
+  get pixelCount(): number { return this.sourcePixels; }
+
   destroy() {
     if (this.disposed) return;
     this.disposed = true;
+    this.wantsPlay = false;
     window.clearTimeout(this.timeout);
     window.clearInterval(this.clock);
     this.resize.disconnect();
@@ -275,6 +318,7 @@ export class MediaPlayer {
     this.container.hidden = true;
     this.container.remove();
     this.sourceAbort.abort();
+    this.options.originalBlob = undefined;
     void this.pending.then(async () => {
       const engine = this.engine;
       if (!engine) return;

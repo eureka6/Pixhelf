@@ -44,6 +44,11 @@ npm run live-photo-check
   desktop and phone sizes. Screenshot pixels must show a moving picture; playback
   clocks alone cannot pass. It covers loading indicators, opening during loading
   or after playback, A → B → A interaction, viewer navigation and click/tap replay.
+- `live-photo-revisit-check` checks desktop/phone handoffs during playback,
+  immediate reopening, replay at the end event and returning after six distinct
+  clips. It verifies the same decoder, no flashing loading bar, no repeat
+  requests, moving pixels, feedback for sustained stalls and page-exit cleanup.
+  Pass MOV paths after `--` to exercise real paired files.
 - `live-photo-webkit-check` runs the same application checks in WebKit.
 
 Both suites share browser setup, sample loading and original-byte Range responses
@@ -59,8 +64,11 @@ in `../live-photo-fixture.mjs`. Optional environment variables:
 For example, set `PIXHELF_LIVE_SAMPLE` to
 `/path/to/Live/Apple/2023-12-27_12-30-56` or
 `/path/to/Live/motionphoto/samsung-one-ui-6`. These original-source compatibility
-checks use libmedia with self-hosted Wasm modules. Replays create
-a fresh player, and the app checks verify orientation and visible motion.
+checks use libmedia with self-hosted Wasm modules. Recently viewed clips reuse
+paused decoders across cards and viewers; interrupted playback resumes while
+completed clips replay from the beginning. The cache keeps at most 12 players
+and 32 Mi pixels of decoded frame dimensions, with a five-minute idle timeout.
+The app checks verify orientation and visible motion.
 
 ## Original bytes and caching
 

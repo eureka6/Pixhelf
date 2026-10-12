@@ -34,6 +34,7 @@ export class LivePhotoPlayer {
   private wantsPlay = false;
   private playPending = false;
   private framed = false;
+  private framePending = true;
   private frame = 0;
   private timeout = 0;
   private stallTimer = 0;
@@ -42,6 +43,8 @@ export class LivePhotoPlayer {
   private lastPaint = -Infinity;
   private lastTime = -1;
   private objectUrl: string | undefined;
+  private originalBlob: Blob | undefined;
+  private paint: FrameRequestCallback | undefined;
 
   constructor(private host: HTMLDivElement, private source: string,
     private callbacks: PlayerCallbacks, private fullSize: boolean) {
@@ -89,6 +92,7 @@ export class LivePhotoPlayer {
     });
     const blob = await motionBlob(this.source, this.sourceAbort.signal);
     if (this.disposed) return;
+    this.originalBlob = blob;
     const native = await supportsNativeMotion(this.source, blob);
     if (this.disposed) return;
     if (!native) { this.useFallback(); return; }
@@ -96,12 +100,13 @@ export class LivePhotoPlayer {
     // Some browsers accept a container but expose only its audio track. A
     // "playing" event alone must not hide the loader or stall the photo forever.
     window.clearTimeout(this.timeout);
-    this.timeout = window.setTimeout(() => this.useFallback(), 8000);
+    if (this.wantsPlay) this.timeout = window.setTimeout(() => this.useFallback(), 8000);
     const context = this.canvas.getContext("2d", { alpha: false });
     if (!context) { this.useFallback(); return; }
     // Browser-decoded frames already include the MOV display matrix. Copy them
     // without another rotation, avoiding black HEVC surfaces during photo zoom.
-    const paint = (now: number) => {
+    const paint = this.paint = (now: number) => {
+      this.frame = 0;
       if (this.disposed || this.nativeAbort.signal.aborted) return;
       if (video.readyState >= 2 && !video.seeking) {
         if (this.wantsPlay && video.paused && !video.ended && !this.playPending && this.resumeAttempts < 2) {
@@ -122,10 +127,14 @@ export class LivePhotoPlayer {
           this.resumeAttempts = 0;
           this.surface.dataset.currentTime = String(video.currentTime);
           this.setState("playing");
-          if (!this.framed) { this.framed = true; this.callbacks.frame?.(); }
+          if (!this.framed || this.framePending) {
+            this.framed = true;
+            this.framePending = false;
+            this.callbacks.frame?.();
+          }
         }
       }
-      if (!this.disposed && !this.nativeAbort.signal.aborted) this.frame = requestAnimationFrame(paint);
+      if (this.wantsPlay && !this.disposed && !this.nativeAbort.signal.aborted) this.frame = requestAnimationFrame(paint);
     };
     this.frame = requestAnimationFrame(paint);
   }
@@ -177,7 +186,7 @@ export class LivePhotoPlayer {
     if (remember) rememberUnsupported(this.source);
     this.releaseNative();
     this.fallback = new MediaPlayer(this.host, this.source, "motion.mov", true, this.callbacks, true,
-      { sourceResolution: this.fullSize, retainBytes: true, quickStart: true });
+      { sourceResolution: this.fullSize, retainBytes: true, quickStart: true, originalBlob: this.originalBlob });
     if (this.wantsPlay) this.fallback.play();
   }
 
@@ -191,7 +200,16 @@ export class LivePhotoPlayer {
   play() {
     if (this.disposed) return;
     this.wantsPlay = true;
+    this.framePending = true;
     if (this.fallback) { this.fallback.play(); return; }
+    if (!this.framed) {
+      this.setState("loading");
+      if (this.paint) {
+        window.clearTimeout(this.timeout);
+        this.timeout = window.setTimeout(() => this.useFallback(), 8000);
+      }
+    }
+    if (!this.frame && this.paint) this.frame = requestAnimationFrame(this.paint);
     if (this.video.readyState < 1 || this.playPending || this.nativeAbort.signal.aborted) return;
     this.playPending = true;
     void this.video.play().catch(error => {
@@ -205,6 +223,43 @@ export class LivePhotoPlayer {
     }).finally(() => { this.playPending = false; });
   }
 
+  pause() {
+    this.wantsPlay = false;
+    if (this.fallback) { this.fallback.pause(); return; }
+    this.video.pause();
+    cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    window.clearTimeout(this.stallTimer);
+    this.setState("paused");
+  }
+
+  prepareReplay() {
+    if (this.disposed) return;
+    this.pause();
+    this.framed = false;
+    this.lastTime = -1;
+    this.lastPaint = -Infinity;
+    this.resumedBuffer = false;
+    this.resumeAttempts = 0;
+    if (this.fallback) this.fallback.prepareReplay();
+    else if (this.video.readyState >= 1) {
+      this.video.currentTime = 0;
+      this.surface.dataset.currentTime = "0";
+    }
+  }
+
+  attach(host: HTMLDivElement, fullSize: boolean) {
+    if (this.disposed) return;
+    this.host = host;
+    this.fullSize = fullSize;
+    if (this.fallback) this.fallback.attach(host, fullSize);
+    else host.append(this.surface);
+  }
+
+  get pixelCount(): number {
+    return this.fallback?.pixelCount ?? this.video.videoWidth * this.video.videoHeight;
+  }
+
   destroy() {
     if (this.disposed) return;
     this.disposed = true;
@@ -212,5 +267,6 @@ export class LivePhotoPlayer {
     this.sourceAbort.abort();
     this.releaseNative();
     this.fallback?.destroy();
+    this.originalBlob = undefined;
   }
 }

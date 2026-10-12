@@ -27,15 +27,21 @@ async function layout(page) {
 async function expectSelectionMode(page, active) {
   await page.waitForFunction(active => document.querySelector(".justified-gallery")?.dataset.selecting === String(active), active);
   assert.equal(await page.locator(".gallery-selection-bar").count(), Number(active), "the toolbar exists only when there is a selection");
-  assert.equal(await page.locator(".selection-summary-toggle, .selection-exit").count(), 0, "selection toolbar omits the count menu and close button");
   if (active) {
+    assert(Number(await page.locator('.gallery-selection-bar').getAttribute('data-selected-count')) > 0);
+    assert.match(await page.locator('.selection-count').textContent(), /^已选 /);
+    assert.equal(await page.getByRole('button', { name: '取消全部选择', exact: true }).count(), 1);
     await page.waitForFunction(() => [...document.querySelectorAll(".photo-card-select")].every(element => getComputedStyle(element).opacity === "1"));
     assert(await page.locator(".photo-card-select").evaluateAll(elements => elements.every(element => getComputedStyle(element).opacity === "1")), "the first selection reveals every selector");
     assert.equal(await page.locator(".bottom-selection .gallery-selection-bar").count(), 1, "selection actions live at the bottom");
     const bar = await page.locator(".gallery-selection-bar").boundingBox();
-    assert(bar.y >= 0 && bar.y + bar.height <= page.viewportSize().height
-      && page.viewportSize().height - bar.y - bar.height <= 32, "selection actions stay near the bottom edge");
-    assert(await page.locator(".topbar-actions").evaluate(element => getComputedStyle(element).display !== "none"), "topbar tools remain available during selection");
+    const navigation = await page.locator('.mobile-bottom-nav').count() ? await page.locator('.mobile-bottom-nav').boundingBox() : null;
+    const collapsed = await page.locator('.bottom-dock').getAttribute('data-navigation-hidden') === 'true';
+    const bottom = navigation && !collapsed ? navigation.y : page.viewportSize().height;
+    assert(bar.y >= 0 && bar.y + bar.height <= bottom && bottom - bar.y - bar.height <= 32,
+      "selection actions stay above bottom navigation or the desktop bottom edge");
+    assert(await page.locator(navigation ? '.mobile-bottom-nav' : '.topbar-actions').evaluate(element => getComputedStyle(element).display !== 'none'),
+      "navigation tools remain available during selection");
     assert(await page.locator(".selection-actions button").evaluateAll(buttons => buttons.every(button => {
       const rect = button.getBoundingClientRect(); return rect.width >= 40 && rect.right <= innerWidth;
     })), "selection actions fit the viewport");

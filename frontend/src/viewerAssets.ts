@@ -1,5 +1,6 @@
 import type { GalleryImage } from "./types";
-import { authentication, checkAuthentication, requireLogin } from "./auth";
+import { checkAuthentication } from "./auth";
+import { clearViewerOriginalCache, getViewerOriginalBlob, getViewerOriginalSource, invalidateViewerOriginal } from "./viewerOriginalCache";
 import { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
 export { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
 
@@ -27,6 +28,7 @@ type ViewerImageAsset = {
   status: ViewerAssetStatus;
   lastUsed: number;
   cancel: () => void;
+  release: () => void;
 };
 
 type ViewerRenderAsset = {
@@ -80,9 +82,10 @@ function pruneCache(
   const candidates = [...cache.entries()]
     .filter(([url, asset]) => url !== protectedUrl && asset.status !== "loading")
     .sort(([, first], [, second]) => first.lastUsed - second.lastUsed);
-  for (const [url] of candidates) {
+  for (const [url, asset] of candidates) {
     if (cache.size <= limit) break;
     cache.delete(url);
+    asset.release();
   }
 }
 
@@ -102,6 +105,7 @@ function loadImageAsset(
   cached?.cancel();
 
   const element = new Image();
+  const controller = new AbortController();
   element.decoding = "async";
   element.fetchPriority = priority;
   let resolveAsset: () => void = () => undefined;
@@ -113,15 +117,18 @@ function loadImageAsset(
     status: "loading",
     lastUsed: ++assetClock,
     cancel: () => {
+      controller.abort();
       settle("failed");
       element.removeAttribute("src");
     },
+    release: () => controller.abort(),
   };
   let settled = false;
   let timeout = 0;
   const settle = (status: Exclude<ViewerAssetStatus, "loading">) => {
     if (settled) return;
     settled = true;
+    if (status === "failed") controller.abort();
     window.clearTimeout(timeout);
     element.removeEventListener("load", onLoad);
     element.removeEventListener("error", onError);
@@ -140,6 +147,7 @@ function loadImageAsset(
   };
   const onError = () => {
     if (settled) return;
+    if (cache === originalAssets) invalidateViewerOriginal(url);
     settle("failed");
     // These preload elements are detached, so document-level image error handlers cannot see them.
     void checkAuthentication();
@@ -147,7 +155,11 @@ function loadImageAsset(
   element.addEventListener("load", onLoad);
   element.addEventListener("error", onError);
   cache.set(url, asset);
-  element.src = url;
+  if (cache === originalAssets) {
+    void getViewerOriginalSource(url, controller.signal, priority).then(source => {
+      if (!settled) element.src = source;
+    }).catch(onError);
+  } else element.src = url;
   timeout = window.setTimeout(() => {
     if (settled) return;
     asset.cancel();
@@ -267,24 +279,8 @@ function startNextViewportRenderJob(): void {
     const { asset, attempt, controller, image, key, resolve } = job;
     job.timeout = window.setTimeout(() => cancelViewportRenderJob(job), ASSET_LOAD_TIMEOUT_MS);
     try {
-      const requestOptions: RequestInit & { priority: "high" | "low" } = {
-        cache: authentication.enabled ? "no-cache" : attempt ? "reload" : "force-cache",
-        credentials: "same-origin",
-        priority: asset.priority,
-        signal: controller.signal,
-      };
-      const response = await fetch(viewerOriginalUrl(image, attempt), requestOptions);
+      const blob = await getViewerOriginalBlob(viewerOriginalUrl(image, attempt), controller.signal, asset.priority);
       if (job.cancelled) return;
-      if (!response.ok) {
-        if (response.status === 401) requireLogin();
-        throw new Error(`original request failed: ${response.status}`);
-      }
-      if (!response.headers.get("content-type")?.startsWith("image/")) {
-        throw new Error("original response is not an image");
-      }
-      const blob = await response.blob();
-      if (job.cancelled) return;
-      if (!blob.size) throw new Error("original response is empty");
       const bitmap = await createImageBitmap(blob, {
         imageOrientation: "from-image",
         resizeWidth: asset.width,
@@ -298,6 +294,7 @@ function startNextViewportRenderJob(): void {
       asset.bitmap = bitmap;
       asset.status = "ready";
     } catch {
+      if (!job.cancelled) invalidateViewerOriginal(viewerOriginalUrl(image, attempt));
       asset.status = "failed";
     } finally {
       window.clearTimeout(job.timeout);
@@ -394,6 +391,7 @@ export function releaseViewerAssets(): void {
   cancelUnusedViewportRenderJobs(() => false);
   for (const asset of viewportRenderAssets.values()) asset.bitmap?.close();
   viewportRenderAssets.clear();
+  clearViewerOriginalCache();
 }
 
 export function releaseViewerMedia(container: ParentNode): void {

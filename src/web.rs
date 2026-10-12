@@ -1,3 +1,4 @@
+pub(crate) mod duplicates;
 mod media;
 pub(crate) mod pagination;
 mod readiness;
@@ -347,6 +348,7 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
         .route("/api/gallery", get(gallery_summary))
         .route("/api/categories", get(crate::management::categories::read))
         .route("/api/images", get(images))
+        .route("/api/images/duplicates", get(duplicates::images))
         .route("/api/images/{id}", get(media::image))
         .route(
             "/api/images/similar",

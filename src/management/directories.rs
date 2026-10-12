@@ -211,6 +211,7 @@ pub(super) async fn update(
                             action: if moving { Action::Move } else { Action::Trash },
                             destination: input.destination,
                             favorite: None,
+                            duplicate_keepers: None,
                         },
                         &mut favorites,
                     )?;

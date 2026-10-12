@@ -4,7 +4,7 @@ import { checkAuthentication } from "./auth";
 import { CARD_MENU_EVENT, useCardInteraction } from "./cardInteraction";
 import { Check, Download, Expand, LoaderCircle, Pause, PictureInPicture, Play, RefreshCw, Shrink, Sun, Volume2, VolumeX } from "./icons";
 import { stopMediaPreview } from "./MediaPreview";
-import { MediaPlayer, type VideoPlayer } from "./mediaPlayer";
+import { MediaPlayer, type PlayerState, type VideoPlayer } from "./mediaPlayer";
 import { NativeMediaPlayer } from "./nativeMediaPlayer";
 import { ToolbarPopover } from "./ToolbarPopover";
 import { useVideoGestures } from "./useVideoGestures";
@@ -17,6 +17,10 @@ type VideoPlaybackProps = {
   prepared?: boolean; downloadSource?: string; autoPlay?: boolean;
   playerRef?: { current: VideoPlayer | null };
   onState?: (state: PlaybackState) => void;
+  suspended?: boolean;
+  playbackRequest?: number;
+  onPlaybackState?: (state: PlayerState) => void;
+  onUserPlaybackChange?: (playing: boolean) => void;
   header?: ComponentChildren;
   previousControl?: ComponentChildren;
   nextControl?: ComponentChildren;
@@ -36,9 +40,14 @@ const CONTROLS_IDLE_MS = 2600;
 
 export function VideoPlayback({ source, name, poster, durationHint = 0, prepared = false,
   downloadSource = source, autoPlay = false, playerRef, onState, header, previousControl, nextControl, options, contextMenu, keepControlsVisible = false,
+  suspended = false, playbackRequest = 0, onPlaybackState, onUserPlaybackChange,
 }: VideoPlaybackProps) {
   const ownRef = useRef<VideoPlayer | null>(null);
+  const callbacksRef = useRef({ onPlaybackState, onUserPlaybackChange });
+  callbacksRef.current = { onPlaybackState, onUserPlaybackChange };
   const videoRef = playerRef ?? ownRef;
+  const previousRequest = useRef(playbackRequest);
+  const playbackIntent = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const pictureRef = useRef<HTMLDivElement>(null);
@@ -75,6 +84,8 @@ export function VideoPlayback({ source, name, poster, durationHint = 0, prepared
 
   useLayoutEffect(() => { onState?.(state); }, [state, onState]);
   useLayoutEffect(() => {
+    playbackIntent.current = false;
+    previousRequest.current = playbackRequest;
     update(initialPlayback);
     setControlsVisible(true);
     setRateMenu(false);
@@ -86,13 +97,21 @@ export function VideoPlayback({ source, name, poster, durationHint = 0, prepared
     const Player = prepared ? NativeMediaPlayer : MediaPlayer;
     const video = new Player(containerRef.current!, url.href, name, false, {
       state(next) {
+        callbacksRef.current.onPlaybackState?.(next);
         update({ state: next === "preparing" || next === "loading" || next === "failed" ? next : "ready" });
         if (next === "playing") { stopMediaPreview(); update({ playing: true, ended: false, blocked: false }); }
-        else if (next === "paused" || next === "ended" || next === "failed") update({ playing: false, ended: next === "ended" });
+        else if (next === "paused" || next === "ended" || next === "failed") {
+          if (next !== "paused") playbackIntent.current = false;
+          update({ playing: false, ended: next === "ended" });
+        }
       },
       loaded(duration) { update({ duration }); },
       audioUnsupported(audioUnsupported) { update({ audioUnsupported }); },
-      autoplayBlocked() { update({ blocked: true, playing: false }); },
+      autoplayBlocked() {
+        playbackIntent.current = false;
+        update({ blocked: true, playing: false });
+        callbacksRef.current.onUserPlaybackChange?.(false);
+      },
       frame() { update({ started: true }); },
       time(position) { update({ position }); },
       buffered(buffered) { update({ buffered }); },
@@ -102,15 +121,26 @@ export function VideoPlayback({ source, name, poster, durationHint = 0, prepared
       },
     });
     videoRef.current = video;
-    // Native playback remembers this intent while the background job finishes.
-    if (autoPlay && !document.hidden) video.play();
     return () => {
       video.destroy();
       window.clearTimeout(idleTimer.current);
       window.clearTimeout(feedbackTimer.current);
       if (videoRef.current === video) videoRef.current = null;
     };
-  }, [source, name, attempt, videoRef, prepared, autoPlay]);
+  }, [source, name, attempt, videoRef, prepared]);
+
+  useLayoutEffect(() => {
+    if (suspended) { playbackIntent.current = false; videoRef.current?.pause(); }
+    else if (autoPlay && !ended && !document.hidden) { playbackIntent.current = true; videoRef.current?.play(); }
+  }, [source, name, attempt, prepared, suspended, autoPlay, videoRef, ended]);
+
+  useLayoutEffect(() => {
+    if (playbackRequest && playbackRequest !== previousRequest.current) {
+      videoRef.current?.seek(0);
+      update({ ended: false });
+    }
+    previousRequest.current = playbackRequest;
+  }, [playbackRequest, videoRef]);
 
   useEffect(() => {
     revealControls();
@@ -162,7 +192,12 @@ export function VideoPlayback({ source, name, poster, durationHint = 0, prepared
 
   const togglePlayback = () => {
     if (state === "failed") return;
-    if (playing) videoRef.current?.pause();
+    // A clip still preparing or buffering can already have a pending play.
+    // Space must cancel that intent along with the slideshow's progression.
+    const play = !(playing || ((state === "preparing" || state === "loading") && playbackIntent.current));
+    playbackIntent.current = play;
+    callbacksRef.current.onUserPlaybackChange?.(play);
+    if (!play) videoRef.current?.pause();
     else {
       if (ended) videoRef.current?.seek(0);
       update({ blocked: false, ended: false });

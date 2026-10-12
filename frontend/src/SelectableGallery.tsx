@@ -1,4 +1,4 @@
-import { createPortal, forwardRef } from "preact/compat";
+import { forwardRef } from "preact/compat";
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authentication } from "./auth";
 import { DirectoryTree } from "./DirectoryTree";
@@ -8,6 +8,7 @@ import { MAX_SELECTION, useManagement, type ManagementAction } from "./managemen
 import { stopMediaPreview } from "./MediaPreview";
 import { clearCardFeedback } from "./cardInteraction";
 import { useModalDialog } from "./useModalDialog";
+import { SelectionBar } from "./SelectionBar";
 import type { Album, GalleryImage } from "./types";
 
 export type SelectableGalleryHandle = JustifiedGalleryHandle & { select: (image: GalleryImage) => boolean; selectAll: (images?: GalleryImage[]) => void; clearSelection: () => void };
@@ -129,33 +130,31 @@ export const SelectableGallery = forwardRef<SelectableGalleryHandle, JustifiedGa
     <JustifiedGallery {...props} ref={layoutRef} selection={authentication.guest ? undefined : { active, ids, favoriteIds: manager.favoriteIds, disabled: manager.busy || Boolean(dialog), toggle, change, selectAll: () => selectAll(), clear: exit,
       batch: { allFavorite, favoriteDisabled: !manager.ready, download: downloadSelected, favorite: toggleFavorite,
         move: () => openDialog("move"), copy: () => openDialog("copy"), trash: () => openDialog("trash") } }} />
-    {active && props.toolbarTarget && createPortal(<div className="gallery-selection-bar" role="region" aria-label="所选项目操作" aria-busy={manager.busy}>
-      <div className="selection-actions">
+    <SelectionBar target={props.toolbarTarget} count={selected.length} label="所选项目操作" busy={manager.busy} progress={manager.progress} onClear={exit}
+      messages={(selected.length === MAX_SELECTION || manager.busy || manager.error) && <>
+        {selected.length === MAX_SELECTION && <span className="selection-progress">已达 {MAX_SELECTION} 项上限，其余项目可分批操作</span>}
+        {manager.busy && <span className="selection-progress" role="status"><LoaderCircle className="spin" size={15} />正在处理，请稍候…</span>}
+        {manager.error && <span className="selection-progress" role="alert">{manager.error}<button type="button" onClick={() => void manager.refresh()}>重试</button></span>}
+      </>}>
         <button type="button" title="下载" disabled={manager.busy || !selected.length} onClick={downloadSelected}><Download size={18} /><span>下载</span></button>
         <button type="button" disabled={manager.busy || !selected.length || !manager.ready} title={allFavorite ? "取消收藏" : "收藏"} aria-label={allFavorite ? "取消收藏所选项目" : "收藏所选项目"} onClick={toggleFavorite}><Heart size={18} fill={allFavorite ? "currentColor" : "none"} /><span>{allFavorite ? "取消收藏" : "收藏"}</span></button>
         <button type="button" title="移动" disabled={manager.busy || !selected.length} onClick={() => openDialog("move")}><FolderInput size={18} /><span>移动</span></button>
         <button type="button" className="selection-copy" title="复制" disabled={manager.busy || !selected.length} onClick={() => openDialog("copy")}><Copy size={18} /><span>复制</span></button>
         <button type="button" className="selection-trash" title="移入回收站" disabled={manager.busy || !selected.length} onClick={() => openDialog("trash")}><Trash2 size={18} /><span>删除</span></button>
-      </div>
-      {(selected.length === MAX_SELECTION || manager.busy || manager.error) && <div className="selection-messages">
-        {selected.length === MAX_SELECTION && <span className="selection-progress">已达 {MAX_SELECTION} 项上限，其余项目可分批操作</span>}
-        {manager.busy && <span className="selection-progress" role="status"><LoaderCircle className="spin" size={15} />正在处理，请稍候…</span>}
-        {manager.error && <span className="selection-progress" role="alert">{manager.error}<button type="button" onClick={() => void manager.refresh()}>重试</button></span>}
-      </div>}
-    </div>, props.toolbarTarget)}
+    </SelectionBar>
     {dialog && <SelectionDialog kind={dialog} images={selected} busy={manager.busy} onClose={() => setDialog(null)} onConfirm={destination => void run(dialog, dialog !== "trash" ? { destination } : undefined)} />}
   </>;
 });
 
-export function SelectionDialog({ kind, images = [], selectedAlbums = [], busy, error, onClose, onConfirm }: {
-  kind: "move" | "copy" | "trash"; images?: GalleryImage[]; selectedAlbums?: Album[]; busy: boolean; error?: string; onClose: () => void; onConfirm: (destination?: string) => void;
+export function SelectionDialog({ kind, images = [], selectedAlbums = [], selectionCount, busy, error, onClose, onConfirm }: {
+  kind: "move" | "copy" | "trash"; images?: GalleryImage[]; selectedAlbums?: Album[]; selectionCount?: number; busy: boolean; error?: string; onClose: () => void; onConfirm: (destination?: string) => void;
 }) {
   const dialog = useModalDialog(onClose, { dismissible: !busy });
   const [destination, setDestination] = useState<string | null>(null);
   const label = kind === "move" ? "移动" : kind === "copy" ? "复制" : "移入回收站";
   return <dialog {...dialog} className="selection-dialog" aria-labelledby="selection-dialog-title">
     <header><h2 id="selection-dialog-title">{label}{kind !== "trash" && "到目录"}</h2><button type="button" aria-label="关闭管理对话框" disabled={busy} onClick={onClose}><X size={20} /></button></header>
-    <p className="selection-summary">{selectedAlbums.length ? `${selectedAlbums.length} 个目录 · 包含全部内容` : `${images.length} 项${images.some(image => image.motion) ? " · 含 Live Photo 配套视频" : ""}`}</p>
+    <p className="selection-summary">{selectedAlbums.length ? `${selectedAlbums.length} 个目录 · 包含全部内容` : `${selectionCount ?? images.length} 项${images.some(image => image.motion) ? " · 含 Live Photo 配套视频" : ""}`}</p>
     {kind !== "trash" ? <>
       <DirectoryTree value={destination} onChange={setDestination} excluded={selectedAlbums.map(album => album.path)} disabled={busy} label="目标目录" />
       <div className="selection-destination" title={destination ?? undefined}><FolderInput size={15} /><span>{destination === null ? "选择目标目录" : destination || "图库根目录"}</span></div>
