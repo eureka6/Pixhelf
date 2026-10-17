@@ -1,15 +1,32 @@
 //! Duplicate detection verifies original bytes or complete, oriented pixels.
 //! Thumbnail similarity is intentionally not sufficient for selecting copies.
-use super::*;
+use super::{
+    AppState,
+    models::{ImageView, MAX_QUERY_VALUE_BYTES},
+};
+use crate::{
+    gallery::{GalleryIndex, ImageRecord},
+    management::sharing::ReadState,
+    support::{BoundedCache, mutex_lock},
+};
+use axum::{
+    Json,
+    extract::Query,
+    http::{HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use image::{
     DynamicImage, EncodableLayout, ImageDecoder, ImageReader, Limits, metadata::Orientation,
 };
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufReader, Read},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Fingerprint {
@@ -623,6 +640,10 @@ fn find_groups(records: &[Arc<ImageRecord>], progress: &AtomicUsize) -> (Vec<Gro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{auth::AuthConfig, thumbs::ThumbnailManager};
+    use axum::{Router, body::Body, extract::Request};
+    use tokio::sync::RwLock;
+    use tower::ServiceExt;
 
     #[test]
     fn duplicate_copies_share_one_decode_and_persist_fingerprints() {

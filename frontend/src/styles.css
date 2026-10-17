@@ -1774,3 +1774,18 @@
     transform: none;
   }
 }
+
+.deferred-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 20px;
+}
+
+.deferred-dialog {
+  border: 0;
+  border-radius: 16px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 20px;
+}

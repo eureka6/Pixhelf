@@ -104,7 +104,7 @@ try {
   try {
     await until(() => handoff.requests.some(request => request.path === "/motion/0" && request.method === "GET" && !request.done));
     await play(handoff.page);
-    assert.deepEqual(handoff.requests.filter(request => request.path === "/motion/0").map(request => request.method), ["HEAD", "GET"],
+    assert.deepEqual(handoff.requests.filter(request => request.path === "/motion/0").map(request => request.method), ["GET"],
       "tapping during preload must continue the same download");
   } finally { await handoff.close(); }
   const slideshowHandoff = await fixture(390, { saveData: true });
@@ -122,7 +122,7 @@ try {
     await until(() => slideshowHandoff.requests.some(request => request.path === '/motion/1' && request.method === 'GET' && request.done));
     await slideshowHandoff.page.locator('.image-card[data-image-id="1"]').dispatchEvent('pixhelf:card-touch');
     await slideshowHandoff.page.locator('.image-card[data-image-id="1"] .media-preview[data-playing="true"]').waitFor();
-    assert.deepEqual(slideshowHandoff.requests.filter(request => request.path === '/motion/1').map(request => request.method), ['HEAD', 'GET'],
+    assert.deepEqual(slideshowHandoff.requests.filter(request => request.path === '/motion/1').map(request => request.method), ['GET'],
       'a photo/video slideshow controller handoff preserves the pending next-clip download');
     await slideshowHandoff.page.evaluate(() => window.releaseSlide());
   } finally { await slideshowHandoff.close(); }
@@ -149,7 +149,9 @@ try {
     await cancelled.page.evaluate(() => scrollTo(0, 1700));
     await until(() => cancelled.requests.every(request => request.done));
     await delay(300);
-    assert(cancelled.requests.every(request => request.method === "HEAD"), "leaving the viewport must cancel preloads before fetching the clip");
+    assert(cancelled.requests.every(request => request.method === "GET"), "metadata and bytes use one request");
+    assert.equal(await cancelled.page.evaluate(() => window.isMotionCached('/motion/0')), false,
+      "leaving before the response arrives cancels the body and must not cache the clip");
     assert.equal(await cancelled.page.locator(".media-player-surface").count(), 0);
   } finally { await cancelled.close(); }
   console.log("In-flight slideshow handoff, evicted preload refresh and offscreen cancellation passed");

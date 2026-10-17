@@ -14,6 +14,12 @@ struct PackedFile {
     length: usize,
 }
 
+#[derive(serde::Deserialize)]
+struct CompressedAsset {
+    name: String,
+    filename: String,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let frontend_dir = manifest_dir.join("frontend");
@@ -63,6 +69,14 @@ fn main() {
         &fs::read(packed_dir.join("manifest.json")).expect("read packed asset manifest"),
     )
     .expect("invalid packed asset manifest");
+    let compressed: Vec<CompressedAsset> = serde_json::from_slice(
+        &fs::read(packed_dir.join("http-manifest.json")).expect("read HTTP asset manifest"),
+    )
+    .expect("invalid HTTP asset manifest");
+    let mut compressed: BTreeMap<_, _> = compressed
+        .into_iter()
+        .map(|asset| (asset.name, asset.filename))
+        .collect();
     let mut packed_files = BTreeMap::new();
     let mut embedded = String::from("const ASSET_GROUPS: &[AssetGroup] = &[\n");
     for (index, group) in groups.iter().enumerate() {
@@ -108,11 +122,26 @@ fn main() {
                 )
             }
         };
-        embedded.push_str(&format!("Asset {{ name: {name:?}, source: {source} }},\n"));
+        let brotli = compressed.remove(&name).map_or_else(
+            || "None".to_owned(),
+            |filename| {
+                format!(
+                    "Some(include_bytes!({:?}))",
+                    packed_dir.join(filename).to_string_lossy()
+                )
+            },
+        );
+        embedded.push_str(&format!(
+            "Asset {{ name: {name:?}, source: {source}, brotli: {brotli} }},\n"
+        ));
     }
     assert!(
         packed_files.is_empty(),
         "packed assets missing from frontend output"
+    );
+    assert!(
+        compressed.is_empty(),
+        "compressed assets missing from frontend output"
     );
     embedded.push_str("];\n");
     fs::write(output_dir.join("frontend_assets.rs"), embedded)

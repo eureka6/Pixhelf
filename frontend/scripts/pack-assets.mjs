@@ -10,6 +10,26 @@ if (!assetsArgument || !outputArgument) throw new Error("Usage: pack-assets.mjs 
 const assets = resolve(assetsArgument), output = resolve(outputArgument);
 const cache = new URL("../node_modules/.cache/pixhelf-packed-assets/", import.meta.url);
 const maxGroupBytes = 8 * 1024 * 1024;
+let compressionSerial = 0;
+async function compressedBytes(raw, quality, window = 22) {
+  const key = createHash("sha256").update(`brotli-${process.versions.brotli}-q${quality}-w${window}\0`).update(raw).digest("hex");
+  const cachedPath = new URL(`${key}.br`, cache);
+  let compressed = await readFile(cachedPath).catch(error => {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  });
+  // Validate cached bytes so interrupted or corrupt build caches cannot ship.
+  if (!compressed || !(await decompress(compressed, { maxOutputLength: raw.length }).catch(() => null))?.equals(raw)) {
+    compressed = await compress(raw, { params: {
+      [constants.BROTLI_PARAM_QUALITY]: quality,
+      [constants.BROTLI_PARAM_LGWIN]: window,
+    } });
+    const temporary = new URL(`${key}.${process.pid}.${compressionSerial++}.tmp`, cache);
+    await writeFile(temporary, compressed);
+    await rename(temporary, cachedPath);
+  }
+  return compressed;
+}
 const paths = [];
 async function collect(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -18,9 +38,9 @@ async function collect(directory) {
     else if (entry.isFile()) paths.push(path);
   }
 }
-await collect(join(assets, "libmedia"));
+await collect(assets);
 const groups = new Map();
-for (const path of paths.sort()) {
+for (const path of paths.sort().filter(path => relative(assets, path).startsWith(`libmedia${sep}`))) {
   const name = relative(assets, path).split(sep).join("/");
   // Keep a decoder's plain/SIMD/atomic variants together to compress shared code.
   const key = name.endsWith(".wasm") ? name.replace(/-(simd|atomic)\.wasm$/, ".wasm") : "libmedia/player";
@@ -53,22 +73,7 @@ await Promise.all(Array.from({ length: 4 }, async () => {
     const contents = await Promise.all(sources.map(source => readFile(source.path)));
     const raw = Buffer.concat(contents);
     if (raw.length > maxGroupBytes) throw new Error("Asset group changed while packing");
-    const key = createHash("sha256").update(`brotli-${process.versions.brotli}-q11-w23\0`).update(raw).digest("hex");
-    const cachedPath = new URL(`${key}.br`, cache);
-    let compressed = await readFile(cachedPath).catch(error => {
-      if (error.code !== "ENOENT") throw error;
-      return null;
-    });
-    // Validate cached bytes so interrupted or corrupt build caches cannot ship.
-    if (!compressed || !(await decompress(compressed, { maxOutputLength: raw.length }).catch(() => null))?.equals(raw)) {
-      compressed = await compress(raw, { params: {
-        [constants.BROTLI_PARAM_QUALITY]: 11,
-        [constants.BROTLI_PARAM_LGWIN]: 23,
-      } });
-      const temporary = new URL(`${key}.${process.pid}.${index}.tmp`, cache);
-      await writeFile(temporary, compressed);
-      await rename(temporary, cachedPath);
-    }
+    const compressed = await compressedBytes(raw, 11, 23);
     const filename = `${index}.br`;
     await writeFile(join(output, filename), compressed);
     let offset = 0;
@@ -81,5 +86,22 @@ await Promise.all(Array.from({ length: 4 }, async () => {
   }
 }));
 await writeFile(join(output, "manifest.json"), JSON.stringify(packed));
+// Startup scripts/styles get HTTP representations without per-request work.
+// Wasm variants share most of their code in the packed groups; duplicating
+// every wire representation would add over 20 MiB to the executable.
+const wireSources = paths.filter(path => /\.(js|css)$/.test(path));
+const wire = new Array(wireSources.length);
+let nextWire = 0;
+await Promise.all(Array.from({ length: 4 }, async () => {
+  while (nextWire < wireSources.length) {
+    const index = nextWire++, path = wireSources[index];
+    const raw = await readFile(path);
+    const compressed = await compressedBytes(raw, 9);
+    const filename = `http-${index}.br`;
+    await writeFile(join(output, filename), compressed);
+    wire[index] = { name: relative(assets, path).split(sep).join("/"), filename };
+  }
+}));
+await writeFile(join(output, "http-manifest.json"), JSON.stringify(wire));
 const size = field => packed.reduce((total, group) => total + group[field], 0);
-console.log(`Packed ${paths.length} libmedia assets in ${packed.length} groups: ${size("length")} -> ${size("compressedLength")} bytes`);
+console.log(`Packed ${packed.reduce((sum, group) => sum + group.files.length, 0)} libmedia assets in ${packed.length} groups: ${size("length")} -> ${size("compressedLength")} bytes`);

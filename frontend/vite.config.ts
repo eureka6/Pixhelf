@@ -28,6 +28,11 @@ async function libmediaAsset(name: string, path: URL) {
 
 export default defineConfig({
   base: "./",
+  server: {
+    proxy: {
+      "/api": process.env.PIXHELF_API_TARGET ?? "http://127.0.0.1:3002",
+    },
+  },
   plugins: [{
     name: "libmedia-assets",
     async generateBundle() {
@@ -54,6 +59,7 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     cssCodeSplit: true,
+    manifest: true,
     rollupOptions: {
       output: {
         entryFileNames: "assets/app.js",

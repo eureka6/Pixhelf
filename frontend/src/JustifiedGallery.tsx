@@ -27,8 +27,8 @@ import { useSelectionGestures } from "./selectionGestures";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
 import type { GalleryImage, ImageCardAction } from "./types";
 import { preloadOriginalImage, viewerThumbnailUrl } from "./viewerAssets";
+import { observeGalleryThumbnail, type ThumbnailPriority } from "./galleryLoading";
 
-const CARD_PREFETCH_MARGIN = "1200px 0px";
 const IMAGE_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const READY_THUMBNAIL_CACHE_LIMIT = 2048;
 
@@ -43,9 +43,7 @@ type GalleryResizeAnimation = {
   animations: Animation[];
 };
 
-const CARD_LOAD_CALLBACKS = new WeakMap<Element, () => void>();
 const READY_THUMBNAIL_IDS = new Set<string>();
-let cardLoadObserver: IntersectionObserver | null = null;
 
 function rememberReadyThumbnail(id: string): void {
   READY_THUMBNAIL_IDS.delete(id);
@@ -54,33 +52,6 @@ function rememberReadyThumbnail(id: string): void {
     const oldest = READY_THUMBNAIL_IDS.values().next().value;
     if (oldest !== undefined) READY_THUMBNAIL_IDS.delete(oldest);
   }
-}
-
-function observeCardLoad(element: Element, load: () => void): () => void {
-  if (!("IntersectionObserver" in window)) {
-    load();
-    return () => undefined;
-  }
-  if (!cardLoadObserver) {
-    cardLoadObserver = new IntersectionObserver(
-      (entries, observer) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const callback = CARD_LOAD_CALLBACKS.get(entry.target);
-          CARD_LOAD_CALLBACKS.delete(entry.target);
-          observer.unobserve(entry.target);
-          callback?.();
-        }
-      },
-      { rootMargin: CARD_PREFETCH_MARGIN },
-    );
-  }
-  CARD_LOAD_CALLBACKS.set(element, load);
-  cardLoadObserver.observe(element);
-  return () => {
-    CARD_LOAD_CALLBACKS.delete(element);
-    cardLoadObserver?.unobserve(element);
-  };
 }
 
 export type GallerySelection = {
@@ -330,7 +301,8 @@ const ImageCard = memo(function ImageCard({
   const loaded = loadState === "loaded";
   const failed = loadState === "failed";
   const [attempt, setAttempt] = useState(0);
-  const [loadRequested, setLoadRequested] = useState(eager || alreadyReady);
+  const [priority, setPriority] = useState<ThumbnailPriority | null>(eager || alreadyReady ? highPriority ? "high" : "auto" : null);
+  const loadRequested = priority !== null;
   const cardRef = useRef<HTMLElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const retryTimerRef = useRef(0);
@@ -339,16 +311,13 @@ const ImageCard = memo(function ImageCard({
   }, [image.id, onOpen]);
 
   useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
-  useEffect(() => {
-    if (eager) {
-      setLoadRequested(true);
-      return;
-    }
-    if (loadRequested) return;
+  useLayoutEffect(() => {
+    if (eager) setPriority(current => current ?? "auto");
+    if (loaded || failed) return;
     const card = cardRef.current;
     if (!card) return;
-    return observeCardLoad(card, () => setLoadRequested(true));
-  }, [eager, loadRequested]);
+    return observeGalleryThumbnail(card, next => setPriority(current => current === "high" ? current : next));
+  }, [eager, failed, loaded]);
 
   const thumbnailUrl = viewerThumbnailUrl(image);
   const imageUrl = attempt ? `${thumbnailUrl}?retry=${attempt}` : thumbnailUrl;
@@ -391,7 +360,7 @@ const ImageCard = memo(function ImageCard({
       data-loading={loadRequested && !loaded && !failed}
       data-retrying={loadState === "retrying"}
       data-eager={eager}
-      data-high-priority={highPriority}
+      data-high-priority={priority === "high"}
       data-selected={selected}
       style={{
         ...layoutStyle,
@@ -423,7 +392,7 @@ const ImageCard = memo(function ImageCard({
           alt={image.name}
           loading="eager"
           decoding="async"
-          fetchPriority={highPriority ? "high" : "auto"}
+          fetchPriority={priority ?? "auto"}
           width={image.width}
           height={image.height}
           draggable={false}

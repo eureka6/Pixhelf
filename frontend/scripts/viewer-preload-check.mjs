@@ -61,7 +61,7 @@ const browser = await chromium.launch({
 });
 let checks = 0;
 
-async function fixture(mobile = false, holdThumbnails = false) {
+async function fixture(mobile = false, holdThumbnails = false, connection = { effectiveType: "4g", downlink: 10, rtt: 20 }) {
   const page = await browser.newPage({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
     hasTouch: mobile, isMobile: mobile, reducedMotion: "reduce" });
   page.setDefaultTimeout(3000);
@@ -102,6 +102,7 @@ async function fixture(mobile = false, holdThumbnails = false) {
       histogram: Object.fromEntries(["red", "green", "blue", "luminance"].map(key => [key, Array(256).fill(0)])) } });
     return route.fulfill({ json: { favoriteIds: [], favoriteAlbums: [], privateAlbums: [], trashCount: 0 } });
   });
+  await page.addInitScript(connection => Object.defineProperty(navigator, "connection", { configurable: true, value: connection }), connection);
   await page.goto("https://viewer.test/");
   await page.addStyleTag({ content: css });
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
@@ -155,6 +156,38 @@ async function holdBitmapDecodes(page) {
 }
 
 try {
+  for (const connection of [{ rtt: 300, effectiveType: "4g" }, { effectiveType: "3g" }, { saveData: true }, { downlink: 1 }]) {
+    const limited = await fixture(false, false, connection);
+    try {
+      await limited.open(40);
+      await limited.waitForPath(path => path === "/api/images/photo-40.jpg");
+      await limited.waitForPath(path => path === "/api/images/photo-42/thumbnail");
+      limited.originals.resolve();
+      await limited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
+      await limited.page.waitForTimeout(100);
+      assert(!limited.requests.includes("/api/images/photo-41.jpg"), "constrained links reserve original bandwidth for the displayed photo");
+      assert(!limited.requests.includes("/api/images/photo-43/thumbnail"), "constrained links keep a smaller thumbnail window");
+      await limited.next("photo-41");
+      await limited.waitForPath(path => path === "/api/images/photo-41.jpg");
+      checks++;
+    } finally { await limited.close(); }
+  }
+  const prioritized = await fixture();
+  try {
+    await prioritized.open(40);
+    await prioritized.waitForPath(path => path === "/api/images/photo-40.jpg");
+    await prioritized.page.waitForTimeout(100);
+    assert(!prioritized.requests.includes("/api/images/photo-41.jpg"), "neighbors wait until the active original finishes");
+    await prioritized.page.route("**/photo-41.jpg", () => {});
+    prioritized.originals.resolve();
+    await prioritized.waitForPath(path => path === "/api/images/photo-41.jpg");
+    await prioritized.page.waitForTimeout(100);
+    assert(!prioritized.requests.includes("/api/images/photo-39.jpg"), "only one neighboring original downloads at a time");
+    await prioritized.dismissViewer();
+    checks++;
+  } finally { await prioritized.close(); }
+  console.log("Network priority: high RTT, limited bandwidth, data saver and sequential original prefetch passed");
+
   const paginationRace = await fixture();
   try {
     await paginationRace.open(40);
@@ -331,19 +364,20 @@ try {
 
   const background = await fixture(false, true);
   try {
+    await background.page.route("**/photo-40.jpg", route => route.fulfill({ contentType: "image/jpeg", body: photo }));
     await background.open(40);
-    await background.waitForPath(path => path === "/api/images/photo-42.jpg");
+    await background.waitForPath(path => path === "/api/images/photo-41.jpg");
     await background.waitForPath(path => path === "/api/images/photo-50/thumbnail");
     await setVisibility(background.page, "hidden");
     assert.deepEqual(await background.page.evaluate(() => [window.originalStatus("photo-40"),
-      window.originalStatus("photo-42"), window.thumbnailStatus("photo-50")]), ["loading", "idle", "idle"],
+      window.originalStatus("photo-41"), window.thumbnailStatus("photo-50")]), ["ready", "idle", "idle"],
     "backgrounding retains the current download and discards speculative neighbors");
     await setVisibility(background.page, "visible");
-    await background.waitForPath(path => path === "/api/images/photo-42.jpg", 2);
+    await background.waitForPath(path => path === "/api/images/photo-41.jpg", 2);
     await background.page.evaluate(() => dispatchEvent(new Event("pagehide")));
-    assert.equal(await background.page.evaluate(() => window.originalStatus("photo-42")), "idle");
+    assert.equal(await background.page.evaluate(() => window.originalStatus("photo-41")), "idle");
     await background.page.evaluate(() => dispatchEvent(new Event("pageshow")));
-    await background.waitForPath(path => path === "/api/images/photo-42.jpg", 3);
+    await background.waitForPath(path => path === "/api/images/photo-41.jpg", 3);
     await background.dismissViewer();
     const count = background.requests.filter(path => path.endsWith(".jpg")).length;
     await setVisibility(background.page, "visible");
@@ -432,12 +466,12 @@ try {
   try {
     const probes = images.map((image, i) => ({ ...image, id: `probe-${i}` }));
     await pending.page.evaluate(items => window.prepareImages(items, 10), probes);
-    await pending.waitForPath(path => path === "/api/images/probe-12.jpg");
+    await pending.waitForPath(path => path === "/api/images/probe-10.jpg");
     await pending.page.evaluate(items => window.prepareImages(items, 60), probes);
     assert.equal(await pending.page.evaluate(() => window.thumbnailStatus("probe-10")), "idle",
       "a pending thumbnail outside the new navigation window must be discarded");
     await pending.page.waitForFunction(() => window.thumbnailStatus("probe-60") === "loading");
-    await pending.waitForPath(path => path === "/api/images/probe-62.jpg");
+    await pending.waitForPath(path => path === "/api/images/probe-60.jpg");
     assert(pending.failed.includes("/api/images/probe-10/thumbnail"), "discarded thumbnails must release their network request");
     assert(pending.failed.includes("/api/images/probe-10.jpg"), "old original preloads must release their network request too");
     await pending.page.evaluate(items => window.prepareImages(items, 10), probes);
@@ -475,6 +509,7 @@ try {
 
   const boundary = await fixture();
   try {
+    await boundary.page.route("**/photo-59.jpg", route => route.fulfill({ contentType: "image/jpeg", body: photo }));
     await boundary.open(59);
     await boundary.waitForPath(path => path.startsWith("/api/images?"));
     await boundary.waitForPath(path => path === "/api/images/photo-58.jpg");

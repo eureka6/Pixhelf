@@ -59,4 +59,4 @@ chmod +x pixhelf-amd64-linux
 
 测试版在 **Actions → Build pixhelf-local → Run workflow** 手动构建 amd64 musl Docker 镜像，只发布 `<Forgejo域名>/<所有者>/pixhelf-local:latest`，无需另建分支。配置有 `write:package` 权限的 `REGISTRY_TOKEN` 即可，`REGISTRY_USERNAME` 默认使用触发者。正式版仍由 `v*` 标签触发，发布 amd64 / arm64 镜像到 Forgejo、Docker Hub，并提供 Release 附件。
 
-源码构建依赖和步骤见[构建流程](./.forgejo/actions/build-release/action.yml)，媒体组件与许可证见[第三方说明](./packaging/THIRD_PARTY.md)。
+模块分工、前后端独立开发和验证命令见[开发指南](./docs/DEVELOPMENT.md)。源码构建依赖和步骤见[构建流程](./.forgejo/actions/build-release/action.yml)，媒体组件与许可证见[第三方说明](./packaging/THIRD_PARTY.md)。

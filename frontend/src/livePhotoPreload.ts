@@ -1,6 +1,7 @@
 import { isMotionCached, motionBlob, retainMotionSource } from "./mediaSource";
 import { supportsNativeMotion } from "./livePhotoPlayer";
 import { preloadMediaPlayer } from "./mediaPlayer";
+import { canPrefetchMedia } from "./networkPolicy";
 
 type Preload = { source: string; owners: number; immediate: number; abort?: AbortController; timeout?: number; finished: boolean };
 const preloads = new Map<string, Preload>();
@@ -31,10 +32,7 @@ function drain() {
 }
 
 export function canPreloadLivePhotos(): boolean {
-  const connection = (navigator as Navigator & {
-    connection?: { saveData?: boolean; effectiveType?: string };
-  }).connection;
-  return !document.hidden && !connection?.saveData && !/^(slow-)?2g$/.test(connection?.effectiveType ?? "");
+  return canPrefetchMedia();
 }
 
 export function preloadLivePhoto(source: string, immediate = false): () => void {

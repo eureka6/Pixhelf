@@ -2,6 +2,7 @@ import type { GalleryImage } from "./types";
 import { checkAuthentication } from "./auth";
 import { clearViewerOriginalCache, getViewerOriginalBlob, getViewerOriginalSource, invalidateViewerOriginal } from "./viewerOriginalCache";
 import { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
+import { canPrefetchMedia, constrainedNetwork } from "./networkPolicy";
 export { viewerOriginalUrl, viewerThumbnailUrl } from "./mediaUrls";
 
 const THUMBNAIL_CACHE_LIMIT = 32;
@@ -14,11 +15,6 @@ const ASSET_LOAD_TIMEOUT_MS = 30_000;
 export const VIEWER_PAGE_PREFETCH_DISTANCE = THUMBNAIL_PRELOAD_DISTANCE * 2;
 
 type AssetPriority = "high" | "low";
-
-type NetworkInformation = {
-  effectiveType?: string;
-  saveData?: boolean;
-};
 
 type ViewerAssetStatus = "loading" | "ready" | "failed";
 
@@ -58,12 +54,10 @@ const viewportRenderAssets = new Map<string, ViewerRenderAsset>();
 const viewportRenderQueue: ViewportRenderJob[] = [];
 let activeViewportRenderJob: ViewportRenderJob | null = null;
 let assetClock = 0;
+let originalPreloadGeneration = 0;
 
 export function canPreloadViewerNeighbors(): boolean {
-  if (document.visibilityState !== "visible") return false;
-  const connection = (navigator as Navigator & { connection?: NetworkInformation }).connection;
-  if (connection?.saveData) return false;
-  return connection?.effectiveType !== "slow-2g" && connection?.effectiveType !== "2g";
+  return canPrefetchMedia();
 }
 
 export function supportsViewerViewportBitmaps(): boolean {
@@ -377,12 +371,14 @@ export function getDecodedViewerOriginal(source: string): HTMLImageElement | nul
 }
 
 export function suspendViewerPreloads(current: GalleryImage): void {
+  originalPreloadGeneration++;
   cancelUnusedPreloads(thumbnailAssets, new Set([viewerThumbnailUrl(current)]));
   cancelUnusedPreloads(originalAssets, new Set([viewerOriginalUrl(current)]));
   cancelUnusedViewportRenderJobs(job => job.image.id === current.id);
 }
 
 export function releaseViewerAssets(): void {
+  originalPreloadGeneration++;
   // Small, completed thumbnails remain bounded and useful in the gallery.
   cancelUnusedPreloads(thumbnailAssets, new Set());
   const originals = [...originalAssets.values()];
@@ -420,13 +416,14 @@ export function prepareViewerImages(
   options: { preloadOriginals?: boolean } = {},
 ): void {
   if (activeIndex < 0 || activeIndex >= images.length) return;
+  const generation = ++originalPreloadGeneration;
   const preloadOriginals = options.preloadOriginals
     ?? !supportsViewerViewportBitmaps();
   const preloadNeighbors = canPreloadViewerNeighbors();
 
   // Cache limits only evict completed images. Cancel obsolete downloads as well
   // so rapid navigation cannot leave a growing queue ahead of the current image.
-  const thumbnailDistance = document.visibilityState === "visible" ? THUMBNAIL_PRELOAD_DISTANCE : 0;
+  const thumbnailDistance = document.visibilityState !== "visible" ? 0 : constrainedNetwork() ? 2 : THUMBNAIL_PRELOAD_DISTANCE;
   const thumbnails = images.slice(Math.max(0, activeIndex - thumbnailDistance), activeIndex + thumbnailDistance + 1);
   cancelUnusedPreloads(thumbnailAssets, new Set(thumbnails.map(viewerThumbnailUrl)));
   const originalDistance = preloadNeighbors ? (preloadOriginals ? ORIGINAL_PRELOAD_DISTANCE : 1) : 0;
@@ -435,13 +432,13 @@ export function prepareViewerImages(
   const renderIds = new Set(images[activeIndex]!.video ? [] : originals.map(image => image.id));
   cancelUnusedViewportRenderJobs(job => renderIds.has(job.image.id));
 
-  // Thumbnail preparation is deliberately independent from masonry visibility. It is
-  // cheap enough to keep a generous navigation window decoded even on constrained links.
+  // Nearby thumbnails keep navigation responsive even when original speculation
+  // is disabled. Only the current image competes at high priority.
   for (let distance = 0; distance <= thumbnailDistance; distance += 1) {
     const offsets = distance === 0 ? [0] : [distance, -distance];
     for (const offset of offsets) {
       const image = images[activeIndex + offset];
-      if (image) preloadViewerThumbnail(image, distance <= 2 ? "high" : "low");
+      if (image) preloadViewerThumbnail(image, distance === 0 ? "high" : "low");
     }
   }
 
@@ -451,12 +448,21 @@ export function prepareViewerImages(
 
   // The active desktop original is always requested. Neighboring originals are
   // speculative and respect Save-Data/slow-network signals.
-  if (!images[activeIndex]!.video) getViewerOriginalAsset(images[activeIndex]!, 0, "high");
+  const current = images[activeIndex]!;
+  if (current.video) return;
+  const active = getViewerOriginalAsset(current, 0, "high");
   if (!preloadNeighbors) return;
-  for (let distance = 1; distance <= ORIGINAL_PRELOAD_DISTANCE; distance += 1) {
-    const next = images[activeIndex + distance];
-    const previous = images[activeIndex - distance];
-    if (next && !next.video) getViewerOriginalAsset(next, 0, distance === 1 ? "high" : "low");
-    if (previous && !previous.video) getViewerOriginalAsset(previous, 0, distance === 1 ? "high" : "low");
-  }
+  // Finish the displayed photo first, then warm one original at a time. A
+  // navigation/close/visibility change invalidates this queue synchronously.
+  void (async () => {
+    await active.promise;
+    if (active.status !== "ready") return;
+    for (let distance = 1; distance <= ORIGINAL_PRELOAD_DISTANCE; distance++) {
+      for (const offset of [distance, -distance]) {
+        if (generation !== originalPreloadGeneration || !canPreloadViewerNeighbors()) return;
+        const image = images[activeIndex + offset];
+        if (image && !image.video) await getViewerOriginalAsset(image, 0, "low").promise;
+      }
+    }
+  })();
 }

@@ -1,3 +1,13 @@
+import { useGalleryData } from "./app/useGalleryData";
+import { useViewerSimilarSearch } from "./app/useViewerSimilarSearch";
+import { useViewerReturn } from "./app/useViewerReturn";
+import { errorMessage } from "./app/errors";
+import { useTransitionPresence } from "./hooks/useTransitionPresence";
+import { useVisualViewport } from "./hooks/useVisualViewport";
+import { useMediaQuery } from "./hooks/useMediaQuery";
+import { galleryPageLookahead } from "./galleryLoading";
+import { lazy } from "preact/compat";
+import { DeferredContent } from "./DeferredContent";
 import {
   ImageIcon,
   Heart,
@@ -15,15 +25,12 @@ import {
 import { formatCount } from "./format";
 import { Header, Sidebar } from "./GalleryNavigation";
 import { useOverlayNavigation } from "./useOverlayNavigation";
-import { UploadDialog } from "./UploadDialog";
 import { useAutoHideTopbar } from "./useAutoHideTopbar";
 import { DEFAULT_IMAGE_FILTERS, imageFilterLabels } from "./GalleryFilters";
 import { contentCategory } from "./contentCategories";
 import { AlbumBackLink, AlbumGrid, AlbumsView } from "./AlbumsView";
 import { useAlbumSelection } from "./SelectableAlbums";
-import { LocalStorageView, type LocalMediaPage } from "./LocalStorageView";
-import { ExternalStorageView } from "./ExternalStorageView";
-import { SettingsDialog } from "./SettingsDialog";
+import type { LocalMediaPage } from "./LocalStorageView";
 import { authentication } from "./auth";
 import type { SettingsSection } from "./SettingsDialog";
 import { galleryHref, readGalleryLocation } from "./galleryLocation";
@@ -31,306 +38,49 @@ import type { GalleryLocation } from "./galleryLocation";
 import {
   captureViewerAnchor,
   imageCardById,
-  scrollTopForAnchor,
-  scrollWindowImmediately,
-  visualViewportBounds,
 } from "./galleryViewport";
-import type { ViewerAnchor } from "./galleryViewport";
 import { ImageViewer } from "./ImageViewer";
 import { PhotoInformationDialog } from "./PhotoInformationDialog";
 import { ImageSearchSummary } from "./ImageSearch";
-import { DuplicateImages } from "./DuplicateImages";
 import { useImageSimilarity } from "./useImageSimilarity";
 import type { ImageSearchSource } from "./useImageSimilarity";
 import { appendUniqueImages } from "./galleryImages";
 import { GallerySkeleton } from "./JustifiedGallery";
 import { SelectableGallery, type SelectableGalleryHandle } from "./SelectableGallery";
-import { TrashView } from "./TrashView";
 import { MANAGEMENT_CHANGED, useManagement } from "./management";
 import { ensureSelectionHistory, handleSelectionHistory, writeHistoryState } from "./selectionHistory";
 import { useSelectionDismiss } from "./useSelectionDismiss";
 import {
-  getGallery,
   getContentCategories,
-  getImages,
   getGalleryImage,
   getSimilarImages,
   searchByUploadedImage,
-  getStatus,
-  takeInitialBootstrap,
 } from "./api";
 import type {
   ContentCategory,
   GalleryImage,
   GallerySection,
-  GallerySummary,
   ImageCardAction,
   ImageFilters,
-  ThumbnailStatus,
 } from "./types";
 import {
   prepareViewerImages,
   releaseViewerAssets,
-  releaseViewerMedia,
   VIEWER_PAGE_PREFETCH_DISTANCE,
 } from "./viewerAssets";
 import { useViewerAssetLifecycle } from "./useViewerAssetLifecycle";
 import { stopMediaPreview } from "./MediaPreview";
-import type { VideoFrame } from "./videoFrame";
 import { galleryHistoryState, readViewerHistoryEntry, viewerHistoryState, type SimilarImagePageState, type ViewerBranch, type ViewerHistoryEntry } from "./viewerHistory";
 
-const PAGE_SIZE = 60;
+const UploadDialog = lazy(() => import("./UploadDialog").then(module => ({ default: module.UploadDialog })));
+const SettingsDialog = lazy(() => import("./SettingsDialog").then(module => ({ default: module.SettingsDialog })));
+const LocalStorageView = lazy(() => import("./LocalStorageView").then(module => ({ default: module.LocalStorageView })));
+const ExternalStorageView = lazy(() => import("./ExternalStorageView").then(module => ({ default: module.ExternalStorageView })));
+const TrashView = lazy(() => import("./TrashView").then(module => ({ default: module.TrashView })));
+const DuplicateImages = lazy(() => import("./DuplicateImages").then(module => ({ default: module.DuplicateImages })));
+
 const SIMILAR_PAGE_SIZE = 30;
-const MOBILE_PAGE_PREFETCH_MARGIN = "1400px 0px";
-const DESKTOP_PAGE_PREFETCH_MARGIN = "900px 0px";
-const GALLERY_POLL_INTERVAL_MS = 10_000;
 const MOBILE_NAV_EXIT_MS = 240;
-const VIEWER_RETURN_SETTLE_MS = 32;
-const VIEWER_RETURN_TIMEOUT_MS = 480;
-const VIEWER_RETURN_ANIMATION_MS = 280;
-const INITIAL_BOOTSTRAP = takeInitialBootstrap();
-
-type ImagePageState = {
-  images: GalleryImage[];
-  total: number;
-  nextOffset: number | null;
-};
-
-type ViewerReturnRequest = ViewerAnchor & {
-  parentImageId?: string;
-  imageId: string;
-  sequence: number;
-};
-
-type ViewerReturnFlight = {
-  layer: HTMLDivElement;
-  backdrop: HTMLDivElement;
-  media: HTMLElement;
-  source: DOMRect;
-  visible: boolean;
-  animations: Animation[];
-};
-
-const EMPTY_IMAGE_PAGE: ImagePageState = {
-  images: [],
-  total: 0,
-  nextOffset: null,
-};
-
-const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
-  source: null,
-  images: [],
-  total: 0,
-  nextOffset: null,
-};
-
-function disposeViewerReturnFlight(flight: ViewerReturnFlight | null): void {
-  if (!flight) return;
-  for (const animation of flight.animations) animation.cancel();
-  releaseViewerMedia(flight.layer);
-  flight.layer.remove();
-}
-
-function createViewerReturnFlight(): ViewerReturnFlight | null {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
-  const viewer = document.querySelector<HTMLElement>(".image-viewer");
-  const media = viewer?.querySelector<HTMLElement>(".viewer-media");
-  if (!viewer || !media) return null;
-
-  const sourceRect = media.getBoundingClientRect();
-  if (sourceRect.width <= 0 || sourceRect.height <= 0) return null;
-  const viewport = visualViewportBounds();
-  const visible = Math.min(sourceRect.bottom, viewport.bottom) - Math.max(sourceRect.top, viewport.top) > 2;
-  const mediaStyle = getComputedStyle(media);
-
-  const layer = document.createElement("div");
-  layer.className = "viewer-return-layer";
-  layer.setAttribute("aria-hidden", "true");
-  layer.inert = true;
-  layer.dataset.phase = "settling";
-  layer.dataset.imageId = viewer.dataset.imageId ?? "";
-  layer.dataset.createdAt = String(performance.now());
-  const backdrop = document.createElement("div");
-  backdrop.className = "viewer-return-backdrop";
-  const clone = media.cloneNode(false) as HTMLElement;
-  clone.className = "viewer-media viewer-return-media";
-  clone.removeAttribute("ref");
-  clone.setAttribute("aria-hidden", "true");
-  Object.assign(clone.style, {
-    position: "fixed",
-    left: `${sourceRect.left}px`,
-    top: `${sourceRect.top}px`,
-    width: `${sourceRect.width}px`,
-    height: `${sourceRect.height}px`,
-    transform: "none",
-    translate: "none",
-    transformOrigin: "top left",
-    transition: "none",
-    animation: "none",
-    opacity: "1",
-    borderRadius: mediaStyle.borderRadius,
-    boxShadow: mediaStyle.boxShadow,
-  });
-
-  // Preserve the layers actually on screen, including mobile bitmaps and an
-  // in-flight original-image fade. Copy canvas pixels only once.
-  const sources = visible
-    ? media.querySelectorAll<HTMLImageElement | HTMLCanvasElement>(":scope > img, :scope > canvas") : [];
-  for (const source of sources) {
-    const style = getComputedStyle(source);
-    if (Number(style.opacity) <= 0) continue;
-    let visual: HTMLImageElement | HTMLCanvasElement;
-    if (source instanceof HTMLCanvasElement) {
-      if (!source.width || !source.height) continue;
-      const canvas = document.createElement("canvas");
-      const scale = Math.min(1, 1440 / Math.max(source.width, source.height));
-      canvas.width = Math.max(1, Math.round(source.width * scale));
-      canvas.height = Math.max(1, Math.round(source.height * scale));
-      const context = canvas.getContext("2d");
-      if (!context) continue;
-      context.drawImage(source, 0, 0, canvas.width, canvas.height);
-      visual = canvas;
-    } else {
-      if (!source.complete || !source.naturalWidth) continue;
-      visual = source.cloneNode(false) as HTMLImageElement;
-      visual.alt = "";
-    }
-    visual.className = "viewer-return-visual";
-    visual.draggable = false;
-    Object.assign(visual.style, {
-      position: "absolute",
-      inset: "0",
-      width: "100%",
-      height: "100%",
-      objectFit: style.objectFit,
-      opacity: style.opacity,
-      filter: "none",
-      transform: "none",
-      transition: "none",
-    });
-    clone.append(visual);
-  }
-  // Fade any visible details with the backdrop, including a partially scrolled page.
-  if (!visible) clone.style.display = "none";
-  const details = viewer.querySelector<HTMLElement>(".viewer-details-page");
-  if (details) {
-    const bounds = details.getBoundingClientRect();
-    if (bounds.top < viewport.bottom && bounds.bottom > viewport.top) {
-      const snapshot = details.cloneNode(true) as HTMLElement;
-      Object.assign(snapshot.style, { position: "absolute", left: `${bounds.left}px`,
-        top: `${bounds.top}px`, width: `${bounds.width}px` });
-      backdrop.append(snapshot);
-    }
-  }
-
-  layer.append(backdrop, clone);
-  document.body.append(layer);
-  return { layer, backdrop, media: clone, source: sourceRect, visible, animations: [] };
-}
-
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() =>
-    typeof window !== "undefined" && window.matchMedia(query).matches,
-  );
-
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, [query]);
-
-  return matches;
-}
-
-function useVisualViewport(): void {
-  useLayoutEffect(() => {
-    const viewport = window.visualViewport;
-    if (!viewport) return;
-
-    let frame = 0;
-    let settleTimer = 0;
-    const update = () => {
-      const pageOffset = viewport.pageTop - window.scrollY;
-      const offset = Math.max(0, viewport.offsetTop, pageOffset);
-      const root = document.documentElement;
-      const top = `${Math.round(offset * 100) / 100}px`;
-      const height = `${viewport.height}px`;
-      if (root.style.getPropertyValue("--visual-viewport-top") !== top) root.style.setProperty("--visual-viewport-top", top);
-      if (root.style.getPropertyValue("--visual-viewport-height") !== height) root.style.setProperty("--visual-viewport-height", height);
-      const active = document.activeElement;
-      const editing = active instanceof HTMLElement && (active.isContentEditable
-        || active.matches('textarea, input:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]):not([type="hidden"])'));
-      const adjusted = String(editing || viewport.scale > 1.01);
-      if (root.dataset.visualViewportAdjusted !== adjusted) root.dataset.visualViewportAdjusted = adjusted;
-    };
-    const schedule = () => {
-      // Apply the event's geometry immediately; a following frame also catches
-      // browsers that commit viewport metrics just after the event dispatch.
-      update();
-      if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; update(); });
-      window.clearTimeout(settleTimer);
-      settleTimer = window.setTimeout(update, 120);
-    };
-
-    update();
-    viewport.addEventListener("resize", schedule);
-    viewport.addEventListener("scroll", schedule);
-    window.addEventListener("resize", schedule);
-    window.addEventListener("orientationchange", schedule);
-    document.addEventListener("focusin", schedule);
-    document.addEventListener("focusout", schedule);
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      window.clearTimeout(settleTimer);
-      viewport.removeEventListener("resize", schedule);
-      viewport.removeEventListener("scroll", schedule);
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("orientationchange", schedule);
-      document.removeEventListener("focusin", schedule);
-      document.removeEventListener("focusout", schedule);
-      delete document.documentElement.dataset.visualViewportAdjusted;
-      document.documentElement.style.removeProperty("--visual-viewport-top");
-      document.documentElement.style.removeProperty("--visual-viewport-height");
-    };
-  }, []);
-}
-
-function useDebounced<T>(value: T, delay: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebounced(value), delay);
-    return () => window.clearTimeout(timer);
-  }, [delay, value]);
-  return debounced;
-}
-
-function useTransitionPresence(visible: boolean, duration: number) {
-  const [mounted, setMounted] = useState(visible);
-
-  useLayoutEffect(() => {
-    if (visible) {
-      setMounted(true);
-      return;
-    }
-    if (!mounted) return;
-
-    // The transition event normally removes the drawer. Cover hidden tabs and breakpoint changes.
-    const timer = window.setTimeout(() => setMounted(false), duration + 100);
-    return () => window.clearTimeout(timer);
-  }, [duration, mounted, visible]);
-
-  const finishExit = useCallback(() => {
-    if (!visible) setMounted(false);
-  }, [visible]);
-
-  return { mounted: visible || mounted, finishExit };
-}
-
-function errorMessage(reason: unknown, fallback: string): string {
-  return reason instanceof Error ? reason.message : fallback;
-}
 
 function createExploreSeed(): string {
   const values = new Uint32Array(4);
@@ -353,31 +103,14 @@ function App() {
   const browsingDuplicates = browsingSimilar && !path;
   const browsingImageSearch = browsingSimilar && Boolean(path);
   const browsingAlbums = section === "albums" && !album;
-  const hasInitialImages = Boolean(INITIAL_BOOTSTRAP && section === "library");
-  const [summary, setSummary] = useState<GallerySummary | null>(
-    INITIAL_BOOTSTRAP?.summary ?? null,
-  );
-  const [status, setStatus] = useState<ThumbnailStatus | null>(
-    INITIAL_BOOTSTRAP?.status ?? null,
-  );
-  const [imagePage, setImagePageState] = useState<ImagePageState>(() => (
-    hasInitialImages && INITIAL_BOOTSTRAP
-      ? {
-          images: INITIAL_BOOTSTRAP.images.items,
-          total: INITIAL_BOOTSTRAP.images.total,
-          nextOffset: INITIAL_BOOTSTRAP.images.nextOffset,
-        }
-      : EMPTY_IMAGE_PAGE
-  ));
-  const imagePageRef = useRef(imagePage);
-  const setImagePage = useCallback((page: ImagePageState) => {
-    // Invalidate old pagination callbacks before the next render flushes effects.
-    imagePageRef.current = page;
-    setImagePageState(page);
-  }, []);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [imageFilters, setImageFilters] = useState<ImageFilters>(DEFAULT_IMAGE_FILTERS);
+  const [exploreSeed, setExploreSeed] = useState("");
+  const { summary, status, imagePage, loading, loadingMore, error, setError,
+    debouncedSearch, textSearchReady, textSearchMode, loadMoreLibrary,
+    reloadToken, reloadGallery, resetLibrary,
+  } = useGalleryData(location, search, imageFilters, exploreSeed);
   const [categories, setCategories] = useState<ContentCategory[]>([]);
   const [categoriesHint, setCategoriesHint] = useState("正在读取分类…");
   const categoriesController = useRef<AbortController>();
@@ -391,10 +124,6 @@ function App() {
     });
     return () => controller.abort();
   }, []);
-  const [exploreSeed, setExploreSeed] = useState("");
-  const [loading, setLoading] = useState(!hasInitialImages && !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -425,14 +154,10 @@ function App() {
     viewerBranchRef.current = branch;
     setViewerBranch(branch);
   }, []);
-  const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
-    EMPTY_SIMILAR_IMAGE_PAGE,
-  );
-  const [similarLoading, setSimilarLoading] = useState(false);
-  const [similarLoadingMore, setSimilarLoadingMore] = useState(false);
-  const [similarError, setSimilarError] = useState<string | null>(null);
-  const [viewerReturnRequest, setViewerReturnRequest] = useState<ViewerReturnRequest | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  const { similarPage, similarLoading, similarLoadingMore, similarError,
+    resetSimilarSearch, restoreSimilarSearch, searchSimilar, searchVideoFrame, loadMoreSimilar,
+  } = useViewerSimilarSearch(Boolean(status?.backgroundComplete));
+  const { viewerReturnRequest, viewerAnchorRef, beginViewerReturn, cancelViewerReturn } = useViewerReturn(viewerImageId);
   const compactLayout = useMediaQuery("(max-width: 720px)");
   const desktopNav = useOverlayNavigation(compactLayout);
   const sidebarCollapsed = !desktopNav.open;
@@ -442,48 +167,9 @@ function App() {
   );
   const topbar = useAutoHideTopbar(Boolean(searchOpen || menuOpen || uploadOpen || desktopNav.open || mobileNavMounted || viewerImageId
     || viewerReturnRequest || settingsSection || infoImage), location, sidebarCollapsed);
-  const textSearchReady = Boolean(
-    status?.backgroundComplete
-    && status.textSearch.enabled
-    && status.textSearch.backgroundComplete
-    && status.textSearch.ready > 0,
-  );
-  const textSearchMode: "filename" | "indexing" | "semantic" = status?.textSearch.enabled
-    ? textSearchReady
-      ? "semantic"
-      : status.backgroundComplete && status.textSearch.backgroundComplete
-        ? "filename"
-        : "indexing"
-    : "filename";
-  const delayedSearch = useDebounced(
-    search.trim(),
-    status?.textSearch.enabled ? 500 : 250,
-  );
-  const debouncedSearch = search.trim() ? delayedSearch : "";
   const filtersAvailable = !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar;
   const filterLabels = imageFilterLabels(imageFilters, textSearchReady && !browsingFavorites ? search : "", categories);
-  const requestImages = useCallback((offset: number, signal: AbortSignal) => getImages({
-    album, favorites: browsingFavorites, search: debouncedSearch,
-    ...imageFilters, seed: exploreSeed, offset, limit: PAGE_SIZE,
-  }, signal), [album, browsingFavorites, debouncedSearch, exploreSeed, imageFilters]);
-  const requestVersionRef = useRef(0);
-  const summaryRevisionRef = useRef<string | null>(
-    INITIAL_BOOTSTRAP?.summary.revision ?? null,
-  );
-  const skipInitialImagesRef = useRef(hasInitialImages);
-  const loadMoreControllerRef = useRef<AbortController | null>(null);
-  const loadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
-  const similarRequestVersionRef = useRef(0);
-  const similarControllerRef = useRef<AbortController | null>(null);
-  const similarLoadMoreControllerRef = useRef<AbortController | null>(null);
-  const similarLoadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
-  const backgroundCompletionRef = useRef(
-    Boolean(INITIAL_BOOTSTRAP?.status.backgroundComplete),
-  );
   const viewerImageIdRef = useRef<string | null>(null);
-  const viewerAnchorRef = useRef<ViewerAnchor | null>(null);
-  const viewerReturnSequenceRef = useRef(0);
-  const viewerReturnFlightRef = useRef<ViewerReturnFlight | null>(null);
   const viewerHistoryActiveRef = useRef(false);
   const viewerHistoryClosingRef = useRef(false);
   const { images, total, nextOffset } = browsingImageSearch ? imageSimilarity : browsingDuplicates ? { images: duplicateImages, total: duplicateImages.length, nextOffset: null } : browsingLocal && localMedia ? localMedia : imagePage;
@@ -521,11 +207,11 @@ function App() {
         viewerLoadJobRef.current?.controller.abort();
         if (browsingImageSearch) imageSimilarity.retry();
       }
-      if (action !== "favorite" || browsingFavorites) setReloadToken(value => value + 1);
+      if (action !== "favorite" || browsingFavorites) reloadGallery();
     };
     window.addEventListener(MANAGEMENT_CHANGED, changed);
     return () => window.removeEventListener(MANAGEMENT_CHANGED, changed);
-  }, [browsingFavorites, browsingImageSearch, imageSimilarity.retry]);
+  }, [browsingFavorites, browsingImageSearch, imageSimilarity.retry, reloadGallery]);
   const viewerImages = useMemo(
     () => viewerBranch?.images ?? appendUniqueImages(visibleImages, viewerDiscoveredImages),
     [visibleImages, viewerDiscoveredImages, viewerBranch],
@@ -541,11 +227,6 @@ function App() {
 
   useEffect(() => () => {
     releaseViewerAssets();
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
-    loadMoreControllerRef.current?.abort();
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
     viewerLoadJobRef.current?.controller.abort();
   }, []);
 
@@ -567,191 +248,14 @@ function App() {
     if (!compactLayout && mobileNavOpen) setMobileNavOpen(false);
   }, [compactLayout, mobileNavOpen]);
 
-  useEffect(() => {
-    if (reloadToken === 0 && INITIAL_BOOTSTRAP) return;
-    const controller = new AbortController();
-    getGallery(controller.signal)
-      .then((next) => {
-        if (controller.signal.aborted) return;
-        summaryRevisionRef.current = next.revision;
-        setSummary(next);
-      })
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted) {
-          setError(errorMessage(reason, "无法读取图库"));
-        }
-      });
-    return () => controller.abort();
-  }, [reloadToken]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer = 0;
-    const poll = async () => {
-      try {
-        const next = await getGallery(controller.signal);
-        if (controller.signal.aborted) return;
-        const previousRevision = summaryRevisionRef.current;
-        if (previousRevision !== next.revision) {
-          summaryRevisionRef.current = next.revision;
-          setSummary(next);
-          if (previousRevision) setReloadToken((value) => value + 1);
-        }
-      } catch {
-        // A later poll retries transient scan or network failures.
-      } finally {
-        if (!controller.signal.aborted) {
-          timer = window.setTimeout(poll, GALLERY_POLL_INTERVAL_MS);
-        }
-      }
-    };
-    timer = window.setTimeout(poll, GALLERY_POLL_INTERVAL_MS);
-    return () => {
-      controller.abort();
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer = 0;
-    const poll = async () => {
-      try {
-        const next = await getStatus(controller.signal);
-        if (controller.signal.aborted) return;
-        setStatus(next);
-        const complete = next.backgroundComplete && next.textSearch.backgroundComplete
-          && (!next.videos || (next.videos.playback.backgroundComplete && next.videos.preview.backgroundComplete));
-        timer = window.setTimeout(poll, complete ? 10000 : 1500);
-      } catch {
-        if (!controller.signal.aborted) timer = window.setTimeout(poll, 5000);
-      }
-    };
-    const initialDelay = INITIAL_BOOTSTRAP
-      ? (
-          INITIAL_BOOTSTRAP.status.backgroundComplete
-          && INITIAL_BOOTSTRAP.status.textSearch.backgroundComplete
-          && (!INITIAL_BOOTSTRAP.status.videos || (INITIAL_BOOTSTRAP.status.videos.playback.backgroundComplete
-            && INITIAL_BOOTSTRAP.status.videos.preview.backgroundComplete))
-            ? 10_000
-            : 1_500
-        )
-      : 0;
-    timer = window.setTimeout(poll, initialDelay);
-    return () => {
-      controller.abort();
-      window.clearTimeout(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (skipInitialImagesRef.current) {
-      skipInitialImagesRef.current = false;
-      return;
-    }
-    const requestVersion = ++requestVersionRef.current;
-    loadMoreControllerRef.current?.abort();
-    loadMoreControllerRef.current = null;
-    loadMorePromiseRef.current = null;
-    setLoadingMore(false);
-    setError(null);
-    setImagePage(EMPTY_IMAGE_PAGE);
-    if (browsingAlbums || browsingLocal || browsingStorage || browsingTrash || browsingSimilar) {
-      setLoading(false);
-      return;
-    }
-    const controller = new AbortController();
-    setLoading(true);
-    requestImages(0, controller.signal)
-      .then((page) => {
-        if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return;
-        setImagePage({
-          images: page.items,
-          total: page.total,
-          nextOffset: page.nextOffset,
-        });
-      })
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
-          setError(errorMessage(reason, "无法读取图片"));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      controller.abort();
-      const loadMoreController = loadMoreControllerRef.current;
-      loadMoreControllerRef.current = null;
-      loadMorePromiseRef.current = null;
-      loadMoreController?.abort();
-    };
-  }, [location, requestImages, reloadToken, textSearchReady]);
-
-  const loadMoreLibrary = useCallback((): Promise<GalleryImage[]> => {
-    if (imagePageRef.current !== imagePage) return Promise.resolve([]);
-    const offset = imagePage.nextOffset;
-    if (browsingAlbums || browsingLocal || browsingStorage || browsingTrash || browsingSimilar || loading || offset === null) return Promise.resolve([]);
-    const pending = loadMorePromiseRef.current;
-    if (pending) return pending;
-
-    const controller = new AbortController();
-    const requestVersion = requestVersionRef.current;
-    loadMoreControllerRef.current = controller;
-    setLoadingMore(true);
-
-    const promise = (async () => {
-      try {
-        const page = await requestImages(offset, controller.signal);
-        if (controller.signal.aborted || requestVersion !== requestVersionRef.current) return [];
-        const images = appendUniqueImages(imagePage.images, page.items);
-        setImagePage({ images, total: page.total, nextOffset: page.nextOffset });
-        return images.slice(imagePage.images.length);
-      } catch (reason) {
-        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
-          setError(errorMessage(reason, "无法继续加载图片"));
-        }
-        return [];
-      } finally {
-        if (loadMoreControllerRef.current === controller) {
-          loadMoreControllerRef.current = null;
-          loadMorePromiseRef.current = null;
-          if (requestVersion === requestVersionRef.current) setLoadingMore(false);
-        }
-      }
-    })();
-    loadMorePromiseRef.current = promise;
-    return promise;
-  }, [location, requestImages, loading, imagePage]);
   const loadMore = browsingImageSearch ? imageSimilarity.loadMore : browsingLocal && localMedia ? localMedia.loadMore : loadMoreLibrary;
-
-  const resetSimilarSearch = useCallback(() => {
-    similarRequestVersionRef.current += 1;
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
-    similarControllerRef.current = null;
-    similarLoadMoreControllerRef.current = null;
-    similarLoadMorePromiseRef.current = null;
-    setSimilarPage(EMPTY_SIMILAR_IMAGE_PAGE);
-    setSimilarLoading(false);
-    setSimilarLoadingMore(false);
-    setSimilarError(null);
-  }, []);
 
   const activateLocation = useCallback((next: GalleryLocation) => {
     clearSelection();
     desktopNav.close();
     locationRef.current = next;
-    requestVersionRef.current++;
-    skipInitialImagesRef.current = false;
-    loadMoreControllerRef.current?.abort();
+    resetLibrary(next);
     setLocation(next);
-    setImagePage(EMPTY_IMAGE_PAGE);
-    setLoading(next.section === "library" || next.section === "favorites" || (next.section === "albums" && Boolean(next.path)));
-    setLoadingMore(false);
-    setError(null);
     setSearch("");
     setSearchOpen(false);
     setExploreSeed("");
@@ -765,11 +269,9 @@ function App() {
     setViewerDiscoveredImages([]);
     updateViewerBranch(null);
     viewerLoadJobRef.current?.controller.abort();
-    setViewerReturnRequest(null);
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
+    cancelViewerReturn();
     resetSimilarSearch();
-  }, [resetSimilarSearch, clearSelection, desktopNav.close]);
+  }, [resetSimilarSearch, clearSelection, desktopNav.close, cancelViewerReturn, resetLibrary]);
 
   const openSimilarSearch = useCallback((source: GalleryImage) => {
     setGalleryQuerySnapshot(source);
@@ -784,116 +286,11 @@ function App() {
     activateLocation({ section: "similar", path: source.id });
   }, [activateLocation]);
 
-  const searchSimilar = useCallback((source: GalleryImage, force = false, capturedFrame?: VideoFrame) => {
-    const sameSource = similarPage.source?.id === source.id;
-    const frame = capturedFrame ?? (sameSource ? similarPage.frame : undefined);
-    if (!force && sameSource && (similarLoading || !similarError)) return;
-
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current = null;
-    similarLoadMorePromiseRef.current = null;
-    const controller = new AbortController();
-    const requestVersion = ++similarRequestVersionRef.current;
-    similarControllerRef.current = controller;
-    setSimilarPage({ source, frame, images: [], total: 0, nextOffset: null });
-    setSimilarLoading(true);
-    setSimilarLoadingMore(false);
-    setSimilarError(null);
-
-    const options = { offset: 0, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
-    void (frame ? searchByUploadedImage(frame.file, options, controller.signal)
-      : getSimilarImages(source.id, options, controller.signal))
-      .then((page) => {
-        if (requestVersion !== similarRequestVersionRef.current) return;
-        setSimilarPage({
-          source,
-          frame,
-          images: page.items,
-          total: page.total,
-          nextOffset: page.nextOffset,
-        });
-      })
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
-          setSimilarError(errorMessage(reason, "无法查找相似图片"));
-        }
-      })
-      .finally(() => {
-        if (similarControllerRef.current === controller) {
-          similarControllerRef.current = null;
-          if (requestVersion === similarRequestVersionRef.current) setSimilarLoading(false);
-        }
-      });
-  }, [similarError, similarLoading, similarPage.source?.id, similarPage.frame]);
-
-  const searchVideoFrame = useCallback((source: GalleryImage, frame: VideoFrame) => {
-    searchSimilar(source, true, frame);
-  }, [searchSimilar]);
-
-  useEffect(() => {
-    const complete = Boolean(status?.backgroundComplete);
-    const justCompleted = complete && !backgroundCompletionRef.current;
-    backgroundCompletionRef.current = complete;
-    if (justCompleted && similarPage.source) {
-      searchSimilar(similarPage.source, true);
-    }
-  }, [searchSimilar, similarPage.source, status]);
-
-  const loadMoreSimilar = useCallback((): Promise<GalleryImage[]> => {
-    const source = similarPage.source;
-    const frame = similarPage.frame;
-    const offset = similarPage.nextOffset;
-    if (!source || similarLoading || offset === null) return Promise.resolve([]);
-    const pending = similarLoadMorePromiseRef.current;
-    if (pending) return pending;
-
-    const controller = new AbortController();
-    const requestVersion = similarRequestVersionRef.current;
-    similarLoadMoreControllerRef.current = controller;
-    setSimilarLoadingMore(true);
-    setSimilarError(null);
-
-    const promise = (async () => {
-      try {
-        const options = { offset, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
-        const page = await (frame ? searchByUploadedImage(frame.file, options, controller.signal)
-          : getSimilarImages(source.id, options, controller.signal));
-        if (requestVersion !== similarRequestVersionRef.current) return [];
-        setSimilarPage((current) => current.source?.id === source.id
-          ? {
-              source,
-              frame,
-              images: appendUniqueImages(current.images, page.items),
-              total: page.total,
-              nextOffset: page.nextOffset,
-            }
-          : current);
-        return page.items;
-      } catch (reason) {
-        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
-          setSimilarError(errorMessage(reason, "无法继续加载相似图片"));
-        }
-        return [];
-      } finally {
-        if (similarLoadMoreControllerRef.current === controller) {
-          similarLoadMoreControllerRef.current = null;
-          similarLoadMorePromiseRef.current = null;
-          if (requestVersion === similarRequestVersionRef.current) {
-            setSimilarLoadingMore(false);
-          }
-        }
-      }
-    })();
-    similarLoadMorePromiseRef.current = promise;
-    return promise;
-  }, [similarLoading, similarPage.nextOffset, similarPage.source, similarPage.frame]);
-
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
     if (!sentinel || nextOffset === null || pageLoading || pageLoadingMore || pageError || viewerImageId) return;
-    const margin = compactLayout ? MOBILE_PAGE_PREFETCH_MARGIN : DESKTOP_PAGE_PREFETCH_MARGIN;
+    const lookahead = galleryPageLookahead();
     let active = true;
     const gallery = sentinel.parentElement?.querySelector<HTMLElement>(".justified-gallery");
     const ready = () => !gallery || (Number(gallery.dataset.layoutWidth) > 0 && gallery.getBoundingClientRect().height > 0);
@@ -901,9 +298,9 @@ function App() {
       ([entry]) => {
         // A queued notification may describe the position before a scroll or resize.
         if (active && entry.isIntersecting && ready()
-          && sentinel.getBoundingClientRect().top <= window.innerHeight + parseFloat(margin)) void loadMore();
+          && sentinel.getBoundingClientRect().top <= window.innerHeight + lookahead) void loadMore();
       },
-      { rootMargin: margin },
+      { rootMargin: `${lookahead}px 0px` },
     );
     // Do not treat the gallery's unmeasured, zero-height first frame as an empty page.
     const layout = new ResizeObserver(() => {
@@ -986,19 +383,15 @@ function App() {
     setSlideshowRequest(0);
     const currentImageId = viewerImageIdRef.current;
     if (!currentImageId) return;
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
     const hasGallery = Boolean(document.querySelector(".content .justified-gallery"));
-    viewerReturnFlightRef.current = hasGallery ? createViewerReturnFlight() : null;
     const anchor = viewerAnchorRef.current ?? {
       cardRatio: 0.5,
       viewportRatio: 0.5,
       fallbackScrollY: window.scrollY,
     };
-    viewerReturnSequenceRef.current += 1;
-    setViewerReturnRequest(hasGallery ? {
+    beginViewerReturn(hasGallery ? {
       ...anchor,
       imageId: currentImageId,
-      sequence: viewerReturnSequenceRef.current,
     } : null);
     if (!hasGallery) viewerAnchorRef.current = null;
     resetSimilarSearch();
@@ -1007,7 +400,7 @@ function App() {
     viewerLoadJobRef.current?.controller.abort();
     viewerImageIdRef.current = null;
     setViewerImageId(null);
-  }, [resetSimilarSearch, updateViewerBranch]);
+  }, [resetSimilarSearch, updateViewerBranch, beginViewerReturn]);
 
   const restoreViewerFromHistory = useCallback((requested: ViewerHistoryEntry, returning = false) => {
     setSlideshowRequest(0);
@@ -1021,8 +414,7 @@ function App() {
         returnAnchor: parent.returnAnchor ? { ...parent.returnAnchor, imageId: currentImageId } : null };
       try { writeHistoryState(viewerHistoryState(entry), window.location.href, true); } catch { /* Restoring the UI still works. */ }
     }
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = returning ? createViewerReturnFlight() : null;
+    beginViewerReturn(entry.returnAnchor ? { ...entry.returnAnchor, parentImageId: entry.image.id } : null, returning);
     const snapshot = entry.image;
     updateViewerBranch(entry.branch);
     viewerLoadJobRef.current?.controller.abort();
@@ -1031,15 +423,11 @@ function App() {
     const candidates = entry.branch?.images ?? appendUniqueImages(images, [snapshot]);
     const index = candidates.findIndex(image => image.id === snapshot.id);
     prepareViewerImages(candidates, index);
-    resetSimilarSearch();
-    if (entry.similarPage) setSimilarPage(entry.similarPage);
+    restoreSimilarSearch(entry.similarPage);
     setViewerDiscoveredImages(current => appendUniqueImages(current, [snapshot]));
-    viewerReturnSequenceRef.current += 1;
-    setViewerReturnRequest(entry.returnAnchor ? { ...entry.returnAnchor, parentImageId: snapshot.id,
-      sequence: viewerReturnSequenceRef.current } : null);
     viewerImageIdRef.current = snapshot.id;
     setViewerImageId(snapshot.id);
-  }, [images, resetSimilarSearch, updateViewerBranch]);
+  }, [images, restoreSimilarSearch, updateViewerBranch, beginViewerReturn]);
 
   const openViewer = useCallback((
     imageId: string,
@@ -1056,8 +444,6 @@ function App() {
       if (!authentication.guest) ensureSelectionHistory();
       recordViewerHistory(snapshot, null);
     }
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
     viewerAnchorRef.current = captureViewerAnchor(card, pointerY);
     stopMediaPreview();
     prepareViewerImages(images, images.findIndex((image) => image.id === imageId));
@@ -1065,10 +451,10 @@ function App() {
     setViewerDiscoveredImages([]);
     updateViewerBranch(null);
     viewerLoadJobRef.current?.controller.abort();
-    setViewerReturnRequest(null);
+    cancelViewerReturn();
     viewerImageIdRef.current = imageId;
     setViewerImageId(imageId);
-  }, [recordViewerHistory, images, openSimilarSearch, resetSimilarSearch, updateViewerBranch]);
+  }, [recordViewerHistory, images, openSimilarSearch, resetSimilarSearch, updateViewerBranch, cancelViewerReturn]);
 
   const closeViewer = useCallback(() => {
     setSlideshowRequest(0);
@@ -1127,253 +513,6 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [activateLocation, closeViewerState, restoreViewerFromHistory]);
 
-  useLayoutEffect(() => {
-    if (!viewerReturnRequest) return;
-    const request = viewerReturnRequest;
-    if (request.parentImageId ? viewerImageId !== request.parentImageId : Boolean(viewerImageId)) return;
-    const scrollRoot = request.parentImageId ? document.querySelector<HTMLElement>(".image-viewer") ?? undefined : undefined;
-    if (request.parentImageId && !scrollRoot) return;
-    const gallerySelector = scrollRoot ? ".viewer-similar-gallery" : ".justified-gallery";
-    const findGallery = () => (scrollRoot ?? document).querySelector<HTMLElement>(gallerySelector);
-    const getScroll = () => scrollRoot?.scrollTop ?? window.scrollY;
-    let trackedScroll = getScroll();
-    let scrollTranslation = 0;
-    let userControlled = false;
-    const setScroll = (top: number) => {
-      if (userControlled) return;
-      if (scrollRoot) scrollRoot.scrollTo({ top, behavior: "instant" });
-      else scrollWindowImmediately(top);
-      trackedScroll = getScroll();
-    };
-    const requestFlight = viewerReturnFlightRef.current;
-    if (scrollRoot && requestFlight) scrollRoot.append(requestFlight.layer);
-    let frame = 0;
-    let settleTimer = 0;
-    let timeoutTimer = 0;
-    let stopped = false;
-    let animating = false;
-    let finished = false;
-    let animationTarget: HTMLElement | null = null;
-    let animationEndpoint = "";
-    let observedCard: HTMLElement | null = null;
-    let observedGallery: HTMLElement | null = null;
-    let resizeObserver: ResizeObserver | null = null;
-    let resizeObserverPrimed = false;
-
-    const observeLayout = (card: HTMLElement) => {
-      const gallery = card.closest<HTMLElement>(gallerySelector);
-      if (resizeObserver && card !== observedCard) {
-        if (observedCard) resizeObserver.unobserve(observedCard);
-        resizeObserver.observe(card);
-        observedCard = card;
-      }
-      if (resizeObserver && gallery && gallery !== observedGallery) {
-        if (observedGallery) resizeObserver.unobserve(observedGallery);
-        resizeObserver.observe(gallery);
-        observedGallery = gallery;
-      }
-    };
-
-    const alignToCard = (): HTMLElement | null => {
-      const card = imageCardById(request.imageId, findGallery());
-      if (!card || card.getBoundingClientRect().height <= 0) return null;
-      observeLayout(card);
-
-      const targetScroll = scrollTopForAnchor(card, request, scrollRoot);
-      if (Math.abs(targetScroll - getScroll()) > 0.5) {
-        setScroll(targetScroll);
-      }
-      return card;
-    };
-
-    const informationLoading = () => Boolean(scrollRoot?.querySelector('.viewer-photo-information[aria-busy="true"]'));
-    const releaseRequest = () => {
-      stopped = true;
-      setViewerReturnRequest(current => {
-        if (current?.sequence !== request.sequence) return current;
-        if (!request.parentImageId) viewerAnchorRef.current = null;
-        return null;
-      });
-    };
-    const settleReturn = () => {
-      if (!scrollRoot) { releaseRequest(); return; }
-      window.clearTimeout(settleTimer);
-      // Metadata can finish before its final layout is painted. Recheck the
-      // anchor after layout settles instead of releasing it in that same frame.
-      settleTimer = window.setTimeout(() => {
-        if (stopped || !finished || informationLoading()) return;
-        alignToCard();
-        releaseRequest();
-      }, VIEWER_RETURN_SETTLE_MS);
-    };
-    const finalize = (card: HTMLElement | null) => {
-      if (finished) return;
-      finished = true;
-      disposeViewerReturnFlight(requestFlight);
-      if (viewerReturnFlightRef.current === requestFlight) viewerReturnFlightRef.current = null;
-      if (!userControlled && card?.isConnected) card.focus({ preventScroll: true });
-      // Returning after a reload can fetch metadata above the waterfall. Keep
-      // its card anchored through that layout change, until the user takes over.
-      if (!informationLoading()) settleReturn();
-    };
-    const takeOver = () => { userControlled = true; if (finished) releaseRequest(); };
-    const followScroll = () => {
-      const top = getScroll();
-      const delta = trackedScroll - top;
-      if (Math.abs(delta) < 0.5) return;
-      trackedScroll = top;
-      takeOver();
-      if (!finished && requestFlight) {
-        // Compose scroll movement separately from the shrink animation, so its
-        // destination follows the waterfall without restarting its timeline.
-        scrollTranslation += delta;
-        requestFlight.media.style.translate = `0 ${scrollTranslation}px`;
-      }
-    };
-
-    const transformFrame = ([x, y, scaleX, scaleY]: number[]) => ({
-      transform: `translate3d(${x}px, ${y}px, 0) scale(${scaleX}, ${scaleY})`,
-    });
-    const targetTransform = (card: HTMLElement, flight: ViewerReturnFlight) => {
-      const target = card.getBoundingClientRect();
-      return [target.left - flight.source.left, target.top - flight.source.top - scrollTranslation,
-        target.width / flight.source.width, target.height / flight.source.height];
-    };
-    const retargetAnimation = (card: HTMLElement | null) => {
-      const flight = requestFlight;
-      const effect = flight?.animations[0]?.effect;
-      if (flight?.layer.dataset.phase !== "flying" || !card || !(effect instanceof KeyframeEffect)) return;
-      if (animationTarget !== card) {
-        if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
-        card.dataset.viewerReturnTarget = "true";
-        animationTarget = card;
-      }
-      const target = targetTransform(card, flight);
-      const endpoint = transformFrame(target);
-      if (endpoint.transform === animationEndpoint) return;
-      const progress = effect.getComputedTiming().progress ?? 0;
-      const current = new DOMMatrix(getComputedStyle(flight.media).transform);
-      // Solve the start frame at the current eased progress: the rendered pose
-      // and original deadline stay unchanged while the destination moves.
-      const start = 1 - progress > .00001
-        ? [current.e, current.f, current.a, current.d].map((value, index) =>
-          (value - target[index] * progress) / (1 - progress))
-        : target;
-      effect.setKeyframes([transformFrame(start), endpoint]);
-      animationEndpoint = endpoint.transform;
-      flight.layer.dataset.retargets = String(
-        Number.parseInt(flight.layer.dataset.retargets ?? "0", 10) + 1,
-      );
-    };
-
-    const complete = () => {
-      if (stopped) return;
-      const card = alignToCard();
-      if (finished) { if (!informationLoading()) settleReturn(); return; }
-      if (animating) { retargetAnimation(card); return; }
-      if (!card) {
-        setScroll(scrollTopForAnchor(null, request, scrollRoot));
-      }
-
-      const flight = requestFlight;
-      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (!flight || reducedMotion || typeof flight.media.animate !== "function") {
-        finalize(card);
-        return;
-      }
-
-      animating = true;
-      const flying = card && flight.visible;
-      flight.layer.dataset.phase = flying ? "flying" : "fading";
-      flight.layer.dataset.flyingAt = String(performance.now());
-      flight.layer.dataset.duration = String(flying ? VIEWER_RETURN_ANIMATION_MS : 150);
-      const animations: Animation[] = [];
-      if (flying) {
-        const endpoint = transformFrame(targetTransform(card, flight));
-        animationEndpoint = endpoint.transform;
-        card.dataset.viewerReturnTarget = "true";
-        animationTarget = card;
-        animations.push(flight.media.animate([
-          transformFrame([0, 0, 1, 1]), endpoint,
-        ], {
-          duration: VIEWER_RETURN_ANIMATION_MS,
-          easing: "cubic-bezier(.2, .7, .2, 1)",
-          fill: "forwards",
-        }));
-      } else {
-        animations.push(flight.media.animate([
-          { opacity: 1, transform: "scale(1)" },
-          { opacity: 0, transform: "scale(.98)" },
-        ], {
-          duration: 150,
-          easing: "ease-out",
-          fill: "forwards",
-        }));
-      }
-      animations.push(flight.backdrop.animate([
-        { opacity: Number.parseFloat(window.getComputedStyle(flight.backdrop).opacity) || 0 },
-        { opacity: 0 },
-      ], {
-        duration: flying ? 200 : 150,
-        easing: "cubic-bezier(.2, .8, .2, 1)",
-        fill: "forwards",
-      }));
-      flight.animations.push(...animations);
-      void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
-        if (stopped || viewerReturnFlightRef.current !== flight) return;
-        if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
-        finalize(animationTarget ?? card);
-      });
-    };
-
-    const schedule = () => {
-      if (stopped || frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        complete();
-      });
-    };
-
-    resizeObserver = new ResizeObserver(() => {
-      if (!resizeObserverPrimed) {
-        resizeObserverPrimed = true;
-        return;
-      }
-      schedule();
-    });
-    const mutationObserver = new MutationObserver(schedule);
-    const gallery = findGallery();
-    if (gallery) mutationObserver.observe(gallery, { childList: true });
-    if (scrollRoot) {
-      resizeObserver.observe(scrollRoot);
-      const information = scrollRoot.querySelector(".viewer-photo-information");
-      if (information) resizeObserver.observe(information);
-      mutationObserver.observe(scrollRoot, { attributes: true, attributeFilter: ["aria-busy"], subtree: true });
-    }
-    const scrollEvents = scrollRoot ?? window;
-    scrollEvents.addEventListener("scroll", followScroll, { passive: true });
-    for (const event of ["pointerdown", "wheel", "keydown"]) scrollEvents.addEventListener(event, takeOver, true);
-    window.addEventListener("resize", schedule);
-    window.visualViewport?.addEventListener("resize", schedule);
-    schedule();
-    timeoutTimer = window.setTimeout(complete, VIEWER_RETURN_TIMEOUT_MS);
-
-    return () => {
-      stopped = true;
-      finished = true;
-      if (animationTarget) delete animationTarget.dataset.viewerReturnTarget;
-      if (frame) window.cancelAnimationFrame(frame);
-      window.clearTimeout(settleTimer);
-      window.clearTimeout(timeoutTimer);
-      resizeObserver?.disconnect();
-      mutationObserver.disconnect();
-      scrollEvents.removeEventListener("scroll", followScroll);
-      for (const event of ["pointerdown", "wheel", "keydown"]) scrollEvents.removeEventListener(event, takeOver, true);
-      window.removeEventListener("resize", schedule);
-      window.visualViewport?.removeEventListener("resize", schedule);
-    };
-  }, [viewerImageId, viewerReturnRequest]);
-
   useEffect(() => {
     if (!viewerImageId || !viewerCanLoadMore) return;
     const index = viewerBranch?.index ?? galleryViewerIndex;
@@ -1392,8 +531,8 @@ function App() {
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
     resetSimilarSearch();
-    setViewerReturnRequest(null);
-  }, [recordViewerHistory, resetSimilarSearch, updateViewerBranch, viewerImages]);
+    cancelViewerReturn();
+  }, [recordViewerHistory, resetSimilarSearch, updateViewerBranch, viewerImages, cancelViewerReturn]);
 
   const openViewerImage = useCallback((candidate: GalleryImage, action: ImageCardAction = "view") => {
     if (action === "details") { setInfoImage(candidate); return; }
@@ -1418,16 +557,14 @@ function App() {
     const branch: ViewerBranch = { ...similarPage, source: viewerImage, index, parent };
     viewerLoadJobRef.current?.controller.abort();
     stopMediaPreview();
-    disposeViewerReturnFlight(viewerReturnFlightRef.current);
-    viewerReturnFlightRef.current = null;
     recordViewerHistory(candidate, branch);
     updateViewerBranch(branch);
     prepareViewerImages(branch.images, index);
     resetSimilarSearch();
-    setViewerReturnRequest(null);
+    cancelViewerReturn();
     viewerImageIdRef.current = candidate.id;
     setViewerImageId(candidate.id);
-  }, [openViewerImage, recordViewerHistory, resetSimilarSearch, similarPage, updateViewerBranch, viewerBranch, viewerImage]);
+  }, [openViewerImage, recordViewerHistory, resetSimilarSearch, similarPage, updateViewerBranch, viewerBranch, viewerImage, cancelViewerReturn]);
 
   const navigateViewer = useCallback((direction: -1 | 1, signal?: AbortSignal) => {
     const currentImageId = viewerImageIdRef.current;
@@ -1484,11 +621,7 @@ function App() {
   };
   const changeFilters = (next: ImageFilters, reshuffle = false) => {
     clearSelection();
-    requestVersionRef.current++;
-    skipInitialImagesRef.current = false;
-    loadMoreControllerRef.current?.abort();
-    setImagePage(EMPTY_IMAGE_PAGE);
-    setLoading(true);
+    resetLibrary(location);
     setImageFilters({ ...next });
     setExploreSeed(current => next.sort === "explore" ? (reshuffle || !current ? createExploreSeed() : current) : "");
     setViewerImageId(null);
@@ -1503,7 +636,7 @@ function App() {
   const goHome = () => {
     setSearchOpen(false);
     navigateTo("library");
-    setReloadToken((value) => value + 1);
+    reloadGallery();
   };
 
   useEffect(() => {
@@ -1610,7 +743,7 @@ function App() {
             <span>{pageError}</span>
             <button
               type="button"
-              onClick={() => browsingSimilar ? imageSimilarity.retry() : setReloadToken((value) => value + 1)}
+              onClick={() => browsingSimilar ? imageSimilarity.retry() : reloadGallery()}
               aria-label={browsingSimilar ? "重试" : "重新加载"}
               title={browsingSimilar ? "重试" : "重新加载"}
             >
@@ -1619,6 +752,7 @@ function App() {
           </div>
         )}
 
+        <DeferredContent key={section}>
         {browsingDuplicates ? <DuplicateImages ref={galleryLayoutRef} search={debouncedSearch} revision={summary?.revision} viewing={Boolean(viewerImageId)}
           onImagesChange={setDuplicateImages} onOpen={openViewer} toolbarTarget={selectionToolbar} onSelectionChange={setSelectedIds} />
         : (browsingFavorites || browsingTrash || browsingLocal) && authentication.guest ? <div className="empty-state"><strong>图库管理仅限管理员访问</strong><a href="/login">管理员登录</a></div> : browsingLocal ? <LocalStorageView path={path} search={search} albums={summary?.albums ?? []} onOpen={openLocal} onAlbum={chooseAlbum} onImage={viewLocalImage} onMediaChange={setLocalMedia} /> : browsingTrash ? <TrashView search={search} toolbarTarget={selectionToolbar} /> : browsingStorage ? (
@@ -1691,12 +825,14 @@ function App() {
             </div>
           </>
         )}
+        </DeferredContent>
       </main>
       {albumSelection.controls(selectionToolbar)}
-      {uploadOpen && !authentication.guest && <UploadDialog albums={summary?.albums ?? []}
+      {uploadOpen && !authentication.guest && <DeferredContent onClose={() => setUploadOpen(false)}><UploadDialog albums={summary?.albums ?? []}
         initialDestination={browsingLocal ? path : album} onClose={() => setUploadOpen(false)}
-        onUploaded={() => window.dispatchEvent(new CustomEvent(MANAGEMENT_CHANGED, { detail: "upload" }))} />}
+        onUploaded={() => window.dispatchEvent(new CustomEvent(MANAGEMENT_CHANGED, { detail: "upload" }))} /></DeferredContent>}
       {settingsSection && !authentication.guest && (
+        <DeferredContent onClose={() => setSettingsSection(null)}>
         <SettingsDialog
           initialSection={settingsSection}
           onClose={() => setSettingsSection(null)}
@@ -1706,6 +842,7 @@ function App() {
             if (browsingStorage) navigateTo("storage");
           }}
         />
+        </DeferredContent>
       )}
       {!browsingStorage && !browsingTrash && viewerIndex >= 0 && (
         <ImageViewer

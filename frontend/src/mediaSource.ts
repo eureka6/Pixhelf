@@ -65,7 +65,7 @@ export function isMotionCached(source: string): boolean {
 function cancelled() { return new DOMException("Playback cancelled", "AbortError"); }
 
 // Keep original HTTP Range bytes seekable, including seeking exactly to EOF.
-// The owner's abort signal also cancels HEAD requests before a reader exists.
+// The owner's abort signal also cancels the initial request before a reader exists.
 function mediaReader(source: string, filename: string, signal: AbortSignal, retainBytes: boolean) {
   const input = new class {
     private request: AbortController | undefined;
@@ -156,18 +156,27 @@ function mediaReader(source: string, filename: string, signal: AbortSignal, reta
       signal.addEventListener("abort", abort, { once: true });
       const cached = retainBytes ? cachedSource(source) : undefined;
       if (cached) { this.length = cached.length; return 0; }
-      let response = await this.fetch("HEAD");
-      this.checkCurrent(generation);
-      let size = response.headers.get("content-length");
-      if (!size) {
-        response = await this.fetch("GET", "bytes=0-0");
-        size = response.headers.get("content-range")?.split("/").at(-1) ?? null;
-        await response.body?.cancel();
+      // The first Range supplies both length and playable bytes. Retain its
+      // stream so the first demuxer read does not cost another network RTT.
+      const response = await this.fetch("GET", "bytes=0-");
+      try {
+        this.checkCurrent(generation);
+        const range = /^bytes 0-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+        const size = response.status === 206 ? range?.[2] : response.headers.get("content-length");
+        if (!size || !/^\d+$/.test(size) || BigInt(size) <= 0n) throw new Error("无法读取视频文件长度");
+        if ((response.status !== 200 && response.status !== 206)
+          || (response.status === 206 && BigInt(range![1]!) + 1n !== BigInt(size))
+          || !response.body) throw new Error("服务器返回的视频分段不正确");
+        this.length = BigInt(size);
+        this.reader = response.body.getReader();
+        this.streamPosition = 0;
+        this.streamEnd = Number(this.length);
+        if (retainBytes) cacheSource(source, this.length);
+      } catch (error) {
+        void response.body?.cancel().catch(() => {});
+        if (generation === this.generation) this.cancelRequest();
+        throw error;
       }
-      this.checkCurrent(generation);
-      if (!size || !/^\d+$/.test(size)) throw new Error("无法读取视频文件长度");
-      this.length = BigInt(size);
-      if (retainBytes) cacheSource(source, this.length);
       return 0;
     }
 

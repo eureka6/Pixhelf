@@ -58,19 +58,46 @@ globalThis.fetch = async (url, { method, headers, signal }) => {
   requests.push({ url, method, range: headers?.Range });
   const entry = files.get(url);
   assert(entry, `unknown source: ${url}`);
-  if (method === "HEAD") return entry.pendingHead?.()
-    ?? new Response(null, { headers: entry.noHeadLength ? {} : { "content-length": String(entry.size) } });
+  assert.equal(method, "GET", "metadata and media bytes share the first request");
+  if (entry.pendingOpen) return entry.pendingOpen();
   const match = /^bytes=(\d+)-(\d*)$/.exec(headers.Range);
   assert(match, "request a valid single byte range");
   const start = Number(match[1]), end = match[2] ? Number(match[2]) : entry.size - 1;
   assert(start >= 0 && end < entry.size && start <= end);
   const responseHeaders = { "content-range": `bytes ${start}-${end}/${entry.size}`, "content-length": String(end - start + 1) };
   if (entry.badRange) responseHeaders["content-range"] = `bytes 0-${end}/${entry.size}`;
-  if (entry.pending) return entry.pending({ start, end, signal, responseHeaders });
+  if (entry.noLength) delete responseHeaders["content-length"];
+  if (entry.pending && !(entry.delayRead && headers.Range === "bytes=0-")) return entry.pending({ start, end, signal, responseHeaders });
   return new Response(bytes(url, start, end - start + 1 - (entry.truncated ? 1 : 0)), { status: 206, headers: responseHeaders });
 };
 
 try {
+  // One successful GET must supply both metadata and the first playable bytes,
+  // including a server returning the complete file without Range support.
+  const fullUrl = file(71, { pendingOpen() {
+    return new Response(bytes(fullUrl, 0, 71), { headers: { "content-length": "71" } });
+  } });
+  const full = loader(fullUrl, false), beforeFull = requests.length;
+  await full.input.open();
+  await read(full.input, fullUrl, 0, 71);
+  assert.equal(requests.length, beforeFull + 1, "initial bytes must reuse the metadata response stream");
+  await full.input.stop();
+  for (const headers of [
+    { "content-range": "bytes 0-70/*" }, { "content-range": "bytes 1-70/71" },
+    { "content-range": "bytes 0-69/71" }, { "content-range": "bytes 0-70/0" },
+  ]) {
+    let released = false;
+    const invalidUrl = file(71, { pendingOpen() {
+      return new Response(new ReadableStream({ cancel() { released = true; } }), { status: 206, headers });
+    } });
+    const invalid = loader(invalidUrl);
+    await assert.rejects(invalid.input.open(), /视频/);
+    assert(released, "invalid metadata must release its response body");
+    delete files.get(invalidUrl).pendingOpen;
+    await invalid.input.open();
+    await read(invalid.input, invalidUrl, 0, 71);
+    await invalid.input.stop();
+  }
   // Native and compatibility playback consume exactly the same cached original.
   const nativeUrl = file(BLOCK * 2 + 71);
   const native = await motionBlob(nativeUrl, new AbortController().signal);
@@ -109,7 +136,7 @@ try {
   await cancelledPreload;
   finishShared();
   assert.deepEqual(new Uint8Array(await (await sharedPlayback).arrayBuffer()), bytes(sharedUrl, 0, files.get(sharedUrl).size));
-  assert.equal(requests.length, beforeShared + 2, "preload handoff must share both HEAD and GET");
+  assert.equal(requests.length, beforeShared + 1, "preload handoff must share the single metadata/media GET");
   assert.equal(getEventListeners(playback.signal, "abort").length, 0, "completed owners release their listeners");
 
   // Component cleanup can release the preload before the player is mounted in
@@ -132,7 +159,7 @@ try {
   finishHandoff();
   await left;
   assert.deepEqual(new Uint8Array(await (await entered).arrayBuffer()), bytes(handoffUrl, 0, files.get(handoffUrl).size));
-  assert.equal(requests.length, beforeHandoff + 2, "releasing then acquiring in one turn must not restart the download");
+  assert.equal(requests.length, beforeHandoff + 1, "releasing then acquiring in one turn must not restart the download");
   assert.equal(getEventListeners(leaving.signal, "abort").length, 0);
   assert.equal(getEventListeners(entering.signal, "abort").length, 0);
 
@@ -150,7 +177,7 @@ try {
   assert.equal(getEventListeners(reusable.abort.signal, "abort").length, 0);
 
   // A full playback includes non-linear demuxer reads. Recreating the decoder
-  // and replaying needs neither HEAD nor GET, even with no HTTP cache at all.
+  // and replaying needs no requests, even with no HTTP cache at all.
   const url = file(BLOCK * 3 + 71);
   const first = loader(url);
   await first.input.open();
@@ -168,7 +195,7 @@ try {
   replay.abort.abort();
   assert.equal(requests.length, before, "completed replay uses no requests");
   const ranges = requests.filter(request => request.url === url && request.method === "GET");
-  assert.deepEqual(ranges.map(request => request.range), [`bytes=${BLOCK * 3}-${BLOCK * 3 + 70}`, `bytes=0-${BLOCK * 3 - 1}`],
+  assert.deepEqual(ranges.map(request => request.range), ["bytes=0-", `bytes=${BLOCK * 3}-${BLOCK * 3 + 70}`, `bytes=0-${BLOCK * 3 - 1}`],
     "stream consecutive missing blocks in one request without downloading the cached footer again");
 
   // Early pointer leave retains completed blocks and cancels the unread stream.
@@ -194,7 +221,7 @@ try {
   const beforeReplacement = requests.length;
   await newer.input.open();
   await read(newer.input, replacement, 0, 23);
-  assert.equal(requests.length, beforeReplacement + 2);
+  assert.equal(requests.length, beforeReplacement + 1);
   newer.abort.abort();
 
   // Abort midway through a response body: unfinished bytes must not become a
@@ -222,16 +249,16 @@ try {
   retry.abort.abort();
 
   // Cancelling during metadata loading must not start a fallback GET or cache
-  // a stale length when the HEAD response has already been queued for delivery.
+  // a stale length when the initial response has already been queued for delivery.
   let finishHead;
-  const headUrl = file(71, { pendingHead() { return new Promise(resolve => { finishHead = () => resolve(new Response(null)); }); } });
+  const headUrl = file(71, { pendingOpen() { return new Promise(resolve => { finishHead = () => resolve(new Response(null)); }); } });
   const head = loader(headUrl), beforeHead = requests.length;
   const pendingHead = assert.rejects(head.input.open(), { name: "AbortError" });
   head.abort.abort();
   finishHead();
   await pendingHead;
   assert.equal(requests.length, beforeHead + 1);
-  delete files.get(headUrl).pendingHead;
+  delete files.get(headUrl).pendingOpen;
   const nextHead = loader(headUrl);
   await nextHead.input.open();
   assert.equal(requests.length, beforeHead + 2, "aborted metadata is not cached");
@@ -240,10 +267,12 @@ try {
   // Simulate a response settling immediately after a seek cancels it. A stale
   // read must not move the new cursor or supply bytes from the old position.
   let finishStale;
-  const staleUrl = file(BLOCK + 8, { pending({ start, end, responseHeaders }) {
+  const staleUrl = file(BLOCK + 8, { delayRead: true, pending({ start, end, responseHeaders }) {
     return new Promise(resolve => { finishStale = () => resolve(new Response(bytes(staleUrl, start, end - start + 1), { status: 206, headers: responseHeaders })); });
   } });
   const stale = loader(staleUrl);
+  await stale.input.open();
+  await stale.input.stop();
   await stale.input.open();
   const staleRead = assert.rejects(stale.input.read(new Uint8Array(3)), { name: "AbortError" });
   assert.equal(await stale.input.seek(BigInt(BLOCK)), 0);
@@ -257,10 +286,12 @@ try {
   // it as cancellation and close its body rather than reporting a stale error.
   for (const status of [206, 500]) {
     let respond, released = false;
-    const lateUrl = file(71, { pending() { return new Promise(resolve => { respond = () => resolve(new Response(
+    const lateUrl = file(71, { delayRead: true, pending() { return new Promise(resolve => { respond = () => resolve(new Response(
       new ReadableStream({ cancel() { released = true; } }), { status },
     )); }); } });
     const late = loader(lateUrl);
+    await late.input.open();
+    await late.input.stop();
     await late.input.open();
     const reading = assert.rejects(late.input.read(new Uint8Array(3)), { name: "AbortError" });
     late.abort.abort();
@@ -305,7 +336,7 @@ try {
   for (const retain of [true, false]) {
     for (const ignoredRange of [true, false]) {
       let released = false;
-      const malformedUrl = file(BLOCK + 8, { pending({ start, end, responseHeaders }) {
+      const malformedUrl = file(BLOCK + 8, { delayRead: true, pending({ start, end, responseHeaders }) {
         return new Response(new ReadableStream({ start(controller) {
           controller.enqueue(bytes(malformedUrl, start, end - start + 2));
         }, cancel() { released = true; } }), { status: ignoredRange ? 200 : 206, headers: responseHeaders });
@@ -321,8 +352,8 @@ try {
     }
   }
 
-  // Length fallback, exact EOF and the ordinary-video streaming path survive.
-  const fallbackUrl = file(71, { noHeadLength: true });
+  // Content-Range without Content-Length, exact EOF and the ordinary-video streaming path survive.
+  const fallbackUrl = file(71, { noLength: true });
   const fallback = loader(fallbackUrl);
   await fallback.input.open();
   assert.equal(await fallback.input.size(), 71n);
@@ -368,7 +399,7 @@ try {
   const evicted = loader(largeUrls[1]), beforeMiss = requests.length;
   await evicted.input.open();
   await read(evicted.input, largeUrls[1], 0, 1);
-  assert.equal(requests.length, beforeMiss + 2, "least recently used source is evicted when exceeding 64 MiB");
+  assert.equal(requests.length, beforeMiss + 1, "least recently used source is evicted when exceeding 64 MiB");
   evicted.abort.abort();
   // Gallery speculation must not push out a retained replay or next slide.
   const retainedUrl = file(5 * MiB), releaseRetained = retainMotionSource(retainedUrl);

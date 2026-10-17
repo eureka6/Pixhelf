@@ -1,6 +1,8 @@
 use std::{cmp::Reverse, sync::Arc};
 
-use super::{ImageKind, ImageOrientation, ImageRequest, ImageSort, ImageView, ImagesResponse};
+use super::models::{
+    ImageKind, ImageOrientation, ImageRequest, ImageSort, ImageView, ImagesResponse,
+};
 use crate::gallery::{GalleryIndex, ImageRecord};
 
 pub(super) fn image_page(index: &GalleryIndex, query: &ImageRequest) -> ImagesResponse {

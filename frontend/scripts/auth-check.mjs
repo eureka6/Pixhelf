@@ -495,6 +495,10 @@ async function checkAuthentication(protocol) {
       assert(await nav.getByRole("link", { name: "管理员登录", exact: true }).isVisible());
       await page.screenshot({ path: join(tmpdir(), `pixhelf-guest-gallery-${protocol}-${width}.png`), animations: "disabled" });
       assert.equal(await nav.getByRole("button", { name: "相似图片", exact: true }).count(), 1);
+      if (width <= 720) {
+        await page.locator(".gallery-sidebar-toggle").click();
+        await page.locator(".mobile-nav-layer").waitFor({ state: "detached" });
+      }
       await page.locator(".search-toggle").click();
       await page.getByRole("button", { name: "以图搜图", exact: true }).waitFor();
       await page.getByLabel("上传查询图片").setInputFiles({ name: "guest-query.png", mimeType: "image/png", buffer: png(0) });

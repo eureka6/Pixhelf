@@ -15,6 +15,7 @@ const CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) struct Asset {
     name: &'static str,
     source: AssetSource,
+    pub(crate) brotli: Option<&'static [u8]>,
 }
 
 #[derive(Clone, Copy)]
@@ -164,6 +165,13 @@ mod tests {
                 "{}",
                 asset.name
             );
+            if let Some(compressed) = asset.brotli {
+                let mut decoded = Vec::new();
+                brotli::Decompressor::new(compressed, 8192)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                assert_eq!(decoded, original, "HTTP Brotli: {}", asset.name);
+            }
         }
     }
 

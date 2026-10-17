@@ -1,5 +1,23 @@
 use super::pagination::exploration_rank;
-use super::*;
+use super::{
+    AppState, frontend::ASSET_VERSION, models::ImageView, similarity::MAX_SEARCH_UPLOAD_BYTES,
+};
+use crate::{
+    auth::AuthConfig,
+    gallery::{GalleryIndex, ImageRecord},
+    text_search::TextSearchEmbedding,
+    thumbs::ThumbnailManager,
+};
+use axum::{
+    Router,
+    body::Body,
+    extract::Request,
+    http::{Method, StatusCode, header},
+    response::Response,
+};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tower::ServiceExt;
 
 fn router(state: AppState) -> Router {
     super::router(state, AuthConfig::default())
@@ -37,6 +55,85 @@ async fn request(path: &str) -> Response {
         .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn embedded_assets_serve_precompressed_bytes_with_variant_validators() {
+    use std::io::Read;
+    let path = format!("/assets/{ASSET_VERSION}/GalleryApp.js");
+    let compressed = empty_router()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::ACCEPT_ENCODING, "br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(compressed.status(), StatusCode::OK);
+    assert_eq!(compressed.headers()[header::CONTENT_ENCODING], "br");
+    assert!(
+        compressed
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .any(|value| value.to_str().unwrap().contains("Accept-Encoding"))
+    );
+    let etag = compressed.headers()[header::ETAG].clone();
+    let length = compressed.headers()[header::CONTENT_LENGTH].clone();
+    let bytes = axum::body::to_bytes(compressed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        length.to_str().unwrap().parse::<usize>().unwrap(),
+        bytes.len()
+    );
+    let mut decoded = Vec::new();
+    brotli::Decompressor::new(bytes.as_ref(), 8192)
+        .read_to_end(&mut decoded)
+        .unwrap();
+    let plain = request(&path).await;
+    assert_ne!(plain.headers()[header::ETAG], etag);
+    assert_eq!(
+        axum::body::to_bytes(plain.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        decoded
+    );
+    assert!(bytes.len() < decoded.len() / 2);
+    let cached = empty_router()
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::ACCEPT_ENCODING, "br")
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(cached.headers()[header::ETAG], etag);
+    let head = empty_router()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(&path)
+                .header(header::ACCEPT_ENCODING, "br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.headers()[header::CONTENT_LENGTH], length);
+    assert!(
+        axum::body::to_bytes(head.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -635,70 +732,6 @@ fn exploration_rank_is_stable_and_seeded() {
         exploration_rank(&first_seed, "image-1"),
         exploration_rank(&first_seed, "image-2")
     );
-}
-
-#[test]
-fn diversity_penalty_can_surface_a_distinct_result() {
-    assert_eq!(diversity_rank(0.94, REDUNDANCY_PENALTY_START), 0.94);
-    assert!(diversity_rank(0.94, 0.0) > diversity_rank(0.99, 1.0));
-    assert!(diversity_rank(0.99, 0.90) > diversity_rank(0.94, 0.0));
-}
-
-#[test]
-fn natural_language_search_ranks_shared_text_image_embeddings() {
-    let record = |id: &str, name: &str| {
-        Arc::new(ImageRecord {
-            id: id.into(),
-            path: name.into(),
-            relative_path: name.into(),
-            search_key: name.to_lowercase(),
-            name: name.into(),
-            album: String::new(),
-            width: 10,
-            height: 10,
-            size: 1,
-            modified_ms: 1,
-            modified_ns: 1,
-            motion: None,
-            video: None,
-        })
-    };
-    let query = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));
-    let red = Arc::new(TextSearchEmbedding::for_test([(0, 100)]));
-    let blue = Arc::new(TextSearchEmbedding::for_test([(1, 100)]));
-    let ranked = rank_text_search(
-        query,
-        vec![
-            (record("blue", "first.png"), Some(blue), false),
-            (record("red", "second.png"), Some(red), false),
-        ],
-    );
-    assert_eq!(ranked[0].id, "red");
-    assert_eq!(ranked[1].id, "blue");
-}
-
-#[test]
-fn normalizes_image_queries_once() {
-    let query = ImagesQuery {
-        album: Some("album".into()),
-        search: Some("  PHOTO  ".into()),
-        offset: Some(usize::MAX),
-        limit: Some(usize::MAX),
-        ..ImagesQuery::default()
-    }
-    .normalize()
-    .unwrap();
-
-    assert_eq!(query.album.as_deref(), Some("album"));
-    assert_eq!(query.search.as_deref(), Some("photo"));
-    assert_eq!(query.offset, usize::MAX);
-    assert_eq!(query.limit, MAX_PAGE_SIZE);
-
-    let oversized = ImagesQuery {
-        search: Some("x".repeat(MAX_QUERY_VALUE_BYTES + 1)),
-        ..ImagesQuery::default()
-    };
-    assert_eq!(oversized.normalize().unwrap_err(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1996,13 +2029,6 @@ async fn frontend_embeds_bootstrap_and_versioned_assets() {
     assert!(!html.contains("/assets/app.css"));
     assert!(html.contains(r#""summary":{"total":0"#));
     assert!(!html.contains("__PIXHELF_BOOTSTRAP__"));
-}
-
-#[test]
-fn bootstrap_json_cannot_close_its_script_element() {
-    let escaped = escape_script_json(r#"{"name":"</script><script>"}"#.to_owned());
-    assert!(!escaped.contains('<'));
-    assert!(escaped.contains(r#"\u003c/script\u003e"#));
 }
 
 #[tokio::test]

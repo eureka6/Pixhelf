@@ -177,16 +177,22 @@ try {
       await f.open();
       const bounds = await page.locator('.search-dialog').boundingBox();
       assert(bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= 844, 'filter panel fits the screen');
+      // The next page can be prefetched as soon as the filtered layout is ready.
+      const more = width === 1440 ? page.waitForResponse(response => {
+        const url = new URL(response.url());
+        return url.pathname === '/api/images' && url.searchParams.get('kind') === 'photo' && url.searchParams.get('offset') === '60';
+      }) : null;
       await f.change('媒体类型', 'photo', 'kind');
       assert.equal(f.requests.at(-1).get('kind'), 'photo');
       await page.locator('.gallery-filter-summary').getByText('90 项', { exact: true }).waitFor();
       if (width === 1440) {
         await page.locator('.search-dialog').getByRole('button', { name: '搜索', exact: true }).click();
-        const more = page.waitForResponse(response => new URL(response.url()).searchParams.get('offset') === '60');
         await page.locator('.load-sentinel').scrollIntoViewIfNeeded();
         await more; await f.idle();
+        await page.waitForFunction(() => document.querySelectorAll('.image-card').length === 90);
         assert.equal(f.requests.at(-1).get('kind'), 'photo', 'pagination keeps the filter');
         assert.equal(f.requests.at(-1).get('offset'), '60');
+        await page.evaluate(() => scrollTo({ top: 0, behavior: 'instant' }));
         await f.open();
       }
       await f.change('图片画幅', 'portrait', 'orientation');

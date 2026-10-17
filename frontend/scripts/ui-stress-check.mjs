@@ -26,7 +26,6 @@ async function fixture(width, overrides = {}) {
   const errors = [], requests = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("request", request => requests.push(new URL(request.url()).pathname));
-  await page.addInitScript(() => localStorage.setItem("pixhelf.sidebar-collapsed", "false"));
   await page.addInitScript(() => {
     const Observer = window.IntersectionObserver;
     window.IntersectionObserver = class extends Observer {
@@ -85,6 +84,42 @@ async function check(name, run) {
 }
 
 try {
+  await check("deferred modules: pending settings can be dismissed and reopened", async () => {
+    const gate = Promise.withResolvers();
+    const f = await fixture(1440, { "/assets/SettingsDialog.js": async route => {
+      await gate.promise;
+      return serveFrontendAsset(route);
+    } });
+    try {
+      assert(!f.requests.includes("/assets/SettingsDialog.js"), "settings stay outside the initial download");
+      await f.openNavigation();
+      await f.page.locator(`${f.sidebar} .sidebar-settings-button`).click();
+      await f.page.locator(".deferred-dialog[open]").waitFor();
+      await f.page.getByRole("button", { name: "关闭", exact: true }).click();
+      const downloaded = f.page.waitForResponse(response => response.url().endsWith("/SettingsDialog.js"));
+      gate.resolve();
+      await downloaded;
+      assert.equal(await f.page.locator(".settings-dialog[open], .deferred-dialog[open]").count(), 0,
+        "a late module must not reopen a dismissed dialog");
+      await f.openNavigation();
+      await f.page.locator(`${f.sidebar} .sidebar-settings-button`).click();
+      await f.page.locator(".settings-dialog[open]").waitFor();
+      await f.page.keyboard.press("Escape");
+      await f.page.locator(".settings-dialog").waitFor({ state: "detached" });
+    } finally { gate.resolve(); await f.close(); }
+  });
+  await check("deferred modules: failed downloads leave an accessible recovery action", async () => {
+    const f = await fixture(390, { "/assets/SettingsDialog.js": route => route.abort("failed") });
+    try {
+      await f.openNavigation();
+      await f.page.locator(`${f.sidebar} .sidebar-settings-button`).click();
+      await f.page.locator(".deferred-dialog [role=alert]").waitFor();
+      assert(await f.page.getByRole("button", { name: "重新加载", exact: true }).isVisible());
+      await f.page.getByRole("button", { name: "关闭", exact: true }).click();
+      await f.page.locator(".deferred-dialog").waitFor({ state: "detached" });
+      assert(await f.page.locator(".image-card").first().isVisible());
+    } finally { await f.close(); }
+  });
   for (const width of [1440, 390, 320]) await check(`${width}: scrolling hides and restores the topbar independently of navigation`, async () => {
     const f = await fixture(width);
     const { page } = f;
@@ -96,25 +131,16 @@ try {
     };
     const hidden = async expected => assert.equal(await bar.getAttribute('data-hidden'), String(expected));
     try {
-      const sidebarBounds = await page.locator('.desktop-sidebar').boundingBox();
-      const brandBounds = width > 720 ? await page.locator('.desktop-sidebar .brand').boundingBox() : null;
+      const brand = page.locator('.topbar .brand');
       const toggleBounds = await toggle.boundingBox();
-      assert.equal(await page.locator('.topbar .brand, .brand-version').count(), 0);
+      assert(await brand.isVisible(), 'the home link lives in the fixed topbar');
+      assert.equal(await page.locator('.desktop-sidebar .brand, .brand-version').count(), 0);
       const galleryTop = await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY);
       await scroll(320); await hidden(true);
-      assert((await page.locator('.search-toggle').boundingBox()).y < 0);
+      if (width > 720) assert((await page.locator('.search-toggle').boundingBox()).y < 0);
+      else assert.equal(await page.locator('.bottom-dock').getAttribute('data-navigation-hidden'), 'true');
       assert.deepEqual(await toggle.boundingBox(), toggleBounds, 'the sidebar button must remain in place');
       assert.equal(await page.locator('.content').evaluate(element => element.getBoundingClientRect().top + scrollY), galleryTop, 'hiding the bar must not shift the gallery');
-      if (width > 720) {
-        assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
-        assert.deepEqual(await page.locator('.desktop-sidebar').boundingBox(), sidebarBounds, 'hiding the topbar must leave the expanded sidebar in place');
-        assert.deepEqual(await page.locator('.desktop-sidebar .brand').boundingBox(), brandBounds, 'the logo stays with the sidebar');
-        await page.screenshot({ path: `${output}/sidebar-brand-${width}.png` });
-        await scroll(280); await hidden(false);
-        await toggle.click();
-        await page.waitForTimeout(300);
-        await scroll(600); await hidden(true);
-      }
       assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
       assert(await toggle.evaluate(button => {
         const box = button.getBoundingClientRect();
@@ -123,19 +149,21 @@ try {
       await page.screenshot({ path: `${output}/topbar-hidden-${width}.png` });
       await toggle.click(); await hidden(false);
       await page.locator(f.sidebar).waitFor();
-      await page.locator(`${f.sidebar} .brand-name`).waitFor();
+      await brand.locator('.brand-name').waitFor();
       await page.waitForTimeout(250);
-      assert(await page.locator(`${f.sidebar} .brand`).evaluate(brand => {
+      assert(await brand.evaluate(brand => {
         const box = brand.getBoundingClientRect();
         const icon = brand.querySelector('img').getBoundingClientRect();
         const text = brand.querySelector('.brand-name').getBoundingClientRect();
         return brand.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
           && Math.abs(icon.y + icon.height / 2 - text.y - text.height / 2) < 1;
-      }), 'sidebar logo and text form one aligned, clickable link');
+      }), 'the topbar logo and text form one aligned, clickable link');
       await page.screenshot({ path: `${output}/sidebar-brand-open-${width}.png` });
-      if (width <= 720) await toggle.click();
+      await toggle.click();
+      await page.mouse.move(width - 20, 400);
       await page.locator('.mobile-nav-layer').waitFor({ state: 'detached' });
       await page.locator('.justified-gallery[data-resizing="true"]').waitFor({ state: 'detached' });
+      await page.waitForFunction(() => !document.querySelector('.desktop-sidebar')?.getAnimations().length);
       const top = await page.evaluate(() => scrollY);
       await scroll(top + 160); await hidden(true);
       await scroll(top + 156); await hidden(true);
@@ -144,16 +172,19 @@ try {
       await scroll(top + 300); await hidden(false);
       await page.keyboard.press('Escape');
       await scroll(top + 500); await hidden(true);
+      await toggle.focus();
+      await page.waitForTimeout(250); await hidden(false);
       await page.locator('.search-toggle').focus();
       await page.keyboard.press('Enter');
       const searchFits = await page.evaluate(async () => {
         const start = performance.now();
         while (performance.now() - start < 250) {
           await new Promise(requestAnimationFrame);
-          const panel = document.querySelector('.search-popover-panel');
+          const panel = document.querySelector('.search-dialog[open]');
+          if (!panel) return false;
           const box = panel.getBoundingClientRect();
           if (box.left < 0 || box.right > innerWidth) return false;
-          if (innerWidth <= 720 && (Math.abs(box.left - 8) > 1 || Math.abs(panel.offsetWidth - (innerWidth - 16)) > 1)) return false;
+          if (box.top < 0 || box.bottom > innerHeight || box.height <= 0) return false;
         }
         return true;
       });
@@ -294,7 +325,8 @@ try {
       return reply({ enabled: writes > 0 });
     } });
     try {
-      await f.page.locator(".sidebar-settings-button").first().click();
+      await f.openNavigation();
+      await f.page.locator(`${f.sidebar} .sidebar-settings-button`).click();
       await f.page.locator(".settings-nav").getByRole("button", { name: "访客模式" }).click();
       await f.page.getByRole("switch").waitFor();
       await f.page.getByRole("switch").evaluate(input => { for (let i = 0; i < 40; i++) input.click(); });
