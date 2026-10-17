@@ -7,7 +7,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Rust and cross-compilation toolchains
+    - name: Install system build dependencies
       shell: sh
       env:
         IMAGE_ONLY: ${{ inputs.image-only }}
@@ -23,48 +23,141 @@ runs:
           musl-tools \
           nasm \
           pkg-config \
-          python3-venv
+          python3-venv \
+          zstd
         if [ "$IMAGE_ONLY" != true ]; then
           set -- "$@" binutils-aarch64-linux-gnu ffmpeg
         fi
         apt-get install --yes --no-install-recommends "$@"
-        curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
-          | sh -s -- --default-toolchain stable --profile minimal --no-modify-path -y
+        # Debug symbols and incremental object files make CI caches much larger.
+        printf '%s\n' CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 >> "$GITHUB_ENV"
+
+    - name: Cache Rust and cross-compilation toolchains
+      uses: https://data.forgejo.org/actions/cache@v3
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cargo/bin
+          ~/.rustup
+          /opt/cargo-zigbuild
+        key: pixhelf-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '.forgejo/actions/build-release/action.yml') }}-${{ inputs.image-only }}
+        restore-keys: |
+          pixhelf-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', '.forgejo/actions/build-release/action.yml') }}-
+
+    - name: Prepare Rust and cross-compilation toolchains
+      id: toolchain
+      shell: sh
+      env:
+        IMAGE_ONLY: ${{ inputs.image-only }}
+      run: |
+        set -eu
+        rust_version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+        if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+            | sh -s -- --default-toolchain "$rust_version" --profile minimal --no-modify-path -y
+        fi
+        "$HOME/.cargo/bin/rustup" toolchain install "$rust_version" --profile minimal --no-self-update
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
         if [ "$IMAGE_ONLY" != true ]; then
           "$HOME/.cargo/bin/rustup" target add aarch64-unknown-linux-musl
         fi
-        python3 -m venv /opt/cargo-zigbuild
-        /opt/cargo-zigbuild/bin/pip install \
-          --disable-pip-version-check \
-          --no-cache-dir \
-          cargo-zigbuild==0.23.0 \
-          ziglang==0.16.0 \
-          meson==1.10.0 \
-          ninja==1.13.0
+        if [ ! -x /opt/cargo-zigbuild/bin/cargo-zigbuild ]; then
+          python3 -m venv /opt/cargo-zigbuild
+          /opt/cargo-zigbuild/bin/pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            cargo-zigbuild==0.23.0 \
+            ziglang==0.16.0 \
+            meson==1.10.0 \
+            ninja==1.13.0
+        fi
         echo "/opt/cargo-zigbuild/bin" >> "$GITHUB_PATH"
         "$HOME/.cargo/bin/rustc" --version
         /opt/cargo-zigbuild/bin/cargo-zigbuild --version
         /opt/cargo-zigbuild/bin/python -m ziglang version
+        identity=$({ "$HOME/.cargo/bin/rustc" -vV; cc --version; /opt/cargo-zigbuild/bin/python -m ziglang version; } | sha256sum | cut -d ' ' -f 1)
+        echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+    - name: Cache npm downloads
+      uses: https://data.forgejo.org/actions/cache@v3
+      continue-on-error: true
+      with:
+        path: ~/.npm
+        key: pixhelf-npm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json') }}
+        restore-keys: |
+          pixhelf-npm-v1-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Install frontend dependencies
       working-directory: frontend
       shell: sh
-      run: npm ci
+      run: sh ../packaging/time-command.sh 'npm dependencies' npm ci --prefer-offline --no-audit --no-fund
+
+    # npm ci removes node_modules; restore the verified asset caches afterwards.
+    - name: Cache downloaded and compressed frontend assets
+      uses: https://data.forgejo.org/actions/cache@v3
+      continue-on-error: true
+      with:
+        path: frontend/node_modules/.cache
+        key: pixhelf-assets-v1-${{ hashFiles('frontend/package-lock.json', 'frontend/libmedia-assets.json', 'frontend/scripts/pack-assets.mjs') }}-${{ hashFiles('frontend/src/**', 'frontend/index.html', 'frontend/vite.config.ts', 'frontend/tsconfig*.json') }}
+        restore-keys: |
+          pixhelf-assets-v1-${{ hashFiles('frontend/package-lock.json', 'frontend/libmedia-assets.json', 'frontend/scripts/pack-assets.mjs') }}-
+
+    - name: Cache compiled and compressed media runtimes
+      uses: https://data.forgejo.org/actions/cache@v3
+      continue-on-error: true
+      with:
+        path: target/media
+        key: pixhelf-media-v1-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('packaging/build-media-runtime.sh', 'packaging/pack-media.mjs', '.forgejo/actions/build-release/action.yml') }}-${{ inputs.image-only }}
+        restore-keys: |
+          pixhelf-media-v1-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('packaging/build-media-runtime.sh', 'packaging/pack-media.mjs', '.forgejo/actions/build-release/action.yml') }}-
+
+    - name: Cache Cargo dependencies and compilation
+      uses: https://data.forgejo.org/actions/cache@v3
+      continue-on-error: true
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/debug
+          target/release
+          target/x86_64-unknown-linux-musl
+          target/aarch64-unknown-linux-musl
+          target/zigbuild
+        key: pixhelf-cargo-v1-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('.forgejo/actions/build-release/action.yml') }}-${{ inputs.image-only }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        restore-keys: |
+          pixhelf-cargo-v1-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('.forgejo/actions/build-release/action.yml') }}-${{ inputs.image-only }}-
 
     - name: Build frontend
       working-directory: frontend
       shell: sh
-      run: npm run build
+      run: |
+        set -eu
+        sh ../packaging/time-command.sh 'frontend build' npm run build
+        sh ../packaging/time-command.sh 'frontend compression' node scripts/pack-assets.mjs dist/assets ../target/frontend-packed
+
+    - name: Prepare embedded media runtimes
+      shell: sh
+      env:
+        IMAGE_ONLY: ${{ inputs.image-only }}
+      run: |
+        set -eu
+        export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
+        set -- x86_64
+        if [ "$IMAGE_ONLY" != true ]; then set -- "$@" aarch64; fi
+        for arch in "$@"; do
+          sh packaging/time-command.sh "media compile ${arch}" sh packaging/build-media-runtime.sh "${arch}-unknown-linux-musl" target/media
+          sh packaging/time-command.sh "media compression ${arch}" node packaging/pack-media.mjs "target/media/${arch}" "target/media/${arch}/packed" "$arch"
+        done
 
     - name: Test Rust application
       if: inputs.image-only != 'true'
       shell: sh
       run: |
+        set -eu
         export PATH="/opt/cargo-zigbuild/bin:$HOME/.cargo/bin:$PATH"
         export PIXHELF_SKIP_FRONTEND_BUILD=1
-        cargo test --locked
+        sh packaging/time-command.sh 'Rust tests and test compilation' cargo test --locked
 
     - name: Build static musl binaries
       shell: sh
@@ -83,7 +176,7 @@ runs:
           machine="$3"
           binary="target/${target}/release/pixhelf"
 
-          cargo zigbuild --release --locked --target "$target"
+          sh packaging/time-command.sh "Rust release ${target}" cargo zigbuild --release --locked --target "$target" --timings
           file "$binary"
 
           if [ "$(wc -c < "$binary")" -gt 41943040 ]; then
@@ -107,7 +200,7 @@ runs:
           if [ "$IMAGE_ONLY" = true ]; then
             install -m 0755 "$binary" "dist/${asset}"
           else
-            sh packaging/pack-release.sh "$binary" "dist/${asset}"
+            sh packaging/time-command.sh "UPX ${asset}" sh packaging/pack-release.sh "$binary" "dist/${asset}"
           fi
         }
 
@@ -125,7 +218,7 @@ runs:
         dist/pixhelf-amd64-linux --help >/dev/null
         env PATH=/nonexistent dist/pixhelf-amd64-linux --check-media
         if [ "$IMAGE_ONLY" != true ]; then
-          node packaging/check-standalone.mjs dist/pixhelf-amd64-linux
-          tar -cJf dist/pixhelf-media-sources.tar.xz packaging/build-media-runtime.sh packaging/pack-release.sh \
+          sh packaging/time-command.sh 'standalone verification' node packaging/check-standalone.mjs dist/pixhelf-amd64-linux
+          sh packaging/time-command.sh 'media source archive' tar -cJf dist/pixhelf-media-sources.tar.xz packaging/build-media-runtime.sh packaging/pack-release.sh \
             packaging/pack-media.mjs packaging/THIRD_PARTY.md target/media/sources/
         fi

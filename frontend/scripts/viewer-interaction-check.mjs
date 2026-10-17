@@ -320,7 +320,7 @@ try {
       const point = { x: width - 20, y: center.y };
       await begin(point); await page.waitForTimeout(1550);
       const steps = (await state()).events;
-      assert(steps.length >= 4 && steps.length <= 6, "the hold gradually accelerates across image changes");
+      assert(steps.length >= 4 && steps.length <= 5, "the hold gradually accelerates across image changes");
       assert.equal(await page.locator(".photo-card-menu:popover-open").count(), 0);
       await end(); await page.waitForTimeout(700);
       assert.deepEqual((await state()).events, steps, "release must not add a click or retain a timer");

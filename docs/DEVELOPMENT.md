@@ -35,7 +35,7 @@ Pixhelf 使用 Rust / Axum 提供接口，Preact / TypeScript 提供界面。正
 
 ## 本地启动
 
-需要 Linux、Rust stable、支持 Vite 7 的 Node.js（22.12+）和 npm。首次 Rust 构建还会编译媒体组件，需要 C / musl 工具链、NASM、pkg-config、Meson 和 Ninja；完整安装清单及跨架构配置见[构建流程](../.forgejo/actions/build-release/action.yml)。
+需要 Linux、Rust（版本由 `rust-toolchain.toml` 固定）、支持 Vite 7 的 Node.js（22.12+）和 npm。首次 Rust 构建还会编译媒体组件，需要 C / musl 工具链、NASM、pkg-config、Meson 和 Ninja；完整安装清单及跨架构配置见[构建流程](../.forgejo/actions/build-release/action.yml)。
 
 在项目根目录安装依赖并构建一次前端：
 
@@ -66,6 +66,8 @@ Vite 的 HTML 没有服务端注入的登录状态，因此上述模式只用于
 
 `PIXHELF_SKIP_FRONTEND_BUILD=1` 复用已有 `frontend/dist`，方便只改后端；不设置时，Cargo 会在前端源码变化后自动构建前端。
 
+CI 缓存、模型层复用、构建计时和发布脚本验证见[构建加速与计时](BUILD.md)。
+
 ## 验证
 
 从项目根目录执行：
@@ -95,7 +97,7 @@ PIXHELF_SKIP_FRONTEND_BUILD=1 cargo test --locked
 
 `management-check` 和 `auth-check` 会启动后端并使用临时图库，先执行 `PIXHELF_SKIP_FRONTEND_BUILD=1 cargo build --locked` 更新 `target/debug/pixhelf`。其它专用检查及夹具位于 `frontend/scripts/`；后端接口回归位于 `src/web/tests.rs`，模块算法测试放在对应模块内。
 
-连续切图的计时参数集中在 `useViewerNavigation.ts`：按住 400 毫秒后开始重复，逐步加速到每 170 毫秒一张。键盘与鼠标侧键在按下时先切一张，感应区点按在松手时切一张；感应区移动超过手势阈值后交给图片拖动，取消长按及松手点按。分页等待不会累积切图次数或继续加速；重复切图松手、失焦或关闭后立即取消。
+连续切图的计时参数集中在 `useViewerNavigation.ts`：按住 400 毫秒后开始重复，重复间隔从约 400 毫秒逐步缩短，最快每 250 毫秒一张（每秒 4 张），留出识别图片和松手的时间。键盘与鼠标侧键在按下时先切一张，感应区点按在松手时切一张；感应区移动超过手势阈值后交给图片拖动，取消长按及松手点按。分页等待不会累积切图次数或继续加速；重复切图松手、失焦或关闭后立即取消。
 
 `startup-check` 的旧扫描暂停夹具依赖 PATH 中的 FFprobe，当前内置媒体运行时不会调用它，需要更新夹具后再使用。首次扫描期间的接口保护已由后端测试覆盖。
 

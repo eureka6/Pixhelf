@@ -57,7 +57,9 @@ if [ "$media_arch" = "$(uname -m)" ]; then
 else
   media_strip="${PIXHELF_MEDIA_STRIP:-$media_arch-linux-gnu-strip}"
 fi
-media_jobs="${PIXHELF_MEDIA_JOBS:-4}"
+media_jobs="${PIXHELF_MEDIA_JOBS:-$(nproc)}"
+# Leave headroom on large runners; callers can explicitly raise this limit.
+if [ -z "${PIXHELF_MEDIA_JOBS:-}" ] && [ "$media_jobs" -gt 8 ]; then media_jobs=8; fi
 media_work=$(mktemp -d "$media_root/build-XXXXXX")
 trap 'rm -rf "$media_work"' EXIT HUP INT TERM
 media_prefix="$media_work/prefix"

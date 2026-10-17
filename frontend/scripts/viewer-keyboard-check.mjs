@@ -142,7 +142,7 @@ try {
     await page.keyboard.up("ArrowRight");
   });
 
-  await check("holding gradually accelerates to six per second despite dense OS repeats", async () => {
+  await check("holding gradually accelerates to four per second despite dense OS repeats", async () => {
     await beginHold();
     for (let elapsed = 0; elapsed < 6000; elapsed += 20) {
       await page.keyboard.down("ArrowRight");
@@ -150,12 +150,12 @@ try {
     }
     const steps = await events();
     const gaps = steps.slice(2).map((event, i) => event.time - steps[i + 1].time);
-    assert(steps.length >= 32 && steps.length <= 37, `a hold should browse at a controlled speed, got ${steps.length}`);
-    assert(gaps.every(gap => gap >= 169), `repetition must never exceed about six per second: ${gaps}`);
+    assert(steps.length >= 24 && steps.length <= 26, `a hold should browse at a controlled speed, got ${steps.length}`);
+    assert(gaps.every(gap => gap >= 249), `repetition must never exceed four per second: ${gaps}`);
     assert(steps[1].time - steps[0].time >= 350, "the initial hold delay protects single steps");
-    assert(gaps[0] > 250 && gaps[0] < 400, "repetition starts slower than its maximum speed");
+    assert(gaps[0] > 300 && gaps[0] < 450, "repetition starts slower than its maximum speed");
     assert(gaps.slice(1).every((gap, i) => gap <= gaps[i]), "acceleration is gradual and never reverses");
-    assert(gaps.slice(-10).every(gap => gap <= 171), "a sustained hold settles at about six per second");
+    assert(gaps.slice(-10).every(gap => gap <= 251), "a sustained hold settles at four per second");
     await page.keyboard.up("ArrowRight");
     await advance(800);
     assert.equal((await events()).length, steps.length, "release discards excess repeats instead of draining a queue");
@@ -194,9 +194,9 @@ try {
     await page.evaluate(() => window.finishPage());
     await advance(1600);
     const resumed = (await events()).filter(event => event.index >= 6);
-    assert(resumed.length >= 5 && resumed.length <= 7, "continue browsing after the page arrives without catching up the wait");
-    assert(resumed[1].time - resumed[0].time >= 250, "waiting for a page must not accelerate the hold");
-    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time >= 169), "pagination never produces a catch-up burst");
+    assert(resumed.length >= 5 && resumed.length <= 6, "continue browsing after the page arrives without catching up the wait");
+    assert(resumed[1].time - resumed[0].time >= 300, "waiting for a page must not accelerate the hold");
+    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time >= 249), "pagination never produces a catch-up burst");
     await page.keyboard.up("ArrowRight");
   });
 
@@ -208,8 +208,8 @@ try {
     await page.evaluate(() => window.finishPage());
     await advance(1500);
     const resumed = (await events()).filter(event => event.index >= 16);
-    assert(resumed.length >= 8 && resumed.length <= 9);
-    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time === 170));
+    assert.equal(resumed.length, 6);
+    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time === 250));
     await page.keyboard.up("ArrowRight");
   });
 

@@ -4,8 +4,8 @@ import type { GalleryImage } from "./types";
 import { mouseSideDirection } from "./viewerLogic";
 
 const HOLD_DELAY_MS = 400;
-const INITIAL_REPEAT_MS = 350;
-const MIN_REPEAT_MS = 170;
+const INITIAL_REPEAT_MS = 400;
+const MIN_REPEAT_MS = 250;
 const ACCELERATION_MS = 30;
 
 type Direction = -1 | 1;

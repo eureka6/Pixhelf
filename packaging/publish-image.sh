@@ -11,14 +11,20 @@ case "$IMAGE_ARCHITECTURES" in
   *) echo "Unsupported image architectures: $IMAGE_ARCHITECTURES" >&2; exit 1 ;;
 esac
 work="$(mktemp -d /tmp/pixhelf-oci.XXXXXX)"
-local_registry=127.0.0.1:5000
+trap 'rm -rf "$work"' EXIT
 model_revision=f4a64596bbcf9a2a94591b74b9dc39b2e4e77e3e
+model_checksum=29cc0b2bcf6ff777f2e15742be92b110e4acbdb2068356e862c4637a4b15fe4f
+vocab_checksum=45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c
 model_name=chinese-clip-vit-base-patch16-f4a64596
 model_path="/opt/pixhelf/models/$model_name"
 model_root="$work/model-root"
 model_layer="$work/model-layer.tar"
-model_base_ref="$local_registry/staging:model-base"
-mkdir -p "$model_root$model_path"
+model_cache_tag="model-${model_revision}-v1"
+model_cache_ref="$IMAGE:$model_cache_tag"
+
+log_elapsed() {
+  printf '[timing] %s: %ss\n' "$1" "$(($(date +%s) - $2))"
+}
 
 retry_remote() {
   attempt=1
@@ -65,49 +71,62 @@ download_model_artifact() {
   chmod 0644 "$destination"
 }
 
-download_model_artifact \
-  model.safetensors \
-  29cc0b2bcf6ff777f2e15742be92b110e4acbdb2068356e862c4637a4b15fe4f \
-  753106020
-download_model_artifact \
-  vocab.txt \
-  45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c \
-  109540
-
-chmod 0755 \
-  "$model_root/opt" \
-  "$model_root/opt/pixhelf" \
-  "$model_root/opt/pixhelf/models" \
-  "$model_root$model_path"
-
-tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-  -cf "$model_layer" -C "$model_root" opt
-
-crane registry serve --address "$local_registry" >"$work/registry.log" 2>&1 &
-registry_pid=$!
-cleanup() {
-  kill "$registry_pid" >/dev/null 2>&1 || true
-  wait "$registry_pid" >/dev/null 2>&1 || true
+# A cache tag is only a lookup hint. Pin its digest and check the model identity
+# and single-layer layout before reusing it; never extend an application image.
+verify_model_base() {
+  retry_remote crane manifest "$model_base_ref" >"$work/model-manifest.json" || return 1
+  retry_remote crane config "$model_base_ref" >"$work/model-config.json" || return 1
+  MODEL_REVISION="$model_revision" MODEL_CHECKSUM="$model_checksum" VOCAB_CHECKSUM="$vocab_checksum" \
+    MODEL_PATH="$model_path" node - "$work/model-manifest.json" "$work/model-config.json" <<'NODE'
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2]));
+const config = JSON.parse(fs.readFileSync(process.argv[3]));
+assert.equal(manifest.layers?.length, 1, 'model base layer count');
+assert.equal(config.rootfs?.diff_ids?.length, 1, 'model base rootfs');
+const labels = config.config?.Labels ?? {};
+assert.equal(labels['io.pixhelf.model.revision'], process.env.MODEL_REVISION);
+assert.equal(labels['io.pixhelf.model.sha256'], process.env.MODEL_CHECKSUM);
+assert.equal(labels['io.pixhelf.model.vocab-sha256'], process.env.VOCAB_CHECKSUM);
+assert.ok(config.config.Env?.includes(`PIXHELF_TEXT_SEARCH_MODEL=${process.env.MODEL_PATH}`));
+NODE
 }
-trap cleanup EXIT
-sleep 1
 
-crane append --insecure --oci-empty-base \
-  --new_layer "$model_layer" \
-  --new_tag "$model_base_ref"
-model_layer_digest="$(crane manifest --insecure "$model_base_ref" | node -e '
-  const { layers } = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-  require("node:assert/strict").equal(layers?.length, 1, "model layer count");
-  process.stdout.write(layers[0].digest);
-')"
+model_started=$(date +%s)
+model_cache_hit=false
+if model_digest=$(crane digest "$model_cache_ref" 2>"$work/model-cache.log"); then
+  model_base_ref="$IMAGE@$model_digest"
+  if verify_model_base; then model_cache_hit=true; fi
+fi
+if [ "$model_cache_hit" = true ]; then
+  echo "[cache] Reusing model base $model_base_ref"
+else
+  echo '[cache] Model base unavailable or outdated; downloading and verifying pinned sources'
+  mkdir -p "$model_root$model_path"
+  download_model_artifact model.safetensors "$model_checksum" 753106020
+  download_model_artifact vocab.txt "$vocab_checksum" 109540
+  chmod 0755 "$model_root/opt" "$model_root/opt/pixhelf" "$model_root/opt/pixhelf/models" "$model_root$model_path"
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+    -cf "$model_layer" -C "$model_root" opt
+
+  model_base_ref=$(retry_remote crane append --oci-empty-base --new_layer "$model_layer" --new_tag "$model_cache_ref")
+  model_base_ref=$(retry_remote crane mutate "$model_base_ref" \
+    --env "PIXHELF_TEXT_SEARCH_MODEL=$model_path" \
+    --label "io.pixhelf.model.revision=$model_revision" \
+    --label "io.pixhelf.model.sha256=$model_checksum" \
+    --label "io.pixhelf.model.vocab-sha256=$vocab_checksum")
+  verify_model_base
+  retry_remote crane tag "$model_base_ref" "$model_cache_tag"
+fi
+model_layer_digest=$(node -e 'process.stdout.write(require(process.argv[1]).layers[0].digest)' "$work/model-manifest.json")
+log_elapsed 'model base' "$model_started"
 
 build_platform() {
   arch="$1"
   asset="$2"
   platform_dir="$work/$arch"
   rootfs="$platform_dir/rootfs"
-  base_ref="$local_registry/staging:${arch}-base"
-  configured_ref="$local_registry/staging:${arch}"
+  platform_started=$(date +%s)
 
   mkdir -p "$rootfs"
   mkdir -m 1777 "$rootfs/tmp"
@@ -115,12 +134,11 @@ build_platform() {
   tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
     -cf "$platform_dir/layer.tar" -C "$rootfs" pixhelf tmp
 
-  crane append --insecure \
-    --base "$model_base_ref" \
-    --new_layer "$platform_dir/layer.tar" \
-    --new_tag "$base_ref"
-  crane mutate --insecure "$base_ref" \
-    --tag "$configured_ref" \
+  # Appending in the same repository lets the registry retain the model blob.
+  # Passing a digest makes crane publish the result by digest, without moving
+  # either the model cache tag or any application tag.
+  configured_ref=$(retry_remote crane mutate "$model_base_ref" \
+    --append "$platform_dir/layer.tar" \
     --set-platform "linux/$arch" \
     --entrypoint /pixhelf \
     --workdir /data \
@@ -130,9 +148,9 @@ build_platform() {
     --label 'org.opencontainers.image.description=Self-hosted photo and video gallery' \
     --label "org.opencontainers.image.version=$IMAGE_VERSION" \
     --label "org.opencontainers.image.revision=$REVISION" \
-    --label "org.opencontainers.image.source=$SOURCE_URL"
+    --label "org.opencontainers.image.source=$SOURCE_URL")
 
-  crane config --insecure "$configured_ref" \
+  retry_remote crane config "$configured_ref" \
     | ARCH="$arch" MODEL_PATH="$model_path" node -e '
         const assert = require("node:assert/strict");
         const { os, architecture, config } = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
@@ -141,9 +159,9 @@ build_platform() {
         assert.equal(config.Entrypoint?.[0], "/pixhelf");
         assert.equal(config.WorkingDir, "/data");
         assert.ok(config.ExposedPorts?.["3002/tcp"], "exposed port");
-        assert.ok(config.Env?.includes(`PIXHELF_TEXT_SEARCH_MODEL=${process.env.MODEL_PATH}`), "bundled model");'
+        assert.ok(config.Env?.includes("PIXHELF_TEXT_SEARCH_MODEL=" + process.env.MODEL_PATH), "bundled model");'
 
-  app_layer_digest="$(crane manifest --insecure "$configured_ref" \
+  app_layer_digest="$(retry_remote crane manifest "$configured_ref" \
     | EXPECTED_MODEL_LAYER="$model_layer_digest" node -e '
         const assert = require("node:assert/strict");
         const { layers } = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
@@ -153,19 +171,22 @@ build_platform() {
   )"
 
   expected="$(sha256sum "$asset" | cut -d ' ' -f 1)"
-  actual="$(crane blob --insecure "$local_registry/staging@$app_layer_digest" \
-    | gzip -dc \
+  retry_remote crane blob "$IMAGE@$app_layer_digest" >"$platform_dir/layer.tar.gz"
+  actual="$(gzip -dc "$platform_dir/layer.tar.gz" \
     | tar -xOf - pixhelf \
     | sha256sum \
     | cut -d ' ' -f 1)"
   test "$actual" = "$expected"
+  log_elapsed "image linux/$arch" "$platform_started"
 }
 
-if [ -n "${DOCKERHUB_IMAGE:-}" ]; then
-  pin_ipv4 auth.docker.io
-  pin_ipv4 index.docker.io
-  pin_ipv4 registry-1.docker.io
-fi
+case "${DOCKERHUB_IMAGE:-}" in
+  docker.io/*)
+    pin_ipv4 auth.docker.io
+    pin_ipv4 index.docker.io
+    pin_ipv4 registry-1.docker.io
+    ;;
+esac
 
 set --
 for arch in $IMAGE_ARCHITECTURES; do
@@ -181,19 +202,24 @@ verify_index() {
   done
 }
 
-# Assemble and check the requested architectures before publishing any tag.
-index_path="$work/index"
-crane index append --insecure "$index_path" "$@"
-verify_index "$index_path"
-index_digest="sha256:$(sha256sum "$index_path/index.json" | cut -d ' ' -f 1)"
+# Assemble remotely: exporting an OCI layout here would download the model
+# again. The internal cache tag is reusable; subsequent operations use only
+# the immutable digest returned by crane, including during concurrent runs.
+index_ref=$(retry_remote crane index append --tag "$IMAGE:build-cache" "$@")
+verify_index "$index_ref"
+index_digest="${index_ref##*@}"
 
 set -- "$IMAGE"
 if [ -n "${DOCKERHUB_IMAGE:-}" ]; then
   set -- "$@" "$DOCKERHUB_IMAGE"
 fi
 for destination in "$@"; do
-  retry_remote crane push --index "$index_path" "${destination}@${index_digest}"
+  destination_started=$(date +%s)
+  if [ "$destination" != "$IMAGE" ]; then
+    retry_remote crane copy "$index_ref" "${destination}@${index_digest}"
+  fi
   verify_index "${destination}@${index_digest}"
+  log_elapsed "registry $destination" "$destination_started"
 done
 
 # Only move tags after the complete index has been verified at each registry.

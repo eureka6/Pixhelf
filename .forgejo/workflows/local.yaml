@@ -21,6 +21,15 @@ jobs:
         with:
           image-only: 'true'
 
+      - name: Upload build timings
+        if: always()
+        continue-on-error: true
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: local-build-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+
       - name: Stage image inputs
         uses: https://data.forgejo.org/actions/upload-artifact@v3
         with:
@@ -29,6 +38,7 @@ jobs:
             dist/pixhelf-amd64-linux
             packaging/prepare-image.sh
             packaging/publish-image.sh
+            packaging/time-command.sh
           if-no-files-found: error
 
   publish:
@@ -51,4 +61,4 @@ jobs:
         run: sh packaging/prepare-image.sh local
 
       - name: Publish pixhelf-local latest
-        run: sh packaging/publish-image.sh
+        run: sh packaging/time-command.sh 'image publishing' sh packaging/publish-image.sh
