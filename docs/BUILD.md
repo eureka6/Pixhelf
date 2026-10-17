@@ -8,6 +8,8 @@
 
 Runner 必须提供可访问的缓存服务，配置见 [Forgejo 缓存说明](https://forgejo.org/docs/latest/user/actions/advanced-features/#cache)。工作流在恢复前安装 zstd；缓存服务不可用或缓存未命中时，继续正常构建。首次运行仍需生成缓存。
 
+缓存步骤使用 `actions/cache@v4`，保存完成后立即退出。`v3` 在当前 Runner 上每次保存后会额外等待约 180 秒，5 组缓存会让 `Complete job` 多耗时约 15 分钟。
+
 媒体组件编译默认使用可用 CPU 数量，最多 8 个并发；通过 `PIXHELF_MEDIA_JOBS` 显式设置时使用指定值。amd64 和 arm64 的媒体产物分开保存，同一任务中的测试和发布构建复用这些产物。
 
 ## 模型层复用

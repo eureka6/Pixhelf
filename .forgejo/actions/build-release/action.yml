@@ -32,8 +32,9 @@ runs:
         # Debug symbols and incremental object files make CI caches much larger.
         printf '%s\n' CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 >> "$GITHUB_ENV"
 
+    # v4 exits after saving; v3 can leave Node alive for 180 seconds per cache.
     - name: Cache Rust and cross-compilation toolchains
-      uses: https://data.forgejo.org/actions/cache@v3
+      uses: https://data.forgejo.org/actions/cache@v4
       continue-on-error: true
       with:
         path: |
@@ -80,7 +81,7 @@ runs:
         echo "identity=$identity" >> "$GITHUB_OUTPUT"
 
     - name: Cache npm downloads
-      uses: https://data.forgejo.org/actions/cache@v3
+      uses: https://data.forgejo.org/actions/cache@v4
       continue-on-error: true
       with:
         path: ~/.npm
@@ -95,7 +96,7 @@ runs:
 
     # npm ci removes node_modules; restore the verified asset caches afterwards.
     - name: Cache downloaded and compressed frontend assets
-      uses: https://data.forgejo.org/actions/cache@v3
+      uses: https://data.forgejo.org/actions/cache@v4
       continue-on-error: true
       with:
         path: frontend/node_modules/.cache
@@ -104,7 +105,7 @@ runs:
           pixhelf-assets-v1-${{ hashFiles('frontend/package-lock.json', 'frontend/libmedia-assets.json', 'frontend/scripts/pack-assets.mjs') }}-
 
     - name: Cache compiled and compressed media runtimes
-      uses: https://data.forgejo.org/actions/cache@v3
+      uses: https://data.forgejo.org/actions/cache@v4
       continue-on-error: true
       with:
         path: target/media
@@ -113,7 +114,7 @@ runs:
           pixhelf-media-v1-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('packaging/build-media-runtime.sh', 'packaging/pack-media.mjs', '.forgejo/actions/build-release/action.yml') }}-
 
     - name: Cache Cargo dependencies and compilation
-      uses: https://data.forgejo.org/actions/cache@v3
+      uses: https://data.forgejo.org/actions/cache@v4
       continue-on-error: true
       with:
         path: |
