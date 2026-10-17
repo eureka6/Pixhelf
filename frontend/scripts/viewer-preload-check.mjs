@@ -156,7 +156,7 @@ async function holdBitmapDecodes(page) {
 }
 
 try {
-  for (const connection of [{ rtt: 300, effectiveType: "4g" }, { effectiveType: "3g" }, { saveData: true }, { downlink: 1 }]) {
+  for (const connection of [{ saveData: true, downlink: 10 }, { saveData: true, downlink: 1, rtt: 300 }]) {
     const limited = await fixture(false, false, connection);
     try {
       await limited.open(40);
@@ -165,7 +165,7 @@ try {
       limited.originals.resolve();
       await limited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
       await limited.page.waitForTimeout(100);
-      assert(!limited.requests.includes("/api/images/photo-41.jpg"), "constrained links reserve original bandwidth for the displayed photo");
+      assert(!limited.requests.includes("/api/images/photo-41.jpg"), "data saver reserves original bandwidth for explicitly selected photos");
       assert(!limited.requests.includes("/api/images/photo-43/thumbnail"), "constrained links keep a smaller thumbnail window");
       await limited.next("photo-41");
       await limited.waitForPath(path => path === "/api/images/photo-41.jpg");
@@ -186,7 +186,72 @@ try {
     await prioritized.dismissViewer();
     checks++;
   } finally { await prioritized.close(); }
-  console.log("Network priority: high RTT, limited bandwidth, data saver and sequential original prefetch passed");
+  console.log("Network priority: data saver and sequential original prefetch passed");
+
+  for (const mobile of [false, true]) {
+    const slow = await fixture(mobile, false, { effectiveType: "3g", downlink: 1, rtt: 350 });
+    try {
+      await slow.open(40);
+      await slow.waitForPath(path => path === "/api/images/photo-40.jpg");
+      assert(!slow.requests.includes("/api/images/photo-41.jpg"), "limited bandwidth is first used for the current original");
+      slow.originals.resolve();
+      await slow.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
+      await slow.waitForPath(path => path === "/api/images/photo-41.jpg");
+      await slow.page.waitForTimeout(150);
+      assert(!slow.requests.includes("/api/images/photo-39.jpg") && !slow.requests.includes("/api/images/photo-42.jpg"),
+        "a slow connection warms just one original in the navigation direction");
+      checks++;
+      console.log(`${mobile ? "mobile" : "desktop"}: limited bandwidth prepares one next original after the current photo passed`);
+    } finally { await slow.close(); }
+
+    const distant = await fixture(mobile, false, { effectiveType: "3g", downlink: 8, rtt: 350 });
+    try {
+      await distant.page.route("**/photo-40.jpg", route => route.fulfill({ contentType: "image/jpeg", body: photo }));
+      await distant.open(40);
+      await distant.waitForPath(path => path === "/api/images/photo-41.jpg");
+      assert(!distant.requests.includes("/api/images/photo-39.jpg"), "high latency still downloads only one neighbor at a time");
+      await distant.next("photo-41");
+      await distant.page.waitForTimeout(100);
+      assert.equal(distant.requests.filter(path => path === "/api/images/photo-41.jpg").length, 1,
+        "selecting a pending neighbor reuses its original download");
+      assert(!distant.failed.includes("/api/images/photo-41.jpg"), "the selected preload is never cancelled");
+      assert(!distant.requests.includes("/api/images/photo-42.jpg"), "the current original must finish before the next neighbor starts");
+      distant.originals.resolve();
+      await distant.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
+      await distant.waitForPath(path => path === "/api/images/photo-42.jpg");
+      checks++;
+      console.log(`${mobile ? "mobile" : "desktop"}: high latency preloads originals and reuses a pending selected image passed`);
+    } finally { await distant.close(); }
+
+    const reverse = await fixture(mobile, false, { effectiveType: "4g", downlink: 8, rtt: 350 });
+    try {
+      await reverse.page.route("**/photo-40.jpg", route => route.fulfill({ contentType: "image/jpeg", body: photo }));
+      await reverse.open(40);
+      await reverse.waitForPath(path => path === "/api/images/photo-41.jpg");
+      await reverse.page.locator(".viewer-previous").evaluate(button => button.click());
+      await reverse.expectImage("photo-39");
+      await reverse.waitForPath(path => path === "/api/images/photo-39.jpg");
+      assert(reverse.failed.includes("/api/images/photo-41.jpg"), "changing direction stops the unused forward download");
+      assert(!reverse.requests.includes("/api/images/photo-38.jpg"), "backward neighbors also wait for the current original");
+      reverse.originals.resolve();
+      await reverse.waitForPath(path => path === "/api/images/photo-38.jpg");
+      assert(!reverse.requests.includes("/api/images/photo-42.jpg"), "reversed navigation prioritizes the backward neighbor");
+      checks++;
+      console.log(`${mobile ? "mobile" : "desktop"}: reversing direction cancels unrelated work and prepares the preceding original passed`);
+    } finally { await reverse.close(); }
+  }
+
+  const decodedWindow = await fixture();
+  try {
+    decodedWindow.originals.resolve();
+    await decodedWindow.open(40);
+    await decodedWindow.page.waitForFunction(() => window.originalStatus("photo-42") === "ready");
+    assert.equal(await decodedWindow.page.evaluate(() => window.originalStatus("photo-40")), "ready",
+      "warming neighbors must not evict the displayed original from the decoded cache");
+    assert(!decodedWindow.requests.includes("/api/images/photo-38.jpg"), "the original window fits within four decoded images");
+    checks++;
+    console.log("decoded cache: current original remains ready after the neighbor window completes passed");
+  } finally { await decodedWindow.close(); }
 
   const paginationRace = await fixture();
   try {
@@ -519,11 +584,13 @@ try {
     boundary.pagination.resolve();
     await boundary.expectImage("photo-60");
     await boundary.page.waitForFunction(() => window.thumbnailStatus("photo-61") === "ready");
-    assert(!boundary.failed.includes("/api/images/photo-58.jpg"),
-      "crossing a pending page must retain nearby downloads from the preceding page");
+    assert(boundary.failed.includes("/api/images/photo-58.jpg"),
+      "crossing a pending page stops an unrelated original so the new page's selected image has priority");
+    assert.equal(boundary.requests.filter(path => path === "/api/images/photo-60.jpg").length, 1,
+      "the new page's selected image reuses any original request already started");
     assert.equal(boundary.requests.filter(path => path.startsWith("/api/images?")).length, 1);
     checks++;
-    console.log("pending page boundary: advances when the page arrives and retains nearby preloads passed");
+    console.log("pending page boundary: advances when the page arrives and prioritizes its selected original passed");
   } finally { await boundary.close(); }
 
   const f = await fixture();

@@ -42,6 +42,7 @@
     "slideshow-motion-transition-check": "node scripts/slideshow-motion-transition-check.mjs",
     "gif-preview-check": "node scripts/gif-preview-check.mjs",
     "viewer-preload-check": "node scripts/viewer-preload-check.mjs",
+    "viewer-switch-loading-check": "node scripts/viewer-switch-loading-check.mjs",
     "viewer-original-cache-check": "node scripts/viewer-original-cache-check.mjs",
     "live-photo-check": "node scripts/live-photo-app-check.mjs",
     "live-photo-interaction-check": "node scripts/live-photo-interaction-check.mjs",

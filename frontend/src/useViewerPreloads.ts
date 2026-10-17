@@ -5,10 +5,9 @@ import {
   getViewerOriginalAsset,
   getViewerViewportRenderAsset,
   prepareViewerImages,
+  viewerNeighborOffsets,
 } from "./viewerAssets";
 import { selectViewerSourceStrategy, viewportRenderDimensions } from "./viewerLogic";
-
-const NEIGHBOR_PRELOAD_DELAY_MS = 120;
 
 export function useViewerPreloads(
   images: GalleryImage[],
@@ -24,22 +23,18 @@ export function useViewerPreloads(
   useEffect(() => {
     prepareViewerImages(images, activeIndex, { preloadOriginals: !viewportBitmaps });
     if (!viewportBitmaps) return;
+    const offsets = viewerNeighborOffsets();
     const controller = new AbortController();
     const { signal } = controller;
     let pageActive = true;
-    let timer = 0;
-    let idle = 0;
     let generation = 0;
     const canRun = () => !signal.aborted && pageActive && canPreloadViewerNeighbors();
     const clear = () => {
       generation++;
-      window.clearTimeout(timer);
-      if (idle) window.cancelIdleCallback?.(idle);
-      timer = idle = 0;
     };
     const preload = async (scheduledGeneration: number) => {
       // The display owns the current original; prepare neighbors one at a time.
-      for (const offset of [1, -1]) {
+      for (const offset of offsets) {
         if (scheduledGeneration !== generation || !canRun()) return;
         const image = images[activeIndex + offset];
         if (!image || image.video) continue;
@@ -53,13 +48,7 @@ export function useViewerPreloads(
     const resume = () => {
       clear();
       if (!ready.current || !canRun()) return;
-      const scheduledGeneration = generation;
-      timer = window.setTimeout(() => {
-        timer = 0;
-        const run = () => { idle = 0; void preload(scheduledGeneration); };
-        if (window.requestIdleCallback) idle = window.requestIdleCallback(run, { timeout: 600 });
-        else run();
-      }, NEIGHBOR_PRELOAD_DELAY_MS);
+      void preload(generation);
     };
     schedule.current = resume;
     document.addEventListener("visibilitychange", resume, { signal });

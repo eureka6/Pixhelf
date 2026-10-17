@@ -83,6 +83,7 @@ PIXHELF_SKIP_FRONTEND_BUILD=1 cargo test --locked
 | 跨区域加载、后台请求 | `npm run network-loading-check`、`npm run network-policy-check` |
 | 瀑布流慢网滚动、缩略图优先级 | `npm run waterfall-loading-check` |
 | 图片和实况预加载、视频读取 | `npm run viewer-preload-check`、`npm run live-photo-preload-check`、`npm run media-source-check` |
+| 查看器切图速度、原图复用 | `npm run viewer-switch-loading-check`、`npm run viewer-original-cache-check` |
 | 图库筛选、搜索、重复图片 | `npm run image-filters-check`、`npm run image-search-check`、`npm run duplicates-check` |
 | 导航、移动端视口 | `npm run navigation-controls-check`、`npm run mobile-viewport-navigation-check` |
 | 页面切换和分页竞争 | `npm run ui-stress-check` |
