@@ -12,6 +12,8 @@ Pixhelf 使用 Rust / Axum 提供接口，Preact / TypeScript 提供界面。正
 | `frontend/src/app/useViewerReturn.ts` | 返回图库或上层查看器时的滚动、动画与观察器生命周期 |
 | `frontend/src/app/viewerReturnSnapshot.ts` | 创建和释放返回动画使用的临时 DOM / canvas |
 | `frontend/src/galleryLoading.ts` | 缩略图与分页预加载距离、可见图片优先级及共享观察器 |
+| `frontend/src/useViewerNavigation.ts` | 感应区长按、方向键和鼠标侧键共用的加速节奏、分页等待及取消 |
+| `frontend/src/ImageViewer.tsx`、`ViewerNavigationButton.tsx` | 图片拖动、缩放与感应区手势交接；按钮保留显示和辅助操作入口 |
 | `frontend/src/hooks/` | 不依赖图库业务的视口、媒体查询、防抖和过渡 hooks |
 | `frontend/src/api.ts` | 页面调用的图库接口与请求参数 |
 | `frontend/src/api/request.ts` | JSON 请求、超时、取消和错误处理 |
@@ -84,6 +86,7 @@ PIXHELF_SKIP_FRONTEND_BUILD=1 cargo test --locked
 | 瀑布流慢网滚动、缩略图优先级 | `npm run waterfall-loading-check` |
 | 图片和实况预加载、视频读取 | `npm run viewer-preload-check`、`npm run live-photo-preload-check`、`npm run media-source-check` |
 | 查看器切图速度、原图复用 | `npm run viewer-switch-loading-check`、`npm run viewer-original-cache-check` |
+| 查看器拖动、缩放和连续切图 | `npm run viewer-interaction-check`、`npm run viewer-keyboard-check` |
 | 图库筛选、搜索、重复图片 | `npm run image-filters-check`、`npm run image-search-check`、`npm run duplicates-check` |
 | 导航、移动端视口 | `npm run navigation-controls-check`、`npm run mobile-viewport-navigation-check` |
 | 页面切换和分页竞争 | `npm run ui-stress-check` |
@@ -91,6 +94,8 @@ PIXHELF_SKIP_FRONTEND_BUILD=1 cargo test --locked
 | 登录、会话和访客权限 | `npm run auth-check` |
 
 `management-check` 和 `auth-check` 会启动后端并使用临时图库，先执行 `PIXHELF_SKIP_FRONTEND_BUILD=1 cargo build --locked` 更新 `target/debug/pixhelf`。其它专用检查及夹具位于 `frontend/scripts/`；后端接口回归位于 `src/web/tests.rs`，模块算法测试放在对应模块内。
+
+连续切图的计时参数集中在 `useViewerNavigation.ts`：按住 400 毫秒后开始重复，逐步加速到每 170 毫秒一张。键盘与鼠标侧键在按下时先切一张，感应区点按在松手时切一张；感应区移动超过手势阈值后交给图片拖动，取消长按及松手点按。分页等待不会累积切图次数或继续加速；重复切图松手、失焦或关闭后立即取消。
 
 `startup-check` 的旧扫描暂停夹具依赖 PATH 中的 FFprobe，当前内置媒体运行时不会调用它，需要更新夹具后再使用。首次扫描期间的接口保护已由后端测试覆盖。
 

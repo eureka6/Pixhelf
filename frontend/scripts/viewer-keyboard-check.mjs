@@ -105,6 +105,10 @@ try {
   await page.clock.pauseAt(new Date("2026-01-01T00:01:00Z"));
   const advance = milliseconds => page.clock.runFor(milliseconds);
   const events = () => page.evaluate(() => window.navigationEvents);
+  const mouseSession = await page.context().newCDPSession(page);
+  const sideButton = (type, button = "forward", buttons = type === "mousePressed" ? (button === "forward" ? 16 : 8) : 0) => mouseSession.send(
+    "Input.dispatchMouseEvent", { type, x: 720, y: 450, button, buttons, clickCount: 1 },
+  );
   const reset = async (options = {}) => {
     await page.keyboard.up("ArrowLeft"); await page.keyboard.up("ArrowRight");
     await page.evaluate(options => window.resetViewer(options), options);
@@ -131,14 +135,14 @@ try {
     await advance(1000);
     assert.equal((await events()).length, 3, "released taps must never repeat");
     await page.keyboard.down("ArrowRight");
-    await advance(169);
+    await advance(399);
     assert.equal((await events()).length, 4, "the hold threshold must protect deliberate single steps");
     await advance(2);
     assert.equal((await events()).length, 5, "holding must work without an OS-generated repeat");
     await page.keyboard.up("ArrowRight");
   });
 
-  await check("holding matches rapid manual tapping at a constant speed despite dense OS repeats", async () => {
+  await check("holding gradually accelerates to six per second despite dense OS repeats", async () => {
     await beginHold();
     for (let elapsed = 0; elapsed < 6000; elapsed += 20) {
       await page.keyboard.down("ArrowRight");
@@ -146,10 +150,12 @@ try {
     }
     const steps = await events();
     const gaps = steps.slice(2).map((event, i) => event.time - steps[i + 1].time);
-    assert(steps.length >= 38 && steps.length <= 40, `a hold should browse at a controlled speed, got ${steps.length}`);
-    assert(gaps.every(gap => gap >= 169 && gap <= 171), `repeat intervals stay bounded: ${gaps}`);
-    assert.equal(steps[1].time - steps[0].time, 170, "the first keyboard repeat must have the same cadence");
-    assert(Math.max(...gaps) - Math.min(...gaps) <= 2, "a hold must keep the same speed from its first repeat to its last");
+    assert(steps.length >= 32 && steps.length <= 37, `a hold should browse at a controlled speed, got ${steps.length}`);
+    assert(gaps.every(gap => gap >= 169), `repetition must never exceed about six per second: ${gaps}`);
+    assert(steps[1].time - steps[0].time >= 350, "the initial hold delay protects single steps");
+    assert(gaps[0] > 250 && gaps[0] < 400, "repetition starts slower than its maximum speed");
+    assert(gaps.slice(1).every((gap, i) => gap <= gaps[i]), "acceleration is gradual and never reverses");
+    assert(gaps.slice(-10).every(gap => gap <= 171), "a sustained hold settles at about six per second");
     await page.keyboard.up("ArrowRight");
     await advance(800);
     assert.equal((await events()).length, steps.length, "release discards excess repeats instead of draining a queue");
@@ -188,8 +194,22 @@ try {
     await page.evaluate(() => window.finishPage());
     await advance(1600);
     const resumed = (await events()).filter(event => event.index >= 6);
-    assert(resumed.length >= 9 && resumed.length <= 10, "continue browsing after the page arrives without catching up the wait");
-    assert(resumed[1].time - resumed[0].time === 170, "resume the same cadence without a catch-up burst");
+    assert(resumed.length >= 5 && resumed.length <= 7, "continue browsing after the page arrives without catching up the wait");
+    assert(resumed[1].time - resumed[0].time >= 250, "waiting for a page must not accelerate the hold");
+    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time >= 169), "pagination never produces a catch-up burst");
+    await page.keyboard.up("ArrowRight");
+  });
+
+  await check("a fully accelerated hold resumes after pagination without a burst", async () => {
+    await reset({ count: 16, index: 3, more: true });
+    await page.keyboard.down("ArrowRight"); await advance(4000);
+    assert.equal((await events()).at(-1).index, 15);
+    assert.equal(await page.evaluate(() => window.pageRequests), 1);
+    await page.evaluate(() => window.finishPage());
+    await advance(1500);
+    const resumed = (await events()).filter(event => event.index >= 16);
+    assert(resumed.length >= 8 && resumed.length <= 9);
+    assert(resumed.slice(1).every((event, i) => event.time - resumed[i].time === 170));
     await page.keyboard.up("ArrowRight");
   });
 
@@ -257,18 +277,103 @@ try {
     await page.keyboard.up("ArrowRight");
   });
 
-  await check("pointer hold shares the keyboard cadence and release does not add a click", async () => {
+  await check("edge holds and both mouse side buttons share keyboard acceleration without release clicks", async () => {
     await page.keyboard.down("ArrowRight"); await advance(4800); await page.keyboard.up("ArrowRight");
     const keyboard = (await events()).slice(1);
     await reset();
     const edge = await page.locator(".viewer-next").boundingBox();
     await page.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2);
-    await page.mouse.down(); await advance(5130);
+    await page.mouse.down(); await advance(4800);
     const pointer = await events();
     assert.equal(pointer.length, keyboard.length);
     assert.deepEqual(pointer.map(event => event.time - pointer[0].time), keyboard.map(event => event.time - keyboard[0].time));
     await page.mouse.up(); await advance(1500);
     assert.equal((await events()).length, pointer.length, "release must not add a final step");
+    await reset();
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: edge.x + edge.width / 2, y: edge.y + edge.height / 2 }] });
+    await advance(4800);
+    const touch = await events();
+    assert.equal(touch.length, keyboard.length);
+    assert.deepEqual(touch.map(event => event.time - touch[0].time), keyboard.map(event => event.time - keyboard[0].time));
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await advance(1500);
+    assert.equal((await events()).length, touch.length);
+    await cdp.detach();
+    for (const button of ["forward", "back"]) {
+      await reset({ count: 120, index: 50 });
+      await sideButton("mousePressed", button);
+      assert.equal((await events()).length, 1, "side buttons respond immediately on press");
+      const prevented = await page.evaluate(button => {
+        const event = new MouseEvent("mousedown", {
+          bubbles: true, cancelable: true, button: button === "forward" ? 4 : 3, buttons: button === "forward" ? 16 : 8,
+        });
+        document.querySelector(".viewer-media").dispatchEvent(event);
+        return event.defaultPrevented;
+      }, button);
+      assert(prevented, "compatibility events cannot trigger browser history navigation");
+      assert.equal((await events()).length, 1, "compatibility mousedown after a render must not turn twice");
+      await advance(4800);
+      const side = (await events()).slice(1);
+      assert.equal(side.length, keyboard.length);
+      assert.deepEqual(side.map(event => event.time - side[0].time), keyboard.map(event => event.time - keyboard[0].time));
+      assert(side.every(event => event.direction === (button === "forward" ? 1 : -1)));
+      await sideButton("mouseReleased", button); await advance(1500);
+      assert.equal((await events()).length, side.length + 1);
+    }
+  });
+
+  await check("opposite side buttons transfer ownership even with another button still pressed", async () => {
+    await sideButton("mousePressed"); await advance(900);
+    const before = (await events()).length;
+    await sideButton("mousePressed", "back", 24);
+    assert.equal((await events()).length, before + 1, "chorded side buttons work without a new pointerdown");
+    await sideButton("mouseReleased", "forward", 8);
+    await advance(1200);
+    assert((await events()).length > before + 2, "releasing the old button must not cancel the new hold");
+    assert((await events()).slice(before).every(event => event.direction === -1));
+    await sideButton("mouseReleased", "back");
+    const after = await events(); await advance(1000);
+    assert.deepEqual(await events(), after);
+  });
+
+  await check("side buttons and keys cancel the previous input without stale release turns", async () => {
+    await sideButton("mousePressed"); await advance(900);
+    const before = (await events()).length;
+    await page.keyboard.down("ArrowLeft");
+    await sideButton("mouseReleased"); await advance(1000);
+    assert((await events()).slice(before).every(event => event.direction === -1));
+    assert((await events()).length > before + 2);
+    const reversed = (await events()).length;
+    await sideButton("mousePressed"); await page.keyboard.up("ArrowLeft"); await advance(1000);
+    assert((await events()).slice(reversed).every(event => event.direction === 1));
+    assert((await events()).length > reversed + 2);
+    await sideButton("mouseReleased");
+  });
+
+  for (const hold of [false, true]) await check(`a side-button ${hold ? "hold cancels" : "tap completes"} a pending page turn on release`, async () => {
+    await reset({ count: 6, index: 5, more: true });
+    await sideButton("mousePressed");
+    if (hold) await advance(1000);
+    await sideButton("mouseReleased");
+    await page.evaluate(() => window.finishPage()); await advance(1000);
+    assert.deepEqual((await events()).map(event => event.index), hold ? [] : [6]);
+    assert.equal(await page.evaluate(() => window.pageRequests), 1);
+  });
+
+  for (const reason of ["blur", "hidden", "pagehide", "pointercancel", "close"]) await check(`${reason} cancels a mouse side-button hold`, async () => {
+    await sideButton("mousePressed"); await advance(1000);
+    const before = await events();
+    await page.evaluate(reason => {
+      if (reason === "close") document.querySelector(".viewer-close").click();
+      else if (reason === "hidden") {
+        Object.defineProperty(document, "hidden", { configurable: true, value: true });
+        document.dispatchEvent(new Event("visibilitychange"));
+      } else window.dispatchEvent(new Event(reason));
+    }, reason);
+    await advance(1000); await sideButton("mouseReleased"); await advance(1000);
+    assert.deepEqual(await events(), before);
+    if (reason === "hidden") await page.evaluate(() => { delete document.hidden; });
   });
 
   await check("releasing an edge hold during pagination cancels delayed navigation", async () => {

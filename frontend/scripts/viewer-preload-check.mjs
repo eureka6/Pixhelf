@@ -286,19 +286,26 @@ try {
 
   const revisited = await fixture();
   const revisitGate = Promise.withResolvers();
+  const evictRevisitedOriginal = async () => {
+    // Fill all four decoded slots explicitly. Jumping to the first image can warm
+    // only one neighbor in the reverse direction, so eviction there was a race.
+    for (const index of [0, 10, 20, 30]) {
+      await revisited.open(index);
+      await revisited.page.waitForFunction(id => window.originalStatus(id) === "ready", `photo-${index}`);
+    }
+    await revisited.page.waitForFunction(() => window.originalStatus("photo-40") === "idle");
+  };
   try {
     revisited.originals.resolve();
     await revisited.open(40);
     await revisited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
-    await revisited.open(0);
-    await revisited.page.waitForFunction(() => window.originalStatus("photo-40") === "idle");
+    await evictRevisitedOriginal();
     const firstLoads = revisited.requests.filter(path => path === "/api/images/photo-40.jpg").length;
     await revisited.open(40);
     await revisited.page.waitForFunction(() => document.querySelector(".image-viewer")?.dataset.fullLoaded === "true");
     assert.equal(revisited.requests.filter(path => path === "/api/images/photo-40.jpg").length, firstLoads,
       "decoded-image eviction must not download a cached original again");
-    await revisited.open(0);
-    await revisited.page.waitForFunction(() => window.originalStatus("photo-40") === "idle");
+    await evictRevisitedOriginal();
     await revisited.page.evaluate(() => window.clearOriginalBytes());
     const client = await revisited.page.context().newCDPSession(revisited.page);
     await client.send("Network.clearBrowserCache");

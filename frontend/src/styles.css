@@ -1143,7 +1143,7 @@
   box-shadow: none;
   isolation: isolate;
   transform: translateY(-50%);
-  touch-action: none;
+  touch-action: inherit;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;

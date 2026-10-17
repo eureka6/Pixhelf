@@ -29,7 +29,6 @@ import {
   drawViewerCanvas,
   initialViewerSourceState,
   isDirectOriginalReady,
-  mouseSideDirection,
   pendingViewerSourceState,
   pointDistance,
   pointMidpoint,
@@ -160,10 +159,19 @@ type GestureGeometry = {
 };
 
 type GestureHandlers = {
-  begin: (id: number, point: PointerPoint, pointerType: string) => void;
+  begin: (id: number, point: PointerPoint, pointerType: string, target: EventTarget | null) => void;
   move: (id: number, point: PointerPoint) => void;
   finish: (id: number, point: PointerPoint, pointerType: string) => void;
   cancel: () => void;
+};
+
+type NavigationContact = {
+  id: number;
+  point: PointerPoint;
+  pointerType: string;
+  startedAt: number;
+  button: HTMLElement;
+  finish: (commitTap: boolean) => void;
 };
 
 type IdleScheduler = Window & {
@@ -270,6 +278,8 @@ function PhotoViewer({
   const mediaRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointersRef = useRef(new Map<number, PointerPoint>());
+  // A stationary edge hold survives image changes without delaying original rendering.
+  const navigationContactRef = useRef<NavigationContact | null>(null);
   const gestureStartRef = useRef<GestureStart | null>(null);
   const pinchStartRef = useRef<PinchStart | null>(null);
   const gestureGeometryRef = useRef<GestureGeometry | null>(null);
@@ -1101,53 +1111,6 @@ function PhotoViewer({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [image.id, onClose, viewport.width, viewport.height]);
 
-  useEffect(() => {
-    const pressedButtons = new Set<number>();
-    const suppressSideButton = (event: MouseEvent | PointerEvent) => {
-      if (mouseSideDirection(event.button) === null) return false;
-      event.preventDefault();
-      event.stopPropagation();
-      return true;
-    };
-    const navigateFromSideButton = (event: MouseEvent | PointerEvent) => {
-      const direction = mouseSideDirection(event.button);
-      if (direction === null || !suppressSideButton(event)) return;
-      if (pressedButtons.has(event.button)) return;
-      pressedButtons.add(event.button);
-      if (direction < 0 && canPrevious) onNavigate(-1);
-      if (direction > 0 && canNext) onNavigate(1);
-    };
-    const releaseSideButton = (event: MouseEvent | PointerEvent) => {
-      if (!suppressSideButton(event)) return;
-      pressedButtons.delete(event.button);
-    };
-    const resetSideButtons = () => pressedButtons.clear();
-    const handlePointerDown = (event: PointerEvent) => {
-      if (event.pointerType === "mouse") navigateFromSideButton(event);
-    };
-    const handlePointerCancel = (event: PointerEvent) => {
-      if (mouseSideDirection(event.button) !== null) suppressSideButton(event);
-      resetSideButtons();
-    };
-
-    window.addEventListener("pointerdown", handlePointerDown, true);
-    window.addEventListener("pointerup", releaseSideButton, true);
-    window.addEventListener("pointercancel", handlePointerCancel, true);
-    window.addEventListener("mousedown", navigateFromSideButton, true);
-    window.addEventListener("mouseup", releaseSideButton, true);
-    window.addEventListener("auxclick", suppressSideButton, true);
-    window.addEventListener("blur", resetSideButtons);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown, true);
-      window.removeEventListener("pointerup", releaseSideButton, true);
-      window.removeEventListener("pointercancel", handlePointerCancel, true);
-      window.removeEventListener("mousedown", navigateFromSideButton, true);
-      window.removeEventListener("mouseup", releaseSideButton, true);
-      window.removeEventListener("auxclick", suppressSideButton, true);
-      window.removeEventListener("blur", resetSideButtons);
-    };
-  }, [canNext, canPrevious, onNavigate]);
-
   useViewerPreloads(images, activeIndex, viewport, viewportBitmapCapable, currentLoadState.loaded);
 
   useEffect(() => {
@@ -1674,7 +1637,69 @@ function PhotoViewer({
     gestureGeometryRef.current = null;
   };
 
+  const finishNavigationContact = (commitTap = false, releaseCapture = true) => {
+    const contact = navigationContactRef.current;
+    navigationContactRef.current = null;
+    if (!contact) return;
+    delete contact.button.dataset.pressed;
+    contact.finish(commitTap);
+    const surface = gestureSurfaceRef.current;
+    if (releaseCapture && contact.pointerType !== "touch") {
+      try {
+        if (surface?.hasPointerCapture(contact.id)) surface.releasePointerCapture(contact.id);
+      } catch {
+        // The browser may have already cancelled this contact.
+      }
+    }
+  };
+
+  const promoteNavigationContact = (contact: NavigationContact) => {
+    finishNavigationContact(false, false);
+    beginContact(contact.id, contact.point, contact.pointerType);
+    if (gestureStartRef.current) gestureStartRef.current.startedAt = contact.startedAt;
+  };
+
+  const beginSurfaceContact: GestureHandlers["begin"] = (id, point, pointerType, target) => {
+    const contact = navigationContactRef.current;
+    if (contact) {
+      if (contact.id === id) return;
+      // A second finger turns an edge hold into the same pinch as anywhere else.
+      promoteNavigationContact(contact);
+    }
+    const button = target instanceof Element ? target.closest<HTMLElement>(".viewer-nav") : null;
+    if (button && pointersRef.current.size === 0) {
+      lastTapRef.current = null;
+      if (pointerType !== "mouse") lastTouchAtRef.current = performance.now();
+      const direction = button.dataset.navigationDirection === "-1" ? -1 : 1;
+      const available = button.getAttribute("aria-disabled") !== "true";
+      navigationContactRef.current = {
+        id, point, pointerType, button, startedAt: performance.now(),
+        finish: available ? navigation.beginHold(direction) : () => {},
+      };
+      if (available) button.dataset.pressed = "true";
+      return;
+    }
+    beginContact(id, point, pointerType);
+  };
+
+  const moveSurfaceContact = (id: number, point: PointerPoint) => {
+    const contact = navigationContactRef.current;
+    if (contact?.id === id) {
+      if (pointDistance(contact.point, point) <= 7) return;
+      // Movement cancels the tap/repeat but keeps capture and the original drag origin.
+      promoteNavigationContact(contact);
+    }
+    moveContact(id, point);
+  };
+
+  const finishSurfaceContact: GestureHandlers["finish"] = (id, point, pointerType) => {
+    if (navigationContactRef.current?.id === id) moveSurfaceContact(id, point);
+    if (navigationContactRef.current?.id === id) finishNavigationContact(true);
+    else finishContact(id, point, pointerType);
+  };
+
   const cancelContacts = () => {
+    finishNavigationContact();
     flushStagedTransform();
     const settled = constrainTransform(transformRef.current);
     resetGesture();
@@ -1687,33 +1712,35 @@ function PhotoViewer({
     // every movement twice.
     if (event.pointerType === "touch") return;
     if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".photo-card-controls")) return;
     event.preventDefault();
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
       // Some pen/browser combinations do not allow capture here.
     }
-    beginContact(
+    beginSurfaceContact(
       event.pointerId,
       { x: event.clientX, y: event.clientY },
       event.pointerType,
+      event.target,
     );
   };
 
   const movePointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "touch") return;
-    if (!pointersRef.current.has(event.pointerId)) return;
+    if (!pointersRef.current.has(event.pointerId) && navigationContactRef.current?.id !== event.pointerId) return;
     if (event.buttons === 0) {
       cancelContacts();
       return;
     }
     event.preventDefault();
-    moveContact(event.pointerId, { x: event.clientX, y: event.clientY });
+    moveSurfaceContact(event.pointerId, { x: event.clientX, y: event.clientY });
   };
 
   const finishPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "touch" || event.button !== 0) return;
-    finishContact(
+    finishSurfaceContact(
       event.pointerId,
       { x: event.clientX, y: event.clientY },
       event.pointerType,
@@ -1726,13 +1753,15 @@ function PhotoViewer({
   };
 
   const cancelPointer = (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType !== "touch" && pointersRef.current.has(event.pointerId)) cancelContacts();
+    if (event.pointerType !== "touch" && (
+      pointersRef.current.has(event.pointerId) || navigationContactRef.current?.id === event.pointerId
+    )) cancelContacts();
   };
 
   gestureHandlersRef.current = {
-    begin: beginContact,
-    move: moveContact,
-    finish: finishContact,
+    begin: beginSurfaceContact,
+    move: moveSurfaceContact,
+    finish: finishSurfaceContact,
     cancel: cancelContacts,
   };
 
@@ -1754,7 +1783,7 @@ function PhotoViewer({
     const handleTouchStart = (event: TouchEvent) => {
       if (menuContact(event)) return;
       for (const touch of Array.from(event.changedTouches)) {
-        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch");
+        gestureHandlersRef.current?.begin(touch.identifier, touchPoint(touch), "touch", touch.target);
       }
       if (event.cancelable && (pointersRef.current.size > 1 || transformRef.current.scale > MIN_SCALE)) {
         event.preventDefault();
@@ -1787,6 +1816,8 @@ function PhotoViewer({
     surface.addEventListener("touchend", handleTouchEnd, { passive: false });
     surface.addEventListener("touchcancel", handleTouchCancel, { passive: false });
     window.addEventListener("blur", interruptGesture);
+    window.addEventListener("pagehide", interruptGesture);
+    window.addEventListener("keydown", interruptGesture);
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       surface.removeEventListener(CARD_MENU_EVENT, openImageMenu, true);
@@ -1795,7 +1826,10 @@ function PhotoViewer({
       surface.removeEventListener("touchend", handleTouchEnd);
       surface.removeEventListener("touchcancel", handleTouchCancel);
       window.removeEventListener("blur", interruptGesture);
+      window.removeEventListener("pagehide", interruptGesture);
+      window.removeEventListener("keydown", interruptGesture);
       document.removeEventListener("visibilitychange", handleVisibility);
+      finishNavigationContact();
     };
   }, []);
 
@@ -1940,11 +1974,15 @@ function PhotoViewer({
         onPointerUp={finishPointer}
         onPointerCancel={cancelPointer}
         onLostPointerCapture={event => {
-          if (event.target === event.currentTarget) cancelPointer(event);
+          // Touch releases implicit capture before touchend commits its tap.
+          if (navigationContactRef.current && (event.pointerType !== "touch" || event.buttons !== 0)) finishNavigationContact();
+          else if (event.target === event.currentTarget) cancelPointer(event);
         }}
         onWheel={handleWheel}
         onDblClick={(event: JSX.TargetedMouseEvent<HTMLDivElement>) => {
           event.preventDefault();
+          // Surface capture retargets mouse clicks from edge buttons to the surface.
+          if (document.elementFromPoint(event.clientX, event.clientY)?.closest(".viewer-nav")) return;
           if (lastTouchAtRef.current > 0 && performance.now() - lastTouchAtRef.current < 500) return;
           zoomAt(
             transformRef.current.scale > MIN_SCALE ? MIN_SCALE : DOUBLE_TAP_SCALE,
@@ -2062,9 +2100,9 @@ function PhotoViewer({
             </div>
           </div>
         </div>
+        <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
+        <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
       </div>
-      <ViewerNavigationButton direction={-1} disabled={!canPrevious} navigation={navigation} />
-      <ViewerNavigationButton direction={1} disabled={!canNext} loading={waitingForNext} navigation={navigation} />
       {slideshowRequest > 0 && <ViewerSlideshow key={slideshowRequest} viewerRef={dialogRef}
         onPlayingChange={setSlideshowPlaying}
         onPlaybackChange={setSlideshowRunning}

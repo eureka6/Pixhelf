@@ -1,17 +1,19 @@
 import type { RefObject } from "preact";
 import { useLayoutEffect, useRef } from "preact/hooks";
 import type { GalleryImage } from "./types";
+import { mouseSideDirection } from "./viewerLogic";
 
-const POINTER_HOLD_DELAY_MS = 500;
-
-// Match deliberate rapid tapping; the cadence is constant for the whole hold.
-const REPEAT_INTERVAL_MS = 170;
+const HOLD_DELAY_MS = 400;
+const INITIAL_REPEAT_MS = 350;
+const MIN_REPEAT_MS = 170;
+const ACCELERATION_MS = 30;
 
 type Direction = -1 | 1;
 type HeldNavigation = {
-  key?: string;
+  source?: string;
   direction: Direction;
   repeating: boolean;
+  steps: number;
   controller: AbortController;
 };
 
@@ -37,6 +39,7 @@ export function useViewerNavigation(options: NavigationOptions) {
     let held: HeldNavigation | null = null;
     let pendingTap: AbortController | null = null;
     let timer = 0;
+    const pressedButtons = new Set<number>();
     const stop = () => {
       window.clearTimeout(timer);
       timer = 0;
@@ -45,6 +48,7 @@ export function useViewerNavigation(options: NavigationOptions) {
       pendingTap = null;
       held = null;
     };
+    const reset = () => { pressedButtons.clear(); stop(); };
     const ownsFocus = () => {
       const viewer = viewerRef.current;
       const active = document.activeElement;
@@ -57,6 +61,9 @@ export function useViewerNavigation(options: NavigationOptions) {
     const schedule = (gesture: HeldNavigation, delay: number) => {
       timer = window.setTimeout(() => repeat(gesture), delay);
     };
+    const interval = (gesture: HeldNavigation) => Math.max(
+      MIN_REPEAT_MS, INITIAL_REPEAT_MS - gesture.steps * ACCELERATION_MS,
+    );
     const repeat = (gesture: HeldNavigation) => {
       timer = 0;
       if (held !== gesture) return;
@@ -69,22 +76,33 @@ export function useViewerNavigation(options: NavigationOptions) {
         void current.onLoadMoreImages().then(incoming => {
           if (held !== gesture) return;
           if (!incoming.length || !ownsFocus()) { stop(); return; }
-          schedule(gesture, REPEAT_INTERVAL_MS);
+          schedule(gesture, interval(gesture));
         }, () => { if (held === gesture) stop(); });
         return;
       }
       current.onNavigate(gesture.direction, gesture.controller.signal);
-      if (held === gesture) schedule(gesture, REPEAT_INTERVAL_MS);
+      gesture.steps += 1;
+      if (held === gesture) schedule(gesture, interval(gesture));
     };
-    const start = (direction: Direction, key?: string) => {
+    const start = (direction: Direction, source?: string) => {
       stop();
       const current = latest.current;
       if (direction < 0 ? !current.canPrevious : !current.canNext && !current.hasMore) return;
-      const gesture: HeldNavigation = { key, direction, repeating: false, controller: new AbortController() };
+      const gesture: HeldNavigation = { source, direction, repeating: false, steps: 0, controller: new AbortController() };
       held = gesture;
-      if (key) current.onNavigate(direction, gesture.controller.signal);
-      if (held === gesture) schedule(gesture, key ? REPEAT_INTERVAL_MS : POINTER_HOLD_DELAY_MS);
+      // Keys and side buttons act on press; edge contacts wait to distinguish a drag.
+      if (source) current.onNavigate(direction, gesture.controller.signal);
+      if (held === gesture) schedule(gesture, HOLD_DELAY_MS);
       return gesture;
+    };
+    const release = (source: string) => {
+      if (held?.source !== source) return;
+      if (!held.repeating) {
+        window.clearTimeout(timer);
+        timer = 0;
+        pendingTap = held.controller;
+        held = null;
+      } else stop();
     };
     const down = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || !ownsFocus()) {
@@ -96,15 +114,42 @@ export function useViewerNavigation(options: NavigationOptions) {
       // Own the entire cadence, including the initial hold delay, on every OS.
       if (!event.repeat) start(direction, event.key);
     };
-    const up = (event: KeyboardEvent) => {
-      if (event.key !== held?.key) return;
-      if (!held.repeating) {
-        window.clearTimeout(timer);
-        pendingTap = held.controller;
-        held = null;
-      } else stop();
+    const up = (event: KeyboardEvent) => release(event.key);
+    const suppressSideButton = (event: MouseEvent) => {
+      const direction = mouseSideDirection(event.button);
+      if (direction !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return direction;
     };
-    const focus = () => { if (!ownsFocus()) stop(); };
+    const sideDown = (event: MouseEvent) => {
+      const direction = suppressSideButton(event);
+      if (direction === null || pressedButtons.has(event.button)) return;
+      // Keep physical button state across renders and input changes. The compatibility
+      // mousedown following pointerdown must never restart the hold or turn twice.
+      pressedButtons.add(event.button);
+      if (ownsFocus()) start(direction, `mouse:${event.button}`);
+      else stop();
+    };
+    const sideUp = (event: MouseEvent) => {
+      if (suppressSideButton(event) === null) return;
+      pressedButtons.delete(event.button);
+      release(`mouse:${event.button}`);
+    };
+    const pointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "mouse" && mouseSideDirection(event.button) !== null) sideDown(event);
+      else stop();
+    };
+    const pointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse" || mouseSideDirection(event.button) === null) return;
+      // Chorded mouse presses/releases arrive as pointermove. Preventing the first
+      // pointerdown can also suppress their compatibility mouse events.
+      if (event.buttons & (event.button === 3 ? 8 : 16)) sideDown(event);
+      else sideUp(event);
+    };
+    const lostCapture = () => { if (held?.source?.startsWith("mouse:")) reset(); };
+    const focus = () => { if (!ownsFocus()) reset(); };
     const tap = (direction: Direction) => {
       stop();
       pendingTap = new AbortController();
@@ -126,12 +171,19 @@ export function useViewerNavigation(options: NavigationOptions) {
     const { signal } = controller;
     window.addEventListener("keydown", down, { signal });
     window.addEventListener("keyup", up, { signal, capture: true });
-    window.addEventListener("blur", stop, { signal });
-    window.addEventListener("pagehide", stop, { signal });
-    window.addEventListener("pointerdown", stop, { signal, capture: true });
+    window.addEventListener("blur", reset, { signal });
+    window.addEventListener("pagehide", reset, { signal });
+    window.addEventListener("pointerdown", pointerDown, { signal, capture: true });
+    window.addEventListener("pointermove", pointerMove, { signal, capture: true });
+    window.addEventListener("pointerup", sideUp, { signal, capture: true });
+    window.addEventListener("pointercancel", reset, { signal, capture: true });
+    window.addEventListener("lostpointercapture", lostCapture, { signal, capture: true });
+    window.addEventListener("mousedown", sideDown, { signal, capture: true });
+    window.addEventListener("mouseup", sideUp, { signal, capture: true });
+    window.addEventListener("auxclick", suppressSideButton, { signal, capture: true });
     document.addEventListener("visibilitychange", focus, { signal });
     document.addEventListener("focusin", focus, { signal });
-    return () => { stop(); controller.abort(); };
+    return () => { reset(); controller.abort(); };
   }, [viewerRef]);
   return controls.current;
 }

@@ -293,15 +293,16 @@ try {
       await end(); assert.deepEqual((await state()).events, []);
     });
 
-    await check("side taps are immediate and moving into the center does not drag the image", async () => {
+    await check("side taps are immediate and dragging from an edge follows the image", async () => {
       const next = await page.locator(".viewer-next").boundingBox();
       const point = { x: next.x + next.width - 20, y: center.y };
       await tap(point);
       assert.deepEqual((await state()).events, [1]);
       await begin(point); await move({ x: point.x - 230, y: point.y }); await page.waitForTimeout(40);
-      assert.equal((await state()).x, 0); assert.equal((await state()).dragging, "false");
+      assert((await state()).x < -180); assert.equal((await state()).dragging, "true");
+      assert.deepEqual((await state()).events, [1], "dragging does not turn before release");
       await end(); await page.waitForTimeout(250);
-      assert.deepEqual((await state()).events, [1, 1], "the starting zone owns the entire contact");
+      assert.deepEqual((await state()).events, [1, 1], "release commits only the swipe, without an extra edge tap");
     });
 
     await check("interrupted close press recovers", async () => {
@@ -319,28 +320,49 @@ try {
       const point = { x: width - 20, y: center.y };
       await begin(point); await page.waitForTimeout(1550);
       const steps = (await state()).events;
-      assert(steps.length >= 6 && steps.length <= 8, "the hold should match quick repeated taps without a slow ramp");
+      assert(steps.length >= 4 && steps.length <= 6, "the hold gradually accelerates across image changes");
       assert.equal(await page.locator(".photo-card-menu:popover-open").count(), 0);
       await end(); await page.waitForTimeout(700);
       assert.deepEqual((await state()).events, steps, "release must not add a click or retain a timer");
     });
-    await check("holding while moving across zones keeps the original direction until release", async () => {
-      await begin({ x: width - 20, y: center.y });
-      await move(center); await page.waitForTimeout(600);
-      const first = (await state()).events;
-      assert.equal(first.length, 1, "movement before the hold threshold must not cancel the hold");
-      await move({ x: 20, y: center.y }); await page.waitForTimeout(400);
-      const middle = (await state()).events;
-      assert(middle.length >= 3);
-      await move({ x: center.x, y: 100 }); await page.waitForTimeout(340);
-      const result = await state();
-      assert(result.events.length >= middle.length + 1);
-      assert(result.events.every(direction => direction === 1), "crossing the opposite zone must not reverse the hold");
-      assert.equal(result.scale, 1); assert.equal(result.x, 0); assert.equal(result.scroll, 0);
-      assert.equal(await page.locator('.viewer-next[data-pressed="true"]').count(), 1);
+    for (const side of ["previous", "next"]) {
+      await check(`${side} edge drag cancels repetition and follows the swipe direction`, async () => {
+        const point = { x: side === "next" ? width - 20 : 20, y: center.y };
+        const destination = { x: side === "next" ? 20 : width - 20, y: center.y };
+        await watch(); await begin(point); await move(destination); await page.waitForTimeout(800);
+        const result = await state();
+        assert(Math.abs(result.x) > width / 2); assert.equal(result.dragging, "true");
+        assert.deepEqual(result.events, [], "movement cancels the hold timer");
+        assert.equal(await page.locator('.viewer-nav[data-pressed="true"]').count(), 0);
+        await end(); await page.waitForTimeout(500); await stableControls();
+        assert.deepEqual((await state()).events, [side === "next" ? 1 : -1]);
+      });
+    }
+    await check("moving after a hold begins stops repetition and starts dragging", async () => {
+      const point = { x: width - 20, y: center.y };
+      await begin(point); await page.waitForTimeout(600);
+      const steps = (await state()).events;
+      assert.equal(steps.length, 1);
+      await move({ x: point.x - 230, y: point.y }); await page.waitForTimeout(700);
+      assert((await state()).x < -180); assert.equal((await state()).dragging, "true");
+      assert.deepEqual((await state()).events, steps);
       await end(); await page.waitForTimeout(500);
-      assert.deepEqual((await state()).events, result.events);
-      assert.equal(await page.locator('.viewer-nav[data-pressed="true"]').count(), 0);
+      assert.deepEqual((await state()).events, [...steps, 1]);
+    });
+    await check("an edge drag returning to its origin does not turn on release", async () => {
+      const point = { x: width - 20, y: center.y };
+      await begin(point); await move({ x: point.x - 18, y: point.y });
+      await move(point); await end(); await page.waitForTimeout(800);
+      assert.deepEqual((await state()).events, []);
+      assert.equal((await state()).scale, 1);
+    });
+    await check("zoomed images can be panned starting inside an edge zone", async () => {
+      await page.keyboard.press("="); await page.keyboard.press("="); await page.waitForTimeout(240);
+      await begin({ x: width - 20, y: center.y });
+      await move({ x: width - 110, y: center.y + 25 }); await page.waitForTimeout(120);
+      assert((await state()).x < -50); assert.equal((await state()).dragging, "true");
+      await end(); await page.waitForTimeout(700);
+      assert.deepEqual((await state()).events, []); assert.equal((await state()).scale, 2);
     });
     for (const interruption of ["cancel", "blur", "capture", "hidden"]) {
       await check(`${interruption} stops an edge hold without a release click`, async () => {
@@ -356,8 +378,10 @@ try {
           Object.defineProperty(document, "hidden", { configurable: true, value: true });
           document.dispatchEvent(new Event("visibilitychange"));
         });
-        else if (interruption === "capture") await page.locator('.viewer-next').evaluate(button => {
-          button.releasePointerCapture(window.viewerPointerId);
+        else if (interruption === "capture") await page.evaluate(() => {
+          for (const element of document.querySelectorAll('.viewer-next, .viewer-gesture-surface')) {
+            if (element.hasPointerCapture(window.viewerPointerId)) element.releasePointerCapture(window.viewerPointerId);
+          }
         });
         else if (touch) await dispatchTouch("touchCancel");
         else await page.locator('.viewer-next').evaluate(button => {
@@ -370,6 +394,20 @@ try {
       });
     }
     if (touch) {
+      for (const side of ["previous", "next"]) await check(`short ${side} edge swipe uses movement direction instead of button direction`, async () => {
+        const point = { x: side === "previous" ? 45 : width - 45, y: center.y };
+        await begin(point);
+        await move({ x: side === "previous" ? 1 : width - 1, y: point.y });
+        await end(); await page.waitForTimeout(700);
+        assert.deepEqual((await state()).events, [side === "previous" ? 1 : -1]);
+      });
+      await check("a short slow edge drag neither flicks nor commits a tap", async () => {
+        const point = { x: width - 20, y: center.y };
+        await begin(point); await page.waitForTimeout(250);
+        await move({ x: point.x - 25, y: point.y }); await end();
+        await page.waitForTimeout(700);
+        assert.deepEqual((await state()).events, []);
+      });
       await check("edge double tap advances twice without zooming", async () => {
         const point = { x: width - 20, y: center.y };
         await tap(point); await page.waitForTimeout(60); await tap(point);
@@ -406,8 +444,15 @@ try {
         await dispatchTouch("touchEnd"); await page.waitForTimeout(700);
         assert.equal((await state()).scale, 1); assert.deepEqual((await state()).events, steps);
       });
-      await check("center upward swipe scrolls to details", async () => {
-        const point = center;
+      await check("a pinch can start with one finger in an edge zone", async () => {
+        await dispatchTouch("touchStart", [{ x: 35, y: center.y }]);
+        await dispatchTouch("touchStart", [{ x: 35, y: center.y }, { x: 120, y: center.y }]);
+        await dispatchTouch("touchMove", [{ x: 20, y: center.y }, { x: 340, y: center.y }]);
+        await dispatchTouch("touchEnd"); await page.waitForTimeout(700);
+        assert((await state()).scale > 1.8); assert.deepEqual((await state()).events, []);
+      });
+      for (const origin of ["center", "edge"]) await check(`${origin} upward swipe scrolls to details`, async () => {
+        const point = origin === "edge" ? { x: width - 20, y: center.y } : center;
         await begin(point);
         for (const distance of [20, 50, 100, 170, 240]) {
           await move({ x: point.x, y: point.y - distance }); await page.waitForTimeout(25);
@@ -415,8 +460,8 @@ try {
         await end(); await page.waitForTimeout(340);
         assert((await state()).scroll > 100); assert.deepEqual((await state()).events, []);
       });
-      await check("center downward swipe dismisses the viewer", async () => {
-        const point = center;
+      for (const origin of ["center", "edge"]) await check(`${origin} downward swipe dismisses the viewer`, async () => {
+        const point = origin === "edge" ? { x: width - 20, y: center.y } : center;
         await begin(point); await move({ x: point.x, y: point.y + 20 });
         await move({ x: point.x, y: point.y + 180 }); await end();
         await page.locator(".image-viewer").waitFor({ state: "detached" });
