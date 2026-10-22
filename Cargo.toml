@@ -1,6 +1,6 @@
 [package]
 name = "pixhelf"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 build = "build.rs"
 
@@ -42,7 +42,7 @@ tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-
 walkdir = "2.5.0"
 webp = "0.3.1"
 zeroize = "1.9.0"
-zip = { version = "7.2.0", default-features = false }
+zip = { version = "9.0.0", default-features = false }
 
 [build-dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
