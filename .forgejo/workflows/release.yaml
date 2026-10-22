@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: docker
     container:
-      image: docker.io/library/node:22-bookworm
+      image: docker.io/library/node:24.22.1-bookworm
     steps:
       - name: Check out source
         uses: https://data.forgejo.org/actions/checkout@v6
@@ -49,7 +49,7 @@ jobs:
     if: forgejo.event_name == 'push' && startsWith(forgejo.ref, 'refs/tags/v')
     runs-on: docker
     container:
-      image: docker.io/library/node:22-alpine3.23
+      image: docker.io/library/node:24.22.1-alpine3.23
     steps:
       - name: Download release inputs
         uses: https://data.forgejo.org/actions/download-artifact@v3

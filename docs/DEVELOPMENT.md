@@ -35,7 +35,14 @@ Pixhelf 使用 Rust / Axum 提供接口，Preact / TypeScript 提供界面。正
 
 ## 本地启动
 
-需要 Linux、Rust（版本由 `rust-toolchain.toml` 固定）、支持 Vite 7 的 Node.js（22.12+）和 npm。首次 Rust 构建还会编译媒体组件，需要 C / musl 工具链、NASM、pkg-config、Meson 和 Ninja；完整安装清单及跨架构配置见[构建流程](../.forgejo/actions/build-release/action.yml)。
+需要 Linux、Rust（版本由 `rust-toolchain.toml` 固定）、Node.js 24.22.1（当前最新 LTS，版本由 `.node-version` 固定，与 CI 一致）和随 Node.js 提供的 npm。首次 Rust 构建还会编译媒体组件，需要 C / musl 工具链、NASM、pkg-config、Meson 和 Ninja；完整安装清单及跨架构配置见[构建流程](../.forgejo/actions/build-release/action.yml)。
+
+使用 fnm 时，在项目根目录安装并切换到指定的 Node.js 版本：
+
+```bash
+fnm install
+fnm use
+```
 
 在项目根目录安装依赖并构建一次前端：
 

@@ -1709,7 +1709,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixhelf"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "argon2",
