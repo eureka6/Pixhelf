@@ -376,12 +376,6 @@ export function getReadyViewerViewportRenderAsset(
   return asset;
 }
 
-export function getDecodedViewerOriginal(source: string): HTMLImageElement | null {
-  const parsed = new URL(source, window.location.href);
-  const asset = originalAssets.get(`${parsed.pathname}${parsed.search}`);
-  return asset?.status === "ready" ? asset.element : null;
-}
-
 export function suspendViewerPreloads(current: GalleryImage): void {
   originalPreloadGeneration++;
   cancelUnusedPreloads(thumbnailAssets, new Set([viewerThumbnailUrl(current)]));

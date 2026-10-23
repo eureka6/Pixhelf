@@ -7,6 +7,7 @@ import type { GallerySelection } from "./JustifiedGallery";
 import { MAX_SELECTION, useManagement, type ManagementAction } from "./management";
 import { SelectionDialog } from "./SelectableGallery";
 import { SelectionBar } from "./SelectionBar";
+import { toggleSelection, useSelectionKeyboard } from "./selection";
 import { useSelectionGestures } from "./selectionGestures";
 import type { Album } from "./types";
 
@@ -18,7 +19,7 @@ export function useAlbumSelection(albums: Album[], scope: string, onActivate: ()
   const activate = useRef(onActivate);
   activate.current = onActivate;
   const clear = useCallback(() => { setIds(new Set()); setDialog(null); anchor.current = null; clearCardFeedback(); }, []);
-  useEffect(() => { clear(); setDialog(null); }, [scope, clear]);
+  useEffect(clear, [scope, clear]);
   const selected = useMemo(() => albums.filter(album => ids.has(album.path)), [albums, ids]);
   useEffect(() => { setIds(current => {
     const available = new Set(albums.map(album => album.path));
@@ -34,35 +35,12 @@ export function useAlbumSelection(albums: Album[], scope: string, onActivate: ()
   const toggle = useCallback((path: string, range = false) => {
     if (manager.busy || authentication.guest) return;
     activate.current();
-    setIds(current => {
-      const next = new Set(current);
-      const start = range && current.size ? albums.findIndex(album => album.path === anchor.current) : -1;
-      const end = albums.findIndex(album => album.path === path);
-      if (start >= 0 && end >= 0) {
-        for (const album of albums.slice(Math.min(start, end), Math.max(start, end) + 1)) {
-          if (next.size >= MAX_SELECTION && !next.has(album.path)) { manager.notify(`每次最多选择 ${MAX_SELECTION} 个相册`, true); break; }
-          next.add(album.path);
-        }
-      } else if (!next.delete(path)) {
-        if (next.size >= MAX_SELECTION) { manager.notify(`每次最多选择 ${MAX_SELECTION} 个相册`, true); return current; }
-        next.add(path);
-      }
-      return next;
-    });
+    setIds(current => toggleSelection(current, albums, album => album.path, path, range ? anchor.current : null,
+      () => manager.notify(`每次最多选择 ${MAX_SELECTION} 个相册`, true)));
     anchor.current = path;
   }, [albums, manager.busy, manager.notify]);
   const selectAll = useCallback(() => change(new Set(albums.map(album => album.path))), [albums, change]);
-  useEffect(() => {
-    if (!ids.size) return;
-    const key = (event: KeyboardEvent) => {
-      if (manager.busy || event.defaultPrevented || document.querySelector('dialog[open], .image-viewer, .photo-card-menu:popover-open, [data-selection-dragging]')) return;
-      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-      if (event.key === "Escape") { event.preventDefault(); clear(); }
-      else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") { event.preventDefault(); selectAll(); }
-    };
-    document.addEventListener("keydown", key);
-    return () => document.removeEventListener("keydown", key);
-  }, [ids.size, manager.busy, clear, selectAll]);
+  useSelectionKeyboard(ids.size > 0, manager.busy, clear, selectAll);
   const allFavorite = selected.length > 0 && selected.every(album => manager.favoriteAlbums.has(album.path));
   const run = async (action: ManagementAction, options?: { destination?: string; favorite?: boolean }) => {
     try {

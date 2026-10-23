@@ -23,7 +23,7 @@ export async function getDirectories(path: string, options: { search?: string; c
 }
 
 // Dialog pickers contain the wheel; short page trees let the page scroll.
-export function useContainedScroll<T extends HTMLElement>(pageScroll = false) {
+function useContainedScroll<T extends HTMLElement>(pageScroll = false) {
   const ref = useRef<T>(null);
   useEffect(() => {
     const element = ref.current;

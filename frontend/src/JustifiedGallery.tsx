@@ -17,11 +17,12 @@ import {
 import type { GalleryViewportAnchor } from "./galleryViewport";
 import { Check, Heart, ImageIcon } from "./icons";
 import { ImageCardActions } from "./ImageCardActions";
-import { SelectionMenu, type MenuPoint, type SelectionActions, type SelectionBatchActions } from "./SelectionMenu";
+import { SelectionActionsContext, SelectionMenu, type MenuPoint, type SelectionBatchActions } from "./SelectionMenu";
 import { MediaPreview } from "./MediaPreview";
 import { isAnimatedImage, isLiveImage } from "./mediaUrls";
 import { VideoBadge } from "./VideoBadge";
 import { useGalleryMetrics } from "./galleryMetrics";
+import { useGalleryWindow } from "./galleryWindow";
 import { useCardInteraction } from "./cardInteraction";
 import { useSelectionGestures } from "./selectionGestures";
 import { layoutJustifiedImages, layoutJustifiedSkeleton } from "./justified";
@@ -71,6 +72,7 @@ export type JustifiedGalleryProps = {
   preserveViewport: boolean;
   onOpen: (id: string, card: HTMLElement, pointerY?: number, action?: ImageCardAction) => void;
   selection?: GallerySelection;
+  anchorImageId?: string | null;
 };
 
 export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, JustifiedGalleryProps>(function JustifiedGallery({
@@ -78,6 +80,7 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
   preserveViewport,
   onOpen,
   selection,
+  anchorImageId,
 }, handleRef) {
   const [selectionMenu, setSelectionMenu] = useState<MenuPoint | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -124,7 +127,7 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
       flushSync(measure);
       if (reducedMotion) return;
 
-      const positions = before.map(({ card, rect }) => ({
+      const positions = before.filter(({ card }) => card.isConnected).map(({ card, rect }) => ({
         card,
         before: rect,
         after: card.getBoundingClientRect(),
@@ -234,6 +237,7 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
     () => layoutJustifiedImages(images, { width, gap }),
     [gap, images, width],
   );
+  const visibleItems = useGalleryWindow(ref, layout.items, resizeAnchorRef.current, anchorImageId);
   const selectionItems = useMemo(() => layout.items.map(({ image, style }) => ({
     id: image.id, left: Number(style.left), top: Number(style.top),
     width: Number(style.width), height: Number(style.height),
@@ -242,7 +246,7 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
   const selecting = Boolean(selection?.active || dragging);
 
   return (
-    <div
+    <SelectionActionsContext.Provider value={selection}><div
       ref={ref}
       className="justified-gallery"
       data-layout="justified"
@@ -257,7 +261,7 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
       }}
       style={{ height: layout.height } as CSSProperties}
     >
-      {layout.items.map(({ image, index, row, style }) => (
+      {visibleItems.map(({ image, index, row, style }) => (
         <ImageCard
           key={image.id}
           image={image}
@@ -270,12 +274,11 @@ export const JustifiedGallery = memo(forwardRef<JustifiedGalleryHandle, Justifie
           selecting={selecting}
           selectionDisabled={selection?.disabled ?? false}
           onSelect={selection?.toggle}
-          selectionActions={selection}
         />
       ))}
       {selection && <div ref={marqueeRef} className="gallery-selection-marquee" hidden aria-hidden="true" />}
       {selection && selectionMenu && <SelectionMenu actions={selection} point={selectionMenu} onClose={() => setSelectionMenu(null)} />}
-    </div>
+    </div></SelectionActionsContext.Provider>
   );
 }));
 
@@ -285,7 +288,7 @@ const ImageCard = memo(function ImageCard({
   eager,
   highPriority,
   onOpen,
-  selected, favorite, selecting, selectionDisabled, onSelect, selectionActions,
+  selected, favorite, selecting, selectionDisabled, onSelect,
 }: {
   image: GalleryImage;
   layoutStyle: CSSProperties;
@@ -294,7 +297,6 @@ const ImageCard = memo(function ImageCard({
   onOpen: JustifiedGalleryProps["onOpen"];
   selected: boolean; favorite: boolean; selecting: boolean; selectionDisabled: boolean;
   onSelect?: GallerySelection["toggle"];
-  selectionActions?: SelectionActions;
 }) {
   const alreadyReady = READY_THUMBNAIL_IDS.has(image.id);
   const [loadState, setLoadState] = useState<ThumbnailState>(alreadyReady ? "loaded" : "loading");
@@ -309,6 +311,7 @@ const ImageCard = memo(function ImageCard({
   const handleAction = useCallback((action: ImageCardAction) => {
     if (cardRef.current) onOpen(image.id, cardRef.current, undefined, action);
   }, [image.id, onOpen]);
+  const handleSelect = useCallback(() => onSelect?.(image.id), [image.id, onSelect]);
 
   useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
   useLayoutEffect(() => {
@@ -416,7 +419,7 @@ const ImageCard = memo(function ImageCard({
         onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
         <span><Check size={16} strokeWidth={2.8} /></span>
       </button>}
-      <ImageCardActions image={image} onAction={handleAction} onSelect={onSelect ? () => onSelect(image.id) : undefined} selected={selected} selectionDisabled={selectionDisabled} selectionActions={selectionActions} />
+      <ImageCardActions image={image} onAction={handleAction} onSelect={onSelect ? handleSelect : undefined} selected={selected} selectionDisabled={selectionDisabled} />
     </figure>
   );
 });

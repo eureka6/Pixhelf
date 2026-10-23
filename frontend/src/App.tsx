@@ -799,6 +799,7 @@ function App() {
                 onSelectionChange={setSelectedIds}
                 onSelectionStart={albumSelection.clear}
                 images={visibleImages}
+                anchorImageId={viewerReturnRequest?.imageId ?? viewerImageId}
                 preserveViewport={viewerIndex < 0 && !viewerReturnRequest}
                 onOpen={openViewer}
               />

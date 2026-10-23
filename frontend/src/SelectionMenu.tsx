@@ -1,5 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useLayoutEffect, useRef } from "preact/hooks";
+import { createContext } from "preact";
+import { useContext, useLayoutEffect, useRef } from "preact/hooks";
 import { Check, Copy, Download, FolderInput, Heart, Trash2, X } from "./icons";
 
 export type SelectionBatchActions = {
@@ -21,6 +22,17 @@ export type SelectionActions = {
   batch?: SelectionBatchActions;
 };
 export type MenuPoint = { x: number; y: number };
+
+export const SelectionActionsContext = createContext<SelectionActions | undefined>(undefined);
+
+// Only an open menu subscribes to batch selection changes, not every image card.
+export function CardSelectionMenuItems({ actions, ...props }: {
+  actions?: SelectionActions; onChoose: (action: () => void) => void; showBatch: boolean;
+}) {
+  const inherited = useContext(SelectionActionsContext);
+  const current = actions ?? inherited;
+  return current ? <><SelectionMenuItems {...props} actions={current} /><div className="photo-card-menu-divider" role="separator" /></> : null;
+}
 
 export function SelectionMenuItems({ actions, onChoose, showBatch = true }: { actions: SelectionActions; onChoose: (action: () => void) => void; showBatch?: boolean }) {
   const batch = actions.active && showBatch ? actions.batch : undefined;

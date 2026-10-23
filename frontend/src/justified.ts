@@ -1,14 +1,20 @@
-import type { CSSProperties } from "preact";
 import type { GalleryMetrics } from "./galleryMetrics";
 import type { GalleryImage } from "./types";
 
 const SKELETON_RATIOS = [1.4, 0.72, 1, 1.55, 0.8, 1.2, 0.67, 1.35, 0.9, 1.6, 0.76, 1.1];
 
+export type JustifiedItem<T> = {
+  image: T;
+  index: number;
+  row: number;
+  style: { left: number; top: number; width: number; height: number };
+};
+
 export function layoutJustifiedImages<T extends Pick<GalleryImage, "width" | "height">>(
   images: T[],
   { width, gap }: GalleryMetrics,
 ) {
-  const items: { image: T; index: number; row: number; style: CSSProperties }[] = [];
+  const items: JustifiedItem<T>[] = [];
   if (width <= 0) return { height: 0, rowCount: 0, items };
 
   const targetHeight = Math.max(120, Math.min(220, width / 2.5));

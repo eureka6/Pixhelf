@@ -7,7 +7,7 @@ import { CARD_MENU_EVENT, CARD_SELECTOR } from "./cardInteraction";
 import type { CardMenuRequest } from "./cardInteraction";
 import type { GalleryImage, ImageCardAction } from "./types";
 import { originalImageUrl } from "./mediaUrls";
-import { SelectionMenuItems, type SelectionActions } from "./SelectionMenu";
+import { CardSelectionMenuItems, type SelectionActions } from "./SelectionMenu";
 
 
 export const ImageCardActions = memo(function ImageCardActions({ image, onAction, onMenuChange, similarDisabled = false, onSelect, selected = false, selectionDisabled = false, selectionActions, fullscreen = false, onToggleFullscreen }: {
@@ -233,7 +233,7 @@ export const ImageCardActions = memo(function ImageCardActions({ image, onAction
           </div>
           {onSelect ? <button type="button" role="menuitem" disabled={selectionDisabled} aria-disabled={selectionDisabled} onClick={() => { closeMenu(true); onSelect(); }}><Check size={17} /><span>{selected ? "取消选择" : "选择"}{image.video ? "视频" : "图片"}</span></button>
             : <button type="button" role="menuitem" onClick={() => choose("view")}>{image.video ? <Play size={17} /> : <ImageIcon size={17} />}<span>{image.video ? "播放视频" : "查看大图"}</span></button>}
-          {selectionActions && <><SelectionMenuItems actions={selectionActions} showBatch={selected} onChoose={action => { closeMenu(true); action(); }} /><div className="photo-card-menu-divider" role="separator" /></>}
+          <CardSelectionMenuItems actions={selectionActions} showBatch={selected} onChoose={action => { closeMenu(true); action(); }} />
           <button type="button" role="menuitem" onClick={() => choose("details")}><Info size={17} /><span>{image.video ? "视频信息" : "图片信息"}</span></button>
           <button type="button" role="menuitem" aria-disabled={similarDisabled} disabled={similarDisabled} onClick={() => choose("similar")}><ScanSearch size={17} /><span>{image.video ? "查找相似画面" : "查找相似图片"}</span></button>
           <button type="button" role="menuitem" onClick={() => void viewFullscreen()}>

@@ -429,12 +429,8 @@ function PhotoViewer({
   };
 
   const flushStagedTransform = () => {
-    if (transformFrameRef.current) {
-      window.cancelAnimationFrame(transformFrameRef.current);
-      transformFrameRef.current = 0;
-    }
     const pending = pendingTransformRef.current;
-    pendingTransformRef.current = null;
+    cancelTransformFrame();
     if (pending) applyTransformToDom(pending);
   };
 
@@ -442,12 +438,7 @@ function PhotoViewer({
     transformRef.current = next;
     pendingTransformRef.current = next;
     if (transformFrameRef.current) return;
-    transformFrameRef.current = window.requestAnimationFrame(() => {
-      transformFrameRef.current = 0;
-      const pending = pendingTransformRef.current;
-      pendingTransformRef.current = null;
-      if (pending) applyTransformToDom(pending);
-    });
+    transformFrameRef.current = window.requestAnimationFrame(flushStagedTransform);
   };
 
   const commitTransform = (next: ViewerTransform) => {

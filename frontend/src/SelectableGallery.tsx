@@ -9,6 +9,7 @@ import { stopMediaPreview } from "./MediaPreview";
 import { clearCardFeedback } from "./cardInteraction";
 import { useModalDialog } from "./useModalDialog";
 import { SelectionBar } from "./SelectionBar";
+import { toggleSelection, useSelectionKeyboard } from "./selection";
 import type { Album, GalleryImage } from "./types";
 
 export type SelectableGalleryHandle = JustifiedGalleryHandle & { select: (image: GalleryImage) => boolean; selectAll: (images?: GalleryImage[]) => void; clearSelection: () => void };
@@ -31,13 +32,14 @@ export const SelectableGallery = forwardRef<SelectableGalleryHandle, JustifiedGa
   const [dialog, setDialog] = useState<"move" | "copy" | "trash" | null>(null);
   const anchor = useRef<string | null>(null);
   const images = props.images;
+  const imagesById = useMemo(() => new Map(images.map(image => [image.id, image])), [images]);
   const setIds = useCallback((update: ReadonlySet<string> | ((current: ReadonlySet<string>) => ReadonlySet<string>)) => {
     setSelected(current => {
       const next = typeof update === "function" ? update(new Set(current.map(image => image.id))) : update;
-      const available = new Map([...current, ...images].map(image => [image.id, image]));
-      return [...next].flatMap(id => available.get(id) ?? []);
+      const snapshots = new Map(current.map(image => [image.id, image]));
+      return [...next].flatMap(id => imagesById.get(id) ?? snapshots.get(id) ?? []);
     });
-  }, [images]);
+  }, [imagesById]);
   const allFavorite = selected.length > 0 && selected.every(image => manager.favoriteIds.has(image.id));
   const exit = useCallback(() => {
     setSelected([]); setDialog(null); anchor.current = null;
@@ -48,20 +50,9 @@ export const SelectableGallery = forwardRef<SelectableGalleryHandle, JustifiedGa
     if (manager.busy) return;
     props.onSelectionStart?.();
     stopMediaPreview();
-    setIds(current => {
-      const next = new Set(current);
-      const start = range && current.size > 0 ? images.findIndex(image => image.id === anchor.current) : -1;
-      const end = images.findIndex(image => image.id === id);
-      if (start >= 0 && end >= 0) {
-        for (const image of images.slice(Math.min(start, end), Math.max(start, end) + 1)) {
-          if (next.size < MAX_SELECTION) next.add(image.id);
-        }
-      } else if (!next.delete(id)) {
-        if (next.size >= MAX_SELECTION) manager.notify(`每次最多选择 ${MAX_SELECTION} 项`, true);
-        else next.add(id);
-      }
-      return next;
-    });
+    setIds(current => toggleSelection(current, images, image => image.id, id, range ? anchor.current : null, inRange => {
+      if (!inRange) manager.notify(`每次最多选择 ${MAX_SELECTION} 项`, true);
+    }));
     anchor.current = id;
   }, [images, manager.busy, manager.notify, setIds, props.onSelectionStart]);
   const selectAll = useCallback((loaded = images) => {
@@ -100,17 +91,7 @@ export const SelectableGallery = forwardRef<SelectableGalleryHandle, JustifiedGa
       return true;
     },
   }), [ids, manager.busy, manager.notify, props.onSelectionStart, exit, selectAll]);
-  useEffect(() => {
-    if (!active || !props.preserveViewport) return;
-    const key = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || manager.busy || document.querySelector('dialog[open], .photo-card-menu:popover-open, [data-selection-dragging]')) return;
-      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-      if (event.key === "Escape") { event.preventDefault(); exit(); }
-      else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") { event.preventDefault(); selectAll(); }
-    };
-    document.addEventListener("keydown", key);
-    return () => document.removeEventListener("keydown", key);
-  }, [active, props.preserveViewport, manager.busy, exit, selectAll]);
+  useSelectionKeyboard(active && props.preserveViewport, manager.busy, exit, selectAll);
   const run = async (action: ManagementAction, options?: { destination?: string; favorite?: boolean }) => {
     try {
       const results = await manager.run(action, selected.map(image => image.id), options);

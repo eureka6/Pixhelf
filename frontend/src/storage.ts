@@ -38,7 +38,7 @@ export interface StoragePage {
   nextPage: number | null;
 }
 
-export class StorageRequestError extends Error {
+class StorageRequestError extends Error {
   constructor(message: string, readonly code: string) { super(message); }
 }
 

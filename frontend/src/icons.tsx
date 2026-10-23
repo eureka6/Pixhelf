@@ -92,10 +92,6 @@ export function ChevronUp(props: IconProps) {
   return <Icon {...props}><path d="m18 15-6-6-6 6" /></Icon>;
 }
 
-export function ChevronDown(props: IconProps) {
-  return <Icon {...props}><path d="m6 9 6 6 6-6" /></Icon>;
-}
-
 export function Download(props: IconProps) {
   return (
     <Icon {...props}>

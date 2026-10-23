@@ -6,7 +6,6 @@ import type { SimilarImagePageState } from "../viewerHistory";
 import type { VideoFrame } from "../videoFrame";
 import { errorMessage } from "./errors";
 
-const SIMILAR_PAGE_SIZE = 30;
 const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
   source: null,
   images: [],
@@ -14,148 +13,79 @@ const EMPTY_SIMILAR_IMAGE_PAGE: SimilarImagePageState = {
   nextOffset: null,
 };
 
+type SearchState = { page: SimilarImagePageState; loading: boolean; loadingMore: boolean; error: string | null };
+type SearchRequest = { source: GalleryImage | null; controller: AbortController; pending: Promise<GalleryImage[]> | null };
+const EMPTY_STATE: SearchState = { page: EMPTY_SIMILAR_IMAGE_PAGE, loading: false, loadingMore: false, error: null };
+
 export function useViewerSimilarSearch(backgroundComplete: boolean) {
-  const [similarPage, setSimilarPage] = useState<SimilarImagePageState>(
-    EMPTY_SIMILAR_IMAGE_PAGE,
-  );
-  const [similarLoading, setSimilarLoading] = useState(false);
-  const [similarLoadingMore, setSimilarLoadingMore] = useState(false);
-  const [similarError, setSimilarError] = useState<string | null>(null);
-  const similarRequestVersionRef = useRef(0);
-  const similarControllerRef = useRef<AbortController | null>(null);
-  const similarLoadMoreControllerRef = useRef<AbortController | null>(null);
-  const similarLoadMorePromiseRef = useRef<Promise<GalleryImage[]> | null>(null);
-  const backgroundCompletionRef = useRef(
-    backgroundComplete,
-  );
-  useEffect(() => () => {
-    similarRequestVersionRef.current += 1;
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
+  const [{ page: similarPage, loading: similarLoading, loadingMore: similarLoadingMore, error: similarError }, setState] = useState(EMPTY_STATE);
+  const requestRef = useRef<SearchRequest | null>(null);
+  const backgroundCompletionRef = useRef(backgroundComplete);
+  useEffect(() => () => requestRef.current?.controller.abort(), []);
+
+  // One controller owns the first page and every subsequent page of a query.
+  const replaceRequest = useCallback((source: GalleryImage | null) => {
+    requestRef.current?.controller.abort();
+    return requestRef.current = { source, controller: new AbortController(), pending: null };
   }, []);
 
-  const resetSimilarSearch = useCallback(() => {
-    similarRequestVersionRef.current += 1;
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
-    similarControllerRef.current = null;
-    similarLoadMoreControllerRef.current = null;
-    similarLoadMorePromiseRef.current = null;
-    setSimilarPage(EMPTY_SIMILAR_IMAGE_PAGE);
-    setSimilarLoading(false);
-    setSimilarLoadingMore(false);
-    setSimilarError(null);
-  }, []);
+  const restoreSimilarSearch = useCallback((page: SimilarImagePageState | null) => {
+    replaceRequest(page?.source ?? null);
+    setState({ ...EMPTY_STATE, page: page ?? EMPTY_SIMILAR_IMAGE_PAGE });
+  }, [replaceRequest]);
+  const resetSimilarSearch = useCallback(() => restoreSimilarSearch(null), [restoreSimilarSearch]);
+
+  const loadPage = useCallback((page: SimilarImagePageState, offset: number, initial: boolean): Promise<GalleryImage[]> => {
+    const { source, frame } = page;
+    if (!source) return Promise.resolve([]);
+    const request = initial ? replaceRequest(source) : requestRef.current;
+    if (!request || request.source !== source || request.controller.signal.aborted) return Promise.resolve([]);
+    if (request.pending) return request.pending;
+    const { signal } = request.controller;
+    setState(current => ({ page: initial ? page : current.page, loading: initial, loadingMore: !initial, error: null }));
+    const options = { offset, limit: 30, exclude: source.id };
+    request.pending = (frame ? searchByUploadedImage(frame.file, options, signal) : getSimilarImages(source.id, options, signal))
+      .then(result => {
+        if (signal.aborted) return [];
+        setState(current => ({ ...EMPTY_STATE, page: {
+          source, frame, images: initial ? result.items : appendUniqueImages(current.page.images, result.items),
+          total: result.total, nextOffset: result.nextOffset,
+        } }));
+        return result.items;
+      }).catch(reason => {
+        if (!signal.aborted) setState(current => ({
+          ...current, loading: false, loadingMore: false,
+          error: errorMessage(reason, initial ? "无法查找相似图片" : "无法继续加载相似图片"),
+        }));
+        return [];
+      }).finally(() => { request.pending = null; });
+    return request.pending;
+  }, [replaceRequest]);
 
   const searchSimilar = useCallback((source: GalleryImage, force = false, capturedFrame?: VideoFrame) => {
     const sameSource = similarPage.source?.id === source.id;
     const frame = capturedFrame ?? (sameSource ? similarPage.frame : undefined);
     if (!force && sameSource && (similarLoading || !similarError)) return;
 
-    similarControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current?.abort();
-    similarLoadMoreControllerRef.current = null;
-    similarLoadMorePromiseRef.current = null;
-    const controller = new AbortController();
-    const requestVersion = ++similarRequestVersionRef.current;
-    similarControllerRef.current = controller;
-    setSimilarPage({ source, frame, images: [], total: 0, nextOffset: null });
-    setSimilarLoading(true);
-    setSimilarLoadingMore(false);
-    setSimilarError(null);
-
-    const options = { offset: 0, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
-    void (frame ? searchByUploadedImage(frame.file, options, controller.signal)
-      : getSimilarImages(source.id, options, controller.signal))
-      .then((page) => {
-        if (controller.signal.aborted || requestVersion !== similarRequestVersionRef.current) return;
-        setSimilarPage({
-          source,
-          frame,
-          images: page.items,
-          total: page.total,
-          nextOffset: page.nextOffset,
-        });
-      })
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
-          setSimilarError(errorMessage(reason, "无法查找相似图片"));
-        }
-      })
-      .finally(() => {
-        if (similarControllerRef.current === controller) {
-          similarControllerRef.current = null;
-          if (requestVersion === similarRequestVersionRef.current) setSimilarLoading(false);
-        }
-      });
-  }, [similarError, similarLoading, similarPage.source?.id, similarPage.frame]);
+    void loadPage({ source, frame, images: [], total: 0, nextOffset: null }, 0, true);
+  }, [similarError, similarLoading, similarPage.source?.id, similarPage.frame, loadPage]);
 
   const searchVideoFrame = useCallback((source: GalleryImage, frame: VideoFrame) => {
     searchSimilar(source, true, frame);
   }, [searchSimilar]);
 
   useEffect(() => {
-    const complete = backgroundComplete;
-    const justCompleted = complete && !backgroundCompletionRef.current;
-    backgroundCompletionRef.current = complete;
+    const justCompleted = backgroundComplete && !backgroundCompletionRef.current;
+    backgroundCompletionRef.current = backgroundComplete;
     if (justCompleted && similarPage.source) {
       searchSimilar(similarPage.source, true);
     }
   }, [searchSimilar, similarPage.source, backgroundComplete]);
 
   const loadMoreSimilar = useCallback((): Promise<GalleryImage[]> => {
-    const source = similarPage.source;
-    const frame = similarPage.frame;
     const offset = similarPage.nextOffset;
-    if (!source || similarLoading || offset === null) return Promise.resolve([]);
-    const pending = similarLoadMorePromiseRef.current;
-    if (pending) return pending;
-
-    const controller = new AbortController();
-    const requestVersion = similarRequestVersionRef.current;
-    similarLoadMoreControllerRef.current = controller;
-    setSimilarLoadingMore(true);
-    setSimilarError(null);
-
-    const promise = (async () => {
-      try {
-        const options = { offset, limit: SIMILAR_PAGE_SIZE, exclude: source.id };
-        const page = await (frame ? searchByUploadedImage(frame.file, options, controller.signal)
-          : getSimilarImages(source.id, options, controller.signal));
-        if (controller.signal.aborted || requestVersion !== similarRequestVersionRef.current) return [];
-        setSimilarPage((current) => current.source?.id === source.id
-          ? {
-              source,
-              frame,
-              images: appendUniqueImages(current.images, page.items),
-              total: page.total,
-              nextOffset: page.nextOffset,
-            }
-          : current);
-        return page.items;
-      } catch (reason) {
-        if (!controller.signal.aborted && requestVersion === similarRequestVersionRef.current) {
-          setSimilarError(errorMessage(reason, "无法继续加载相似图片"));
-        }
-        return [];
-      } finally {
-        if (similarLoadMoreControllerRef.current === controller) {
-          similarLoadMoreControllerRef.current = null;
-          similarLoadMorePromiseRef.current = null;
-          if (requestVersion === similarRequestVersionRef.current) {
-            setSimilarLoadingMore(false);
-          }
-        }
-      }
-    })();
-    similarLoadMorePromiseRef.current = promise;
-    return promise;
-  }, [similarLoading, similarPage.nextOffset, similarPage.source, similarPage.frame]);
-
-  const restoreSimilarSearch = useCallback((page: SimilarImagePageState | null) => {
-    resetSimilarSearch();
-    if (page) setSimilarPage(page);
-  }, [resetSimilarSearch]);
+    return similarLoading || offset === null ? Promise.resolve([]) : loadPage(similarPage, offset, false);
+  }, [similarLoading, similarPage, loadPage]);
 
   return { similarPage, similarLoading, similarLoadingMore, similarError,
     resetSimilarSearch, restoreSimilarSearch, searchSimilar, searchVideoFrame, loadMoreSimilar };
