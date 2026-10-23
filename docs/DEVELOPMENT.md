@@ -1,50 +1,28 @@
 # 开发指南
 
-Pixhelf 使用 Rust / Axum 提供接口，Preact / TypeScript 提供界面。正式构建把前端资源嵌入 Rust 二进制；日常界面开发可以单独启动 Vite，修改后直接热更新。
+Pixhelf 使用 Rust / Axum 提供接口，Preact / TypeScript 提供界面；正式构建将前端资源嵌入 Rust 程序。
 
 ## 模块分工
 
 | 位置 | 职责 |
 | --- | --- |
-| `frontend/src/App.tsx` | 组装页面、导航、选择和查看器历史 |
-| `frontend/src/app/useGalleryData.ts` | 首屏数据、图库和任务状态轮询、搜索、防抖、分页及请求取消 |
-| `frontend/src/app/useViewerSimilarSearch.ts` | 查看器内的相似图片与视频帧查询、分页和恢复 |
-| `frontend/src/app/useViewerReturn.ts` | 返回图库或上层查看器时的滚动、动画与观察器生命周期 |
-| `frontend/src/app/viewerReturnSnapshot.ts` | 创建和释放返回动画使用的临时 DOM / canvas |
-| `frontend/src/galleryLoading.ts` | 缩略图与分页预加载距离、可见图片优先级及共享观察器 |
-| `frontend/src/useViewerNavigation.ts` | 感应区长按、方向键和鼠标侧键共用的加速节奏、分页等待及取消 |
-| `frontend/src/ImageViewer.tsx`、`ViewerNavigationButton.tsx` | 图片拖动、缩放与感应区手势交接；按钮保留显示和辅助操作入口 |
-| `frontend/src/hooks/` | 不依赖图库业务的视口、媒体查询、防抖和过渡 hooks |
-| `frontend/src/api.ts` | 页面调用的图库接口与请求参数 |
-| `frontend/src/api/request.ts` | JSON 请求、超时、取消和错误处理 |
-| `frontend/src/api/validators.ts` | 服务端数据的运行时校验 |
-| `frontend/src/types.ts` | 前端接口类型；和后端序列化结构一起维护 |
-| `src/web.rs` | 应用状态、路由注册、鉴权及公共中间件装配 |
-| `src/web/models.rs` | 查询参数归一化与响应结构 |
-| `src/web/listing.rs`、`pagination.rs` | 图库列表、文字搜索和分页排序 |
-| `src/web/similarity.rs`、`duplicates.rs` | 相似图片排序与重复文件检测，各自维护缓存 |
-| `src/web/details.rs` | 元数据、直方图和详情缓存 |
-| `src/web/media.rs`、`video.rs` | 图片、缩略图、视频及实况照片的文件响应 |
-| `src/web/frontend.rs`、`cache.rs` | 页面初始数据、内嵌资源和 HTTP 缓存头 |
+| `frontend/src/App.tsx`、`app/` | 页面组装、图库数据、相似搜索及查看器返回状态 |
+| `frontend/src/ImageViewer.tsx`、`useViewer*.ts` | 看图、导航、预加载和资源生命周期 |
+| `frontend/src/galleryLoading.ts`、`networkPolicy.ts` | 缩略图加载、分页预取和网络策略 |
+| `frontend/src/api/`、`api.ts`、`types.ts` | 请求、运行时校验和接口类型 |
+| `frontend/src/hooks/` | 视口、媒体查询、防抖与过渡 hooks |
+| `src/web.rs`、`src/web/` | 路由、鉴权装配、查询、媒体响应及 HTTP 缓存 |
 | `src/auth/`、`management/`、`storage/` | 账号、文件管理和外部存储 |
-| `src/gallery.rs`、`thumbs.rs`、`video_jobs.rs`、`text_search/` | 扫描索引、缩略图、视频任务和搜索模型 |
+| `src/gallery.rs`、`thumbs.rs`、`video_jobs.rs`、`text_search/` | 扫描、媒体处理与搜索模型 |
+| `src/monitor/`、`src/web/system/`、`frontend/src/System*.tsx` | 系统采样、历史记录与监控界面 |
 
-开发新功能时，把请求状态、取消逻辑和清理动作放在拥有它们的 hook 中；`App.tsx` 通过返回值和回调协调模块。后端 handler 使用 `ReadState` 读取按权限过滤的图库，管理操作沿用管理路由的鉴权。跨模块显式导入依赖，缓存留在对应业务模块内。
+请求状态、取消与清理逻辑放在拥有它们的 hook 或业务模块中；`App.tsx` 通过返回值和回调协调模块。修改接口时同步维护后端响应类型、`types.ts` 和 `api/validators.ts`；管理操作沿用管理路由的鉴权。
 
-修改接口时同步维护 `models.rs`（或对应业务模块的响应类型）、`types.ts` 和 `api/validators.ts`。路由与鉴权中间件集中在 `web.rs`，新增 handler 在此注册。
+## 本地开发
 
-## 本地启动
+需要 Linux、[固定版本的 Rust](../rust-toolchain.toml)、[固定版本的 Node.js](../.node-version) 和 npm。首次构建还会编译媒体组件，C / musl 工具链、NASM、pkg-config、Meson、Ninja 的安装清单见[构建脚本](../.forgejo/actions/build-release/action.yml)。使用 fnm 时可运行 `fnm install && fnm use`。
 
-需要 Linux、Rust（版本由 `rust-toolchain.toml` 固定）、Node.js 24.22.1（当前最新 LTS，版本由 `.node-version` 固定，与 CI 一致）和随 Node.js 提供的 npm。首次 Rust 构建还会编译媒体组件，需要 C / musl 工具链、NASM、pkg-config、Meson 和 Ninja；完整安装清单及跨架构配置见[构建流程](../.forgejo/actions/build-release/action.yml)。
-
-使用 fnm 时，在项目根目录安装并切换到指定的 Node.js 版本：
-
-```bash
-fnm install
-fnm use
-```
-
-在项目根目录安装依赖并构建一次前端：
+从项目根目录准备前端和测试图库：
 
 ```bash
 npm --prefix frontend ci
@@ -52,7 +30,7 @@ npm --prefix frontend run build
 mkdir -p target/dev/gallery
 ```
 
-将开发用图片放入 `target/dev/gallery`。在第一个终端启动仅监听本机的开发后端：
+把测试媒体放入 `target/dev/gallery`。终端一启动后端：
 
 ```bash
 PIXHELF_AUTH_ENABLED=false PIXHELF_SKIP_FRONTEND_BUILD=1 cargo run -- \
@@ -61,51 +39,47 @@ PIXHELF_AUTH_ENABLED=false PIXHELF_SKIP_FRONTEND_BUILD=1 cargo run -- \
   --text-search-model false
 ```
 
-在第二个终端启动前端：
+终端二启动前端：
 
 ```bash
 npm --prefix frontend run dev -- --host 127.0.0.1
 ```
 
-打开 `http://127.0.0.1:5173`。Vite 将 `/api` 请求转发到 `http://127.0.0.1:3002`；后端端口不同时，可在启动 Vite 的命令前设置 `PIXHELF_API_TARGET=http://127.0.0.1:其他端口`。界面改动由 Vite 热更新，Rust 改动后重启后端。
+访问 `http://127.0.0.1:5173`。Vite 将 `/api` 转发到 `127.0.0.1:3002`，可通过 `PIXHELF_API_TARGET` 覆盖地址。界面修改会热更新，Rust 修改后重启后端。
 
-Vite 的 HTML 没有服务端注入的登录状态，因此上述模式只用于本机界面开发。验证登录、访客权限或完整打包行为时，去掉 `PIXHELF_AUTH_ENABLED=false`，执行 `npm --prefix frontend run build` 后启动 Rust 服务，访问 `http://127.0.0.1:3002`。
-
-`PIXHELF_SKIP_FRONTEND_BUILD=1` 复用已有 `frontend/dist`，方便只改后端；不设置时，Cargo 会在前端源码变化后自动构建前端。
-
-CI 缓存、模型层复用、构建计时和发布脚本验证见[构建加速与计时](BUILD.md)。
+此模式仅用于本机界面开发。验证登录和访客权限时，去掉 `PIXHELF_AUTH_ENABLED=false`，重新构建前端并通过 `http://127.0.0.1:3002` 访问 Rust 服务。`PIXHELF_SKIP_FRONTEND_BUILD=1` 复用已有 `frontend/dist`；前端改动后应先重新构建。
 
 ## 验证
 
-从项目根目录执行：
-
 ```bash
-npm --prefix frontend run typecheck
 npm --prefix frontend run build
 cargo fmt --all -- --check
 PIXHELF_SKIP_FRONTEND_BUILD=1 cargo test --locked
 ```
 
-浏览器检查使用 `playwright-core`，需要已安装的 Chromium；非默认路径可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定。根据改动选择现有检查：
+前端构建包含类型检查；只检查类型时运行 `npm --prefix frontend test`。Rust 测试和发布自检随源码维护，共用 `frontend/scripts/fixtures/` 中的媒体样本。
 
-| 改动 | 命令（在 `frontend/` 中执行） |
+JavaScript 专项检查保存在 Git 忽略的 `frontend/.local-tests/`。新克隆需另行复制测试包并安装依赖：
+
+```bash
+npm --prefix frontend/.local-tests ci
+node frontend/.local-tests/node_modules/playwright-core/cli.js install chromium
+npm --prefix frontend run test:local -- --list
+```
+
+| 范围 | 命令（从项目根目录执行） |
 | --- | --- |
-| 请求生命周期 | `npm run request-lifecycle-check` |
-| 跨区域加载、后台请求 | `npm run network-loading-check`、`npm run network-policy-check` |
-| 瀑布流慢网滚动、缩略图优先级 | `npm run waterfall-loading-check` |
-| 图片和实况预加载、视频读取 | `npm run viewer-preload-check`、`npm run live-photo-preload-check`、`npm run media-source-check` |
-| 查看器切图速度、原图复用 | `npm run viewer-switch-loading-check`、`npm run viewer-original-cache-check` |
-| 查看器拖动、缩放和连续切图 | `npm run viewer-interaction-check`、`npm run viewer-keyboard-check` |
-| 图库筛选、搜索、重复图片 | `npm run image-filters-check`、`npm run image-search-check`、`npm run duplicates-check` |
-| 导航、移动端视口 | `npm run navigation-controls-check`、`npm run mobile-viewport-navigation-check` |
-| 页面切换和分页竞争 | `npm run ui-stress-check` |
-| 查看器历史、返回定位、选择和管理 | `npm run management-check` |
-| 登录、会话和访客权限 | `npm run auth-check` |
+| 算法、请求取消、缓存与轮询 | `npm --prefix frontend run test:local -- quick` |
+| 图库、导航、查看器与系统信息 | `npm --prefix frontend run test:local -- ui` |
+| 实况照片、视频预览与幻灯片 | `npm --prefix frontend run test:local -- media` |
+| 登录、管理、存储与媒体集成 | `npm --prefix frontend run test:local -- backend` |
+| 所有自动准备环境的检查 | `npm --prefix frontend run test:local -- all` |
+| 指定检查 | `npm --prefix frontend run test:local -- system-information viewer-preload` |
 
-`management-check` 和 `auth-check` 会启动后端并使用临时图库，先执行 `PIXHELF_SKIP_FRONTEND_BUILD=1 cargo build --locked` 更新 `target/debug/pixhelf`。其它专用检查及夹具位于 `frontend/scripts/`；后端接口回归位于 `src/web/tests.rs`，模块算法测试放在对应模块内。
+同一次调用按需构建前后端各一次，并对检查去重；默认继续运行、汇总失败，日志保存在 `.local-tests/results/`。支持 `--no-build` 复用产物、`--fail-fast` 首错停止、`--dry-run` 查看计划及 `--timeout=600` 调整单项时限（默认 300 秒）。测试包缺失、失败、超时或未完成均返回非零退出码。
 
-连续切图的计时参数集中在 `useViewerNavigation.ts`：按住 400 毫秒后开始重复，重复间隔从约 400 毫秒逐步缩短，最快每 250 毫秒一张（每秒 4 张），留出识别图片和松手的时间。键盘与鼠标侧键在按下时先切一张，感应区点按在松手时切一张；感应区移动超过手势阈值后交给图片拖动，取消长按及松手点按。分页等待不会累积切图次数或继续加速；重复切图松手、失焦或关闭后立即取消。
+浏览器可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定，媒体检查需要系统 FFmpeg / FFprobe。`manual` 检查需显式提供 `PIXHELF_URL` 或 `PIXHELF_PINE_SAMPLES`，不会纳入 `all`；`startup` 因旧扫描暂停夹具失效而停用。详细场景和参数见本地测试包的 `README.md`。
 
-`startup-check` 的旧扫描暂停夹具依赖 PATH 中的 FFprobe，当前内置媒体运行时不会调用它，需要更新夹具后再使用。首次扫描期间的接口保护已由后端测试覆盖。
+旧的 `npm run 名称-check` 改为 `test:local -- 名称`；`album-hierarchy` 并入 `local-storage`，`live-photo` 是 `live-photo-app` 的别名。本地测试包应单独备份，Git 克隆与源码归档不会携带它。
 
-跨区域加载策略、缓存规则和模拟网络复测方法见[加载性能](PERFORMANCE.md)。
+发布流程见[构建与发布](BUILD.md)，加载与缓存设计见[加载性能](PERFORMANCE.md)。

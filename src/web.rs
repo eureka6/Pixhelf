@@ -9,6 +9,7 @@ mod models;
 pub(crate) mod pagination;
 mod readiness;
 mod similarity;
+mod system;
 mod video;
 
 use crate::{
@@ -43,6 +44,7 @@ pub struct AppState {
 pub fn router(state: AppState, config: AuthConfig) -> Router {
     let storage = crate::storage::router(state.thumbnails.settings_directory());
     let management = crate::management::router(state.clone());
+    let system = system::router(state.clone());
     let authentication = AuthState::new(config);
     let session_layer = authentication.session_layer();
     let protected = Router::new()
@@ -93,6 +95,10 @@ pub fn router(state: AppState, config: AuthConfig) -> Router {
                 )),
         )
         .merge(storage.layer(middleware::from_fn_with_state(
+            authentication.clone(),
+            auth::require_admin,
+        )))
+        .merge(system.layer(middleware::from_fn_with_state(
             authentication.clone(),
             auth::require_admin,
         )))

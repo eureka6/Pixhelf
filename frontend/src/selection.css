@@ -1,7 +1,7 @@
 .photo-card-select { position: absolute; z-index: 5; top: 3px; right: 3px; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: white; opacity: 0; pointer-events: none; transition: opacity 160ms ease; touch-action: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-.photo-card-select > span { display: grid; place-items: center; width: 24px; height: 24px; border: 1.5px solid #fffffff0; border-radius: 50%; background: linear-gradient(145deg, #ffffff55, #1c302c55); backdrop-filter: blur(8px); box-shadow: 0 2px 7px #10251e40, inset 0 0 0 1px #1a30291a; transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease; }
-.photo-card-select > span > svg { width: 14px; height: 14px; opacity: 0; transform: scale(.65); transition: opacity 140ms ease, transform 180ms ease; }
-.photo-card-select[aria-checked="true"] > span { background: linear-gradient(145deg, #34988b, #216f66); border-color: white; box-shadow: 0 2px 8px #10251e4d, 0 0 0 2px #ffffff30; }
+.photo-card-select > span { display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid #ffffffa6; border-radius: 50%; background: #18332c26; backdrop-filter: blur(4px); box-shadow: 0 1px 3px #10251e26; transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease; }
+.photo-card-select > span > svg { width: 12px; height: 12px; opacity: 0; transform: scale(.65); transition: opacity 140ms ease, transform 180ms ease; }
+.photo-card-select[aria-checked="true"] > span { background: #287e73; border-color: #ffffffd9; box-shadow: 0 1px 4px #10251e33; }
 .photo-card-select[aria-checked="true"] > span > svg { opacity: 1; transform: scale(1); }
 .photo-card-select:active > span { transform: scale(.9); }
 .photo-card-select:disabled { cursor: default; }
@@ -76,7 +76,7 @@ html:has(.gallery-selection-bar) { scroll-padding-bottom: 120px; }
 .trash-loading { display: flex; align-items: center; justify-content: center; gap: 9px; padding: 50px 0; color: var(--muted); }
 @media (hover: hover) and (pointer: fine) {
   .image-card:hover .photo-card-select { opacity: 1; pointer-events: auto; }
-  .photo-card-select:hover:not(:disabled) > span { transform: scale(1.08); box-shadow: 0 2px 9px #10251e55, 0 0 0 3px #ffffff25; }
+  .photo-card-select:hover:not(:disabled) > span { transform: scale(1.04); border-color: #ffffffd9; box-shadow: 0 1px 4px #10251e33; }
   .photo-card-select:hover:active:not(:disabled) > span { transform: scale(.92); }
   .gallery-selection-bar button:hover:not(:disabled), .trash-page button:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
   .selection-actions .selection-trash:hover:not(:disabled) { background: #f8ebea; color: #9f4643; }
@@ -84,8 +84,8 @@ html:has(.gallery-selection-bar) { scroll-padding-bottom: 120px; }
 }
 @media (hover: none), (pointer: coarse) {
   .photo-card-select { top: 0; right: 0; place-items: start end; padding: 6px; }
-  .photo-card-select > span { width: 20px; height: 20px; border-width: 1.25px; }
-  .photo-card-select > span > svg { width: 12px; height: 12px; }
+  .photo-card-select > span { width: 18px; height: 18px; }
+  .photo-card-select > span > svg { width: 11px; height: 11px; }
 }
 @media (max-width: 720px) {
   #root:has(.gallery-selection-bar) .management-notice { bottom: calc(var(--mobile-navigation-clearance) + 120px); }

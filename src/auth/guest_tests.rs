@@ -13,6 +13,7 @@ async fn gallery_management_requires_admin_origin_and_csrf() {
         "/api/management/trash",
         "/api/management/directories",
         "/api/management/downloads/missing",
+        "/api/system",
     ] {
         assert_eq!(
             call(&app, request(Method::GET, path, None), Body::empty())
@@ -71,6 +72,17 @@ async fn gallery_management_requires_admin_origin_and_csrf() {
     .await;
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(json_body(response).await["favoriteIds"], json!([id]));
+    let response = call(
+        &app,
+        request(Method::GET, "/api/system", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let system = json_body(response).await;
+    assert_eq!(system["process"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(system["gallery"]["total"].as_u64().unwrap() > 0);
     let bytes = std::fs::read(gallery.path().join("gallery/private-photo.png")).unwrap();
     let uploaded = call(
         &app,

@@ -6,6 +6,7 @@
 /dist/
 /frontend/node_modules/
 /frontend/dist/
+/frontend/.local-tests/
 /models/
 *.log
 /.env

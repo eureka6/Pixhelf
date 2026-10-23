@@ -12,7 +12,7 @@ export function useGalleryMetrics(
 ): GalleryMetrics & { measure: () => void } {
   const [metrics, setMetrics] = useState<GalleryMetrics>({
     width: 0,
-    gap: 6,
+    gap: 4,
   });
   const metricsRef = useRef(metrics);
   const measureRef = useRef<(() => void) | null>(null);
@@ -29,7 +29,7 @@ export function useGalleryMetrics(
       const declaredGap = Number.parseFloat(
         getComputedStyle(element).getPropertyValue("--gallery-gap"),
       );
-      const gap = Number.isFinite(declaredGap) ? declaredGap : 6;
+      const gap = Number.isFinite(declaredGap) ? declaredGap : 4;
       const roundedWidth = Math.round(width * 100) / 100;
       const current = metricsRef.current;
       if (

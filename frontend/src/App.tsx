@@ -78,6 +78,7 @@ const LocalStorageView = lazy(() => import("./LocalStorageView").then(module => 
 const ExternalStorageView = lazy(() => import("./ExternalStorageView").then(module => ({ default: module.ExternalStorageView })));
 const TrashView = lazy(() => import("./TrashView").then(module => ({ default: module.TrashView })));
 const DuplicateImages = lazy(() => import("./DuplicateImages").then(module => ({ default: module.DuplicateImages })));
+const SystemInformation = lazy(() => import("./SystemInformation").then(module => ({ default: module.SystemInformation })));
 
 const SIMILAR_PAGE_SIZE = 30;
 const MOBILE_NAV_EXIT_MS = 240;
@@ -99,6 +100,7 @@ function App() {
   const browsingStorage = section === "storage";
   const browsingFavorites = section === "favorites";
   const browsingTrash = section === "trash";
+  const browsingSystem = section === "system";
   const browsingSimilar = section === "similar";
   const browsingDuplicates = browsingSimilar && !path;
   const browsingImageSearch = browsingSimilar && Boolean(path);
@@ -167,14 +169,14 @@ function App() {
   );
   const topbar = useAutoHideTopbar(Boolean(searchOpen || menuOpen || uploadOpen || desktopNav.open || mobileNavMounted || viewerImageId
     || viewerReturnRequest || settingsSection || infoImage), location, sidebarCollapsed);
-  const filtersAvailable = !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar;
+  const filtersAvailable = !browsingAlbums && !browsingLocal && !browsingStorage && !browsingTrash && !browsingSimilar && !browsingSystem;
   const filterLabels = imageFilterLabels(imageFilters, textSearchReady && !browsingFavorites ? search : "", categories);
   const viewerImageIdRef = useRef<string | null>(null);
   const viewerHistoryActiveRef = useRef(false);
   const viewerHistoryClosingRef = useRef(false);
   const { images, total, nextOffset } = browsingImageSearch ? imageSimilarity : browsingDuplicates ? { images: duplicateImages, total: duplicateImages.length, nextOffset: null } : browsingLocal && localMedia ? localMedia : imagePage;
-  const pageLoadingMore = browsingImageSearch ? imageSimilarity.loadingMore : browsingLocal ? Boolean(localMedia?.loadingMore) : loadingMore;
-  const pageLoading = browsingImageSearch ? imageSimilarity.loading : (browsingDuplicates || browsingLocal || browsingStorage || browsingTrash) ? false : browsingAlbums ? !summary : loading;
+  const pageLoadingMore = browsingSystem ? false : browsingImageSearch ? imageSimilarity.loadingMore : browsingLocal ? Boolean(localMedia?.loadingMore) : loadingMore;
+  const pageLoading = browsingImageSearch ? imageSimilarity.loading : (browsingDuplicates || browsingLocal || browsingStorage || browsingTrash || browsingSystem) ? false : browsingAlbums ? !summary : loading;
   const pageError = browsingImageSearch ? imageSimilarity.error : error;
   const visibleImages = useMemo(() => browsingImageSearch && search.trim()
     ? images.filter(image => image.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) : images,
@@ -726,7 +728,7 @@ function App() {
       />
 
       <main className="content" aria-busy={pageLoading || pageLoadingMore}>
-        {!browsingLocal && !browsingStorage && !browsingTrash && status?.videos && <div className="background-video-tasks" aria-label="视频准备任务">
+        {!browsingLocal && !browsingStorage && !browsingTrash && !browsingSystem && status?.videos && <div className="background-video-tasks" aria-label="视频准备任务">
           {(["playback", "preview"] as const).map(kind => {
             const job = status.videos![kind];
             if (!job.total || (job.backgroundComplete && !job.failed)) return null;
@@ -738,7 +740,7 @@ function App() {
             </div>;
           })}
         </div>}
-        {pageError && !browsingLocal && !browsingStorage && (
+        {pageError && !browsingLocal && !browsingStorage && !browsingSystem && (
           <div className="error-banner" role="alert">
             <span>{pageError}</span>
             <button
@@ -753,7 +755,10 @@ function App() {
         )}
 
         <DeferredContent key={section}>
-        {browsingDuplicates ? <DuplicateImages ref={galleryLayoutRef} search={debouncedSearch} revision={summary?.revision} viewing={Boolean(viewerImageId)}
+        {browsingSystem ? authentication.guest
+          ? <div className="empty-state"><strong>系统信息仅限管理员访问</strong><a href="/login">管理员登录</a></div>
+          : <SystemInformation />
+        : browsingDuplicates ? <DuplicateImages ref={galleryLayoutRef} search={debouncedSearch} revision={summary?.revision} viewing={Boolean(viewerImageId)}
           onImagesChange={setDuplicateImages} onOpen={openViewer} toolbarTarget={selectionToolbar} onSelectionChange={setSelectedIds} />
         : (browsingFavorites || browsingTrash || browsingLocal) && authentication.guest ? <div className="empty-state"><strong>图库管理仅限管理员访问</strong><a href="/login">管理员登录</a></div> : browsingLocal ? <LocalStorageView path={path} search={search} albums={summary?.albums ?? []} onOpen={openLocal} onAlbum={chooseAlbum} onImage={viewLocalImage} onMediaChange={setLocalMedia} /> : browsingTrash ? <TrashView search={search} toolbarTarget={selectionToolbar} /> : browsingStorage ? (
           authentication.guest ? (

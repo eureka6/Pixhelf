@@ -123,6 +123,10 @@ impl ThumbnailStatus {
 }
 
 impl ThumbnailManager {
+    pub(crate) fn cache_directory(&self) -> &Path {
+        self.cache_root.parent().expect("thumbnail cache parent")
+    }
+
     pub(crate) fn settings_directory(&self) -> PathBuf {
         self.cache_root
             .parent()

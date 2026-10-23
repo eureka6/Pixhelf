@@ -6,7 +6,7 @@ export interface Album {
   previews?: string[];
 }
 
-export type GallerySection = "library" | "albums" | "similar" | "storage" | "local" | "favorites" | "trash";
+export type GallerySection = "library" | "albums" | "similar" | "storage" | "local" | "favorites" | "trash" | "system";
 
 export interface GallerySummary {
   total: number;
@@ -102,6 +102,36 @@ export interface BackgroundJobStatus {
   processing: number;
   failed: number;
   backgroundComplete: boolean;
+}
+
+export interface NetworkHistorySample {
+  at: number;
+  interfaces: { name: string; receiveBytesPerSecond: number | null; sendBytesPerSecond: number | null }[] | null;
+}
+
+export interface NativeNetworkSample extends NetworkHistorySample {
+  intervalSeconds: number;
+}
+
+export interface SystemInfo {
+  sampledAtMs: number;
+  host: {
+    hostname: string | null;
+    operatingSystem: string | null;
+    kernel: string | null;
+    architecture: string;
+    cpuModel: string | null;
+    logicalCpus: number | null;
+  };
+  cpu: { usagePercent: number | null; loadAverage: [number, number, number] | null; uptimeSeconds: number | null };
+  memory: { total: number; available: number; used: number; swapTotal: number; swapUsed: number } | null;
+  process: { version: string; pid: number; uptimeSeconds: number; residentMemory: number | null; threads: number | null };
+  storage: { name: string; path: string; sizeBytes: number | null; state: "scanning" | "ready" | "error" }[];
+  network: { name: string; receivedBytes: number; sentBytes: number; receiveBytesPerSecond: number | null; sendBytesPerSecond: number | null }[] | null;
+  networkHistory: NetworkHistorySample[];
+  nativeNetworkHistory: NativeNetworkSample[];
+  gallery: { total: number; albums: number; initializing: boolean };
+  jobs: ThumbnailStatus;
 }
 
 export interface BootstrapData {

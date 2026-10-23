@@ -7,6 +7,7 @@ mod heif;
 mod logging;
 mod management;
 mod media_runtime;
+mod monitor;
 mod motion;
 mod photo_details;
 mod similarity;

@@ -1,6 +1,6 @@
 import { requestJson, REQUEST_TIMEOUT_MS } from "./api/request";
 import { isBootstrapData, isDuplicatePage, isGalleryImage, isGallerySummary, isImagesPage,
-  isPhotoDetails, isThumbnailStatus } from "./api/validators";
+  isPhotoDetails, isSystemInfo, isThumbnailStatus } from "./api/validators";
 import { authentication } from "./auth";
 import { isCategoryConfig } from "./contentCategories";
 import type {
@@ -12,6 +12,7 @@ import type {
   ImageFilters,
   PhotoDetails,
   SortMode,
+  SystemInfo,
   ThumbnailStatus,
 } from "./types";
 
@@ -43,6 +44,10 @@ export function getGallery(signal?: AbortSignal): Promise<GallerySummary> {
 
 export function getStatus(signal?: AbortSignal): Promise<ThumbnailStatus> {
   return requestJson("/api/status", isThumbnailStatus, signal);
+}
+
+export function getSystemInfo(signal?: AbortSignal): Promise<SystemInfo> {
+  return requestJson("/api/system", isSystemInfo, signal, REQUEST_TIMEOUT_MS, { cache: "no-store" });
 }
 
 export async function getContentCategories(signal?: AbortSignal) {

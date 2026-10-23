@@ -1,5 +1,5 @@
 import type { Album, BootstrapData, DuplicatePage, GalleryImage, GallerySummary, ImagesPage,
-  PhotoDetails, ThumbnailStatus, VideoMetadata } from "../types";
+  PhotoDetails, SystemInfo, ThumbnailStatus, VideoMetadata } from "../types";
 
 type JsonObject = Record<string, unknown>;
 
@@ -107,6 +107,46 @@ export function isThumbnailStatus(value: unknown): value is ThumbnailStatus {
 function isBackgroundJobStatus(value: unknown): boolean {
   return isObject(value) && [value.total, value.ready, value.queued, value.processing, value.failed].every(isNonNegativeInteger)
     && typeof value.backgroundComplete === "boolean";
+}
+
+export function isSystemInfo(value: unknown): value is SystemInfo {
+  const nullableString = (item: unknown) => item === null || typeof item === "string";
+  const nullableInteger = (item: unknown) => item === null || isNonNegativeInteger(item);
+  const nonNegativeNumber = (item: unknown): item is number => typeof item === "number" && Number.isFinite(item) && item >= 0;
+  const nullableNumber = (item: unknown) => item === null || nonNegativeNumber(item);
+  const networkRate = (item: unknown) => isObject(item) && typeof item.name === "string"
+    && [item.receiveBytesPerSecond, item.sendBytesPerSecond].every(nullableNumber);
+  const capacity = (item: unknown) => isObject(item)
+    && [item.total, item.used, item.available].every(isNonNegativeInteger)
+    && Number(item.used) <= Number(item.total) && Number(item.available) <= Number(item.total);
+  return isObject(value) && isNonNegativeInteger(value.sampledAtMs) && value.sampledAtMs <= 8.64e15
+    && isObject(value.host) && [value.host.hostname, value.host.operatingSystem, value.host.kernel, value.host.cpuModel].every(nullableString)
+    && typeof value.host.architecture === "string" && (value.host.logicalCpus === null || isPositiveInteger(value.host.logicalCpus))
+    && isObject(value.cpu) && (value.cpu.usagePercent === null || (nonNegativeNumber(value.cpu.usagePercent) && value.cpu.usagePercent <= 100))
+    && nullableInteger(value.cpu.uptimeSeconds)
+    && (value.cpu.loadAverage === null || (Array.isArray(value.cpu.loadAverage) && value.cpu.loadAverage.length === 3 && value.cpu.loadAverage.every(nonNegativeNumber)))
+    && (value.memory === null || (isObject(value.memory) && capacity(value.memory)
+      && [value.memory.swapTotal, value.memory.swapUsed].every(isNonNegativeInteger) && Number(value.memory.swapUsed) <= Number(value.memory.swapTotal)))
+    && isObject(value.process) && typeof value.process.version === "string" && isPositiveInteger(value.process.pid)
+    && isNonNegativeInteger(value.process.uptimeSeconds) && [value.process.residentMemory, value.process.threads].every(nullableInteger)
+    && Array.isArray(value.storage) && value.storage.every(directory => isObject(directory) && typeof directory.name === "string" && typeof directory.path === "string"
+      && nullableInteger(directory.sizeBytes) && (directory.state === "scanning" || directory.state === "error" || (directory.state === "ready" && isNonNegativeInteger(directory.sizeBytes))))
+    && (value.network === null || (Array.isArray(value.network) && value.network.every(network => isObject(network) && typeof network.name === "string"
+      && [network.receivedBytes, network.sentBytes].every(isNonNegativeInteger) && [network.receiveBytesPerSecond, network.sendBytesPerSecond].every(nullableNumber))))
+    && Array.isArray(value.networkHistory) && value.networkHistory.length > 0 && value.networkHistory.length <= 151
+    && value.networkHistory.every((sample, index, history) => isObject(sample) && isNonNegativeInteger(sample.at)
+      && sample.at <= Number(value.sampledAtMs) && sample.at >= Number(value.sampledAtMs) - 300_000
+      && (index === 0 || sample.at > history[index - 1].at)
+      && (sample.interfaces === null || (Array.isArray(sample.interfaces) && sample.interfaces.every(networkRate))))
+    && value.networkHistory.at(-1).at === value.sampledAtMs
+    && Array.isArray(value.nativeNetworkHistory) && value.nativeNetworkHistory.length <= 1441
+    && value.nativeNetworkHistory.every((sample, index, history) => isObject(sample) && isNonNegativeInteger(sample.at)
+      && sample.at <= Number(value.sampledAtMs) && sample.at >= Number(value.sampledAtMs) - 86_400_000
+      && (index === 0 || sample.at > history[index - 1].at)
+      && nonNegativeNumber(sample.intervalSeconds) && sample.intervalSeconds <= 86400
+      && (sample.interfaces === null || (sample.intervalSeconds > 0 && Array.isArray(sample.interfaces) && sample.interfaces.every(networkRate))))
+    && isObject(value.gallery) && [value.gallery.total, value.gallery.albums].every(isNonNegativeInteger) && typeof value.gallery.initializing === "boolean"
+    && isThumbnailStatus(value.jobs);
 }
 
 export function isBootstrapData(value: unknown): value is BootstrapData {

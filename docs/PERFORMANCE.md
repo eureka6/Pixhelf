@@ -1,82 +1,39 @@
 # 加载性能
 
-## 首屏和功能模块
+## 加载与缓存策略
 
-图库首屏只加载浏览所需代码。设置、上传、本地目录、外部存储、回收站和重复图片页面在打开时加载；等待过程中可关闭弹窗，下载失败时可重新加载页面。图库模块下载期间也显示加载提示。
+| 范围 | 策略与主要实现 |
+| --- | --- |
+| 首屏 | 按 Vite manifest 预加载图库依赖；设置、上传、存储和重复图片等页面按需加载。见 `src/web/frontend.rs` |
+| 静态资源 | 构建时生成 JS / CSS 的 Brotli 表示；版本化地址使用长期缓存，Wasm 分组存储。见 `frontend/scripts/pack-assets.mjs` |
+| 缩略图与分页 | 可见图片优先；预取附近约 1.5–2 屏缩略图，分页再提前一屏；共享观察器随组件释放。见 `galleryLoading.ts` |
+| 原图 | 先完成当前图片，再沿翻页方向预取邻图；复用进行中的请求，转向时取消无关下载。见 `useViewerPreloads.ts`、`viewerAssets.ts` |
+| 网络限制 | 根据省流模式、带宽、RTT 和文档请求耗时调整预取范围。见 `networkPolicy.ts` |
+| 媒体片段 | 首个 Range 请求同时读取长度与可播放字节，后续读取复用响应流；不完整响应会报错并释放下载。见 `mediaSource.ts` |
+| 后台轮询 | 页面隐藏、离线或离开时取消请求，恢复时刷新，过时结果不能重启轮询。见 `app/visiblePolling.ts` |
 
-`src/web/frontend.rs` 从 Vite manifest 生成图库静态依赖的预加载标签，让依赖随 HTML 同时下载。新增按需模块时不要将其加入首屏预加载，也不要通过其它静态导入重新带入首屏。
-
-`frontend/scripts/pack-assets.mjs` 在构建时生成 JS/CSS 的 Brotli 表示，包括播放器脚本。支持 Brotli 的客户端直接接收压缩字节；其它客户端继续使用原有内容协商。静态资源保留版本化地址、一年 immutable 缓存、`Vary: Accept-Encoding` 和区分压缩表示的 ETag。Wasm 按组存储并在响应时压缩，以控制可执行文件体积。
-
-## 图片、实况与视频
-
-`frontend/src/networkPolicy.ts` 区分省流模式、低带宽和高 RTT，也使用文档请求耗时补充浏览器未提供网络信息的情况。受限网络下，查看器保留前后两张缩略图，图库悬停原图和实况片段的自动预取仍采用保守策略；查看器内的原图按下面的独立策略准备。
-
-`frontend/src/galleryLoading.ts` 单独管理瀑布流的缩略图预加载：正常网络提前约 1.5 屏，高延迟等受限网络提前约 2 屏，距离限制在 1,000–2,400 像素。屏幕内的图片优先下载，附近图片以低优先级预取，进入屏幕时提升正在进行的请求优先级，并直接显示加载结果，省去额外淡入等待。分页数据比缩略图再提前约一屏请求，给“获取下一页、下载图片”两步留出时间。共享观察器在图片加载完成或组件卸载后释放。
-
-查看器先完成当前原图，再按最近的翻页方向串行预取相邻原图。高延迟不再禁用原图预取：带宽充足时准备前后各一张，正常网络下桌面还准备翻页方向的第二张；低带宽仅准备翻页方向的一张，省流模式停止原图预取。切到正在下载的图片会复用该请求，转向或跳图时取消无关下载，为当前图片留出带宽。
-
-桌面已解码原图的预加载窗口限制为当前图片加三张邻图，避免预取过程反而淘汰当前图片。手机在当前图片显示后立即准备邻图，省去额外的 120 ms 定时等待和空闲调度等待。手机沿用视口位图渲染，已下载的完整原图字节供放大和再次查看复用。关闭查看器或进入后台继续清理过时任务，缓存保留原有数量和内存上限。
-
-`mediaSource.ts` 的第一个 `Range: bytes=0-` 请求同时获取文件长度与可播放字节，后续读取复用该响应流。原图实况缓存、重复播放、拖动、文件版本隔离和取消仍由现有的有界缓存处理。对不正确或不完整的分段响应会报错并释放下载。
-
-`app/visiblePolling.ts` 统一处理图库和后台任务轮询。隐藏页面、离线和离开页面时取消请求，恢复时刷新；过时请求结束后不能重新启动轮询。
+以上未标目录的前端文件均位于 `frontend/src/`。查看器缓存受数量和内存预算约束；关闭查看器或进入后台会清理过时任务。手机使用视口位图渲染，完整原图字节供放大和再次查看复用。
 
 ## 复测
 
-先构建嵌入前端的本地后端，再执行：
+安装本地测试包后，从项目根目录执行；入口只构建一次所需前端和后端，安装方法见[开发指南](DEVELOPMENT.md#验证)。
 
 ```bash
-npm --prefix frontend run build
-PIXHELF_SKIP_FRONTEND_BUILD=1 cargo build --locked
-npm --prefix frontend run network-loading-check
-npm --prefix frontend run network-policy-check
-npm --prefix frontend run waterfall-loading-check
-npm --prefix frontend run viewer-preload-check
-npm --prefix frontend run viewer-switch-loading-check
-npm --prefix frontend run viewer-original-cache-check
-npm --prefix frontend run media-source-check
-npm --prefix frontend run live-photo-preload-check
+npm --prefix frontend run test:local -- \
+  network-loading network-policy waterfall-loading viewer-preload \
+  viewer-switch-loading viewer-original-cache media-source live-photo-preload
 ```
 
-`network-loading-check` 启动隔离的临时图库，用 Chromium 模拟 250 ms 延迟、2 Mbps 下载带宽，测量桌面和手机的冷启动与首次看图。可设置 `PIXHELF_NETWORK_REPORT=/tmp/pixhelf-network.json` 保存结果。测试会清理临时服务和数据；需要已安装 Chromium。
+| 检查 | 场景 | 可选报告路径变量 |
+| --- | --- | --- |
+| `network-loading` | 250 ms 延迟、2 Mbps 下载，测量桌面与手机冷启动、首屏和首次看图 | `PIXHELF_NETWORK_REPORT` |
+| `waterfall-loading` | 180 张分页图片、缩略图延迟 600 ms、分页延迟 700 ms，连续滚动检查加载与请求复用 | `PIXHELF_WATERFALL_REPORT` |
+| `viewer-switch-loading` | 原图延迟 600 ms、每张停留 900 ms，检查切图、反向翻页与预取范围 | `PIXHELF_VIEWER_SWITCH_REPORT` |
 
-跨区域优化阶段使用相同小图夹具的单次前后对比（瀑布流预加载调整之前）：
+这些是固定夹具的模拟网络结果。比较改动前后时使用相同版本的样本、浏览器和参数，并同时检查请求数量、传输量与耗时；小图模拟不能代表大文件持续占用带宽或真实跨区域线路。
 
-| 指标 | 优化前 | 优化后 |
-| --- | ---: | ---: |
-| 首屏脚本传输字节 | 109,279 | 93,671 |
-| 桌面第一张照片出现 | 1,199 ms | 1,100 ms |
-| 手机第一张照片出现 | 1,146 ms | 1,097 ms |
-| 桌面可见照片全部加载 | 2,243 ms | 2,138 ms |
-| 手机可见照片全部加载 | 1,901 ms | 1,847 ms |
-| 桌面首次打开照片 | 493 ms | 529 ms |
-| 手机首次打开照片 | 524 ms | 346 ms |
+## 反向代理
 
-这些数据用于验证请求策略和传输量，属于本地模拟。小图计时存在调度波动，本次桌面看图计时也略有增加，不能据此认为每种操作都会加快。实际欧洲到新加坡的结果受线路、服务器负载、图片大小和浏览器缓存影响。大原图的带宽竞争另外由 `viewer-preload-check` 的挂起请求场景验证，不能从上述小图时间推算实际大文件下载速度。
+前端资源嵌入 Rust 程序，改动后需要替换服务程序或容器镜像。代理应保留 `Content-Encoding`、`Cache-Control`、`ETag`、`Vary`，并正确转发媒体 Range 请求。
 
-`waterfall-loading-check` 使用生产前端和 180 张图片的分页夹具，模拟缩略图响应延迟 600 ms、分页响应延迟 700 ms，以约 900 px/s 连续滚动，记录新进入屏幕的图片是否已显示。可设置 `PIXHELF_WATERFALL_REPORT=/tmp/pixhelf-waterfall.json` 保存结果。它同时验证预加载范围受限、分页不重复、快速滚动能提升已有请求的优先级且不会重新下载。
-
-| 图片进入屏幕时已加载的比例 | 调整前 | 调整后 |
-| --- | ---: | ---: |
-| 桌面，1440 px 宽 | 9%（10 / 110） | 100%（110 / 110） |
-| 手机，390 px 宽 | 4%（4 / 94） | 100%（94 / 94） |
-
-这是固定延迟的小图模拟结果；更快滚动、更大的缩略图或持续低带宽仍可能需要等待。更早加载会多下载附近的缩略图：本轮桌面请求数从 135 增至 170，手机从 110 增至 130，均未一次加载全部 180 张。
-
-调整后再次运行 250 ms / 2 Mbps 首屏检查：桌面可见照片全部加载为 2,154 ms，手机为 1,644 ms；首张照片分别为 1,107 ms 和 1,101 ms。与前一阶段相比，首屏时间未见明显增加。
-
-`viewer-switch-loading-check` 使用生产前端，模拟 350 ms RTT 信号、8 Mbps 带宽信号和原图响应延迟 600 ms，每张图片显示后停留 900 ms 再切换。检查桌面和手机的前进、返回、反向翻页、下载复用及预取范围；计时直到原图元素或视口画布已准备并显示。可设置 `PIXHELF_VIEWER_SWITCH_REPORT=/tmp/pixhelf-viewer-switch.json` 保存结果。
-
-| 第一次切到下一张原图 | 调整前 | 调整后 |
-| --- | ---: | ---: |
-| 桌面，1440 px 宽 | 650 ms | 24 ms |
-| 手机，390 px 宽 | 664 ms | 54 ms |
-
-这是固定响应延迟的小图夹具，并未模拟大文件持续占用带宽。提前下载和解码利用了看图时的停留时间；极快连翻或尚未完成下载的大原图仍需要等待。该浏览序列的原图请求数从 4 增至 7，包括取消的预取；已完成的原图再次查看不会重复下载。
-
-## 部署
-
-需要重新构建并替换服务程序或容器镜像才会生效，前端资源随 Rust 程序嵌入。反向代理应保留响应的 `Content-Encoding`、`Cache-Control`、`ETag`、`Vary`，并正确转发媒体 `Range` 请求。
-
-若在现有反向代理或 CDN 配置缓存，只对版本化 `/assets/` 使用公共长期缓存。鉴权后的页面和媒体保持服务端返回的 `no-store` / `private, no-cache` 策略，媒体条件请求仍先验证会话与可见性。
+公共长期缓存仅用于版本化的 `/assets/`。鉴权后的页面和媒体遵循服务端返回的 `no-store` / `private, no-cache` 策略，媒体条件请求仍需验证会话与可见性。

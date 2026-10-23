@@ -8,7 +8,7 @@ export interface GalleryLocation {
 export function readGalleryLocation(): GalleryLocation {
   const params = new URLSearchParams(window.location.search);
   const section = params.get("view");
-  if (section === "favorites" || section === "trash") return { section, path: "" };
+  if (section === "favorites" || section === "trash" || section === "system") return { section, path: "" };
   if (section === "albums") return { section, path: params.get("album") ?? "" };
   if (section === "local") return { section, path: params.get("path") ?? "" };
   if (section === "storage") return { section, path: params.get("path") || "/" };

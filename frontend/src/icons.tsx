@@ -114,6 +114,10 @@ export function Info(props: IconProps) {
   return <Icon {...props}><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></Icon>;
 }
 
+export function Activity(props: IconProps) {
+  return <Icon {...props}><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></Icon>;
+}
+
 export function UserRound(props: IconProps) {
   return <Icon {...props}><circle cx="12" cy="8" r="5" /><path d="M20 21a8 8 0 0 0-16 0" /></Icon>;
 }

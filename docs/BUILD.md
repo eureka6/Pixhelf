@@ -1,33 +1,37 @@
-# 构建加速与计时
+# 构建与发布
 
-正式发布和 `pixhelf-local` 共用 `.forgejo/actions/build-release/action.yml`。Rust 版本由 `rust-toolchain.toml` 固定；升级时修改该文件，工具链和编译缓存会随之失效。
+本地开发见[开发指南](DEVELOPMENT.md)。正式版和测试镜像共用[构建流程](../.forgejo/actions/build-release/action.yml)，Rust 与 Node.js 版本分别由 `rust-toolchain.toml`、`.node-version` 固定。
 
-## CI 缓存
+## 发布入口
 
-工作流分别缓存 Rust / Zig 工具链、npm 下载、前端 Wasm 与 Brotli 产物、媒体运行时，以及 Cargo 依赖和编译结果。缓存键包含相应的工具版本、构建脚本或依赖锁文件。前端资源缓存在 `npm ci` 之后恢复，避免被安装步骤删除。测试编译关闭调试符号和增量编译，减少缓存体积。
+| 入口 | 产物 |
+| --- | --- |
+| 推送 `v*` 标签 | Linux amd64 / arm64 单文件、Forgejo 与 Docker Hub 多架构镜像、Release 附件 |
+| Pull request | 构建与验证 |
+| Actions → Build pixhelf-local → Run workflow | amd64 musl 测试镜像，仅发布到 Forgejo 的 `pixhelf-local:latest` |
 
-Runner 必须提供可访问的缓存服务，配置见 [Forgejo 缓存说明](https://forgejo.org/docs/latest/user/actions/advanced-features/#cache)。工作流在恢复前安装 zstd；缓存服务不可用或缓存未命中时，继续正常构建。首次运行仍需生成缓存。
+测试镜像完整地址为 `<Forgejo域名>/<所有者>/pixhelf-local:latest`，无需另建分支。仓库配置具有 `write:package` 权限的 `REGISTRY_TOKEN`；`REGISTRY_USERNAME` 未设置时使用触发者。正式版另需 `DOCKERHUB_TOKEN` 和 `DOCKERHUB_USERNAME`。
 
-缓存步骤使用 `actions/cache@v4`，保存完成后立即退出。`v3` 在当前 Runner 上每次保存后会额外等待约 180 秒，5 组缓存会让 `Complete job` 多耗时约 15 分钟。
+工作流准备依赖、编译媒体组件、构建与压缩前端、运行 Rust 测试，再生成静态 musl 二进制。正式发布额外执行 UPX 压缩和独立运行检查；原生媒体源码与重建脚本随 `pixhelf-media-sources.tar.xz` 提供，详见[组件说明](../packaging/THIRD_PARTY.md)。
 
-媒体组件编译默认使用可用 CPU 数量，最多 8 个并发；通过 `PIXHELF_MEDIA_JOBS` 显式设置时使用指定值。amd64 和 arm64 的媒体产物分开保存，同一任务中的测试和发布构建复用这些产物。
+## 缓存与并发
 
-## 模型层复用
+缓存步骤使用 `actions/cache@v4`，避免旧版保存缓存后的退出等待。
 
-镜像仓库中的 `model-<模型完整修订号>-v1` 标签保存只有模型的一层基础镜像。首次发布校验模型文件的 SHA-256 和长度后创建缓存；后续发布读取缓存镜像的摘要，检查模型身份和层数，再直接在同一仓库中追加应用层。
+CI 缓存 Rust / Zig 工具链、npm 下载、前端 Wasm 与 Brotli 产物、媒体运行时及 Cargo 编译结果。缓存键包含工具版本、构建脚本和锁文件；修改这些输入后会自动重新构建。前端资源缓存在 `npm ci` 后恢复，测试编译关闭调试符号和增量编译。
 
-`build-cache` 是多架构镜像索引的内部暂存标签。后续操作使用不可变摘要，各目标仓库验证通过后才更新版本标签和 `latest`。这些缓存标签用于构建，不用于部署；清理后下一次会重新生成。
+Runner 的缓存服务配置见 [Forgejo 文档](https://forgejo.org/docs/latest/user/actions/advanced-features/#cache)。工作流会安装 zstd；缓存不可用时正常构建。媒体编译默认使用可用 CPU，最多 8 个并发，可通过 `PIXHELF_MEDIA_JOBS` 覆盖；amd64 / arm64 缓存分别保存。
 
-已有模型层时，不再下载 Hugging Face 模型，也不再导出包含模型的本地 OCI 目录。同步到 Docker Hub 时，只传输目标仓库中缺少的层。
+镜像仓库的 `model-<模型完整修订号>-v1` 标签复用经 SHA-256 和长度校验的模型层；后续发布只追加应用层。`build-cache` 是多架构索引的内部暂存标签。两者均用于构建；清理后会重新生成。各目标仓库验证通过后才更新版本标签与 `latest`。
 
-## 查看耗时与验证
+## 日志与验证
 
-日志中的 `[timing]` 分别记录依赖安装、前端构建和压缩、媒体编译和压缩、Rust 测试与发布编译、UPX、独立运行检查、模型准备及镜像同步耗时。Cargo 的 HTML 报告通过 `local-build-timings` / `release-build-timings` 附件下载。
+`[timing]` 日志记录依赖、前端、媒体、Rust、压缩和镜像发布各阶段耗时。Cargo HTML 报告位于 `local-build-timings` / `release-build-timings` 附件。
 
 验证镜像发布逻辑需要 `crane` 0.21.7、Node.js 和 GNU tar：
 
-```sh
+```bash
 node packaging/check-publish.mjs /path/to/crane
 ```
 
-检查使用两个本机临时仓库和微型模型夹具，覆盖单 / 双架构发布、缓存命中时零模型下载、跨仓库摘要一致、同步失败时保留原标签，以及缓存身份和下载校验失败。不会连接生产镜像仓库。
+检查使用两个本机临时仓库和微型模型，覆盖单 / 双架构、缓存命中、跨仓库摘要、失败时保留原标签及下载校验。

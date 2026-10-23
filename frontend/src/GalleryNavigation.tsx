@@ -17,6 +17,7 @@ import {
   Upload,
   ScanSearch,
   UserRound,
+  Activity,
 } from "./icons";
 import { ToolbarPopover } from "./ToolbarPopover";
 import { imageFilterLabels } from "./GalleryFilters";
@@ -299,6 +300,9 @@ function NavigationGroups({ summary, activeSection, onChoose }: {
       {entry("storage", "外部存储")}
       {entry("trash", "回收站", management.trashCount)}
     </NavigationGroup>}
+    {!authentication.guest && <NavigationGroup label="系统">
+      {entry("system", "系统信息")}
+    </NavigationGroup>}
   </>;
 }
 
@@ -323,7 +327,7 @@ function NavigationButton({
       aria-current={active ? "page" : undefined}
       title={label}
     >
-      {section === "library" ? <Images size={17} /> : section === "favorites" ? <Heart size={17} /> : section === "trash" ? <Trash2 size={17} /> : section === "similar" ? <ScanSearch size={17} /> : section === "local" ? <HardDrive size={17} /> : section === "storage" ? <Cloud size={17} /> : <BookImage size={17} />}
+      {section === "library" ? <Images size={17} /> : section === "favorites" ? <Heart size={17} /> : section === "trash" ? <Trash2 size={17} /> : section === "similar" ? <ScanSearch size={17} /> : section === "local" ? <HardDrive size={17} /> : section === "storage" ? <Cloud size={17} /> : section === "system" ? <Activity size={17} /> : <BookImage size={17} />}
       <span className="album-copy">
         <strong>{label}</strong>
       </span>

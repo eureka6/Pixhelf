@@ -64,6 +64,17 @@ async fn authentication_works_while_initial_gallery_scan_is_pending() {
     )
     .await;
     assert_eq!(json_body(progress).await["backgroundComplete"], false);
+    let system = call(
+        &app,
+        request(Method::GET, "/api/system", Some(&cookie)),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(system.status(), StatusCode::OK);
+    assert_eq!(system.headers()[header::CACHE_CONTROL], "no-store");
+    let system = json_body(system).await;
+    assert_eq!(system["gallery"]["initializing"], true);
+    assert_eq!(system["jobs"]["backgroundComplete"], false);
     let home = call(
         &app,
         request(Method::GET, "/", Some(&cookie)),
