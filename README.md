@@ -6,10 +6,10 @@
 
 基于 Rust 的自托管图片与视频画廊，支持中文自然语言搜索与以图搜图。
 
-[![Release](https://img.shields.io/gitea/v/release/adminroot/pixhelf?gitea_url=https%3A%2F%2Fgit.pixhelf.com&style=flat-square&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI%2BPHBhdGggZmlsbD0id2hpdGUiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTEgMWg2bDggOC02IDYtOC04Wm0zIDJhMSAxIDAgMSAwIDAgMiAxIDEgMCAwIDAgMC0yWiIvPjwvc3ZnPg%3D%3D&label=Release&color=22c55e)](https://git.pixhelf.com/adminroot/pixhelf/releases)
+[![Release](https://img.shields.io/github/v/release/eureka6/Pixhelf?style=flat-square&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI%2BPHBhdGggZmlsbD0id2hpdGUiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTEgMWg2bDggOC02IDYtOC04Wm0zIDJhMSAxIDAgMSAwIDAgMiAxIDEgMCAwIDAgMC0yWiIvPjwvc3ZnPg%3D%3D&label=Release&color=22c55e)](https://github.com/eureka6/Pixhelf/releases)
 [![Docker pulls](https://img.shields.io/docker/pulls/eureka6688/pixhelf?style=flat-square&logo=docker&logoColor=white&label=Pulls)](https://hub.docker.com/r/eureka6688/pixhelf)
 [![Docker image size](https://img.shields.io/docker/image-size/eureka6688/pixhelf/latest?style=flat-square&logo=docker&logoColor=white&arch=amd64&label=Image%20size)](https://hub.docker.com/r/eureka6688/pixhelf/tags)
-[![Stars](https://img.shields.io/gitea/stars/adminroot/pixhelf?gitea_url=https%3A%2F%2Fgit.pixhelf.com&style=flat-square&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI%2BPHBhdGggZmlsbD0id2hpdGUiIGQ9Im04IDAgMi41IDUgNS41LjgtNCAzLjkuOSA1LjVMOCAxMi42IDMuMSAxNS4yIDQgOS43IDAgNS44IDUuNSA1WiIvPjwvc3ZnPg%3D%3D&label=Stars&color=eab308)](https://git.pixhelf.com/adminroot/pixhelf/stars)
+[![Stars](https://img.shields.io/github/stars/eureka6/Pixhelf?style=flat-square&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI%2BPHBhdGggZmlsbD0id2hpdGUiIGQ9Im04IDAgMi41IDUgNS41LjgtNCAzLjkuOSA1LjVMOCAxMi42IDMuMSAxNS4yIDQgOS43IDAgNS44IDUuNSA1WiIvPjwvc3ZnPg%3D%3D&label=Stars&color=eab308)](https://github.com/eureka6/Pixhelf)
 [![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?style=flat-square&logo=rust&logoColor=white)](./rust-toolchain.toml)
 
 [在线演示](https://pixhelf.com/) · [使用文档](./docs/README.md) · [Docker 部署](#部署)
